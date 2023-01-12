@@ -10,17 +10,12 @@ Ultrafinance is built as a decoupled web app, with the backend written in Rust a
 
 ### Server
 
-- [ ] Update function
-- [ ] Update user
-- [ ] Auth sessions
 - [ ] Delete account
 - [ ] Filter transactions endpoint
 - [ ] Filter trigger logs endpoints
 - [ ] Cron / auto process queue
 - [ ] Auto import transactions
-- [ ] Delete transaction
 - [ ] Transaction data enrichment
-- [ ] Test run function
 - [ ] Account balances + further metadata
 - Inbuilt triggers:
   - Email
@@ -33,9 +28,6 @@ Ultrafinance is built as a decoupled web app, with the backend written in Rust a
 
 ### Client
 
-- [ ] Authentication
 - [ ] Microcopy / NUX
 - [ ] Manually run trigger queue
-- [ ] Create trigger
-- [ ] Create function
 - [ ] Select & name accounts on link institution
