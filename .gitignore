@@ -1,0 +1,11 @@
+target/
+.env
+.build-cargo
+frontend/node_modules
+frontend/dist
+
+terraform/.terraform
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate*
+
+release.sh
