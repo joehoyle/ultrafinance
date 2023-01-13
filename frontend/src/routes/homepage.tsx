@@ -1,8 +1,10 @@
-import { Link } from "react-router-dom";
+import { Link, ScrollRestoration } from "react-router-dom";
+import Footer from "../components/Footer";
 
 export default function Homepage() {
 
 	return <>
+		<ScrollRestoration />
 		<div className="p-8 min-h-screen flex flex-col from-purple-700 to-purple-900 bg-gradient-to-t">
 			<div className="text-white flex justify-between">
 				<svg width="40px" height="40px" viewBox="0 0 300 300">
@@ -99,12 +101,13 @@ export default function Homepage() {
 				<img src={`${ import.meta.env.BASE_URL }screenshots/functions.png`} />
 			</div>
 		</div>
-		<footer className="bg-gray-50 p-8 grid md:grid-cols-3 text-sm text-gray-400">
-			<div>
-				<img src={`${ import.meta.env.BASE_URL }logo.svg`} width="40" className="" />
-				<h5 className=" text-gray-400 mt-4">&copy; Ultrafinance 2023</h5>
+		<div className="p-8 text-center mt-8">
+			<div className="p-8 text-center max-w-6xl mx-auto">
+				<h4 className="text-lg font-semibold text-purple-600">Work in the open</h4>
+				<h3 className="mt-2 text-3xl font-bold tracking-tight text-gray-900">Open Source</h3>
+				<p className="mx-auto my-14 max-w-prose text-xl text-gray-500">Ultrafinance is 100% open source, available on <a className="text-purple-600" href="https://github.com/joehoyle/ultrafinance/">GitHub</a>. Even the ultrafinance.app <a className="text-purple-600" href="https://github.com/joehoyle/ultrafinance/tree/main/terraform">infrastructure</a> is open source. Ultrafinance is built with Rust for maximum performance and safety. Patches and feedback welcome!</p>
 			</div>
-			<div>Ultrafinance is created by <a className="text-purple-600" href="https://joehoyle.co.uk">Joe Hoyle</a>. Please tweet me <a className="text-purple-600" href="https://twitter.com/joe_hoyle">@joe_hoyle</a> if you have any questions or suggestions. Ultrafinance is provided with no warrenty or guarantees.</div>
-		</footer>
+		</div>
+		<Footer />
 	</>
 }

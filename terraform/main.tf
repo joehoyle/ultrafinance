@@ -16,6 +16,14 @@ variable "cookie_secret" {
   type = string
 }
 
+variable "nordigen_secret_id" {
+  type = string
+}
+
+variable "nordigen_secret_key" {
+  type = string
+}
+
 provider "aws" {
   region  = "eu-central-1"
   profile = "sub_account"
@@ -88,6 +96,32 @@ resource "aws_internet_gateway" "default" {
   }
 }
 
+resource "aws_route53_zone" "ultrafinance" {
+  name = "ultrafinance.app"
+}
+
+resource "aws_route53_record" "root" {
+  zone_id = aws_route53_zone.ultrafinance.zone_id
+  name    = ""
+  type = "A"
+  alias {
+    name = aws_cloudfront_distribution.default.domain_name
+    zone_id = aws_cloudfront_distribution.default.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_route53_record" "www" {
+  zone_id = aws_route53_zone.ultrafinance.zone_id
+  name    = "www"
+  type = "A"
+  alias {
+    name = aws_cloudfront_distribution.default.domain_name
+    zone_id = aws_cloudfront_distribution.default.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
 resource "aws_ecs_cluster" "default" {
   name = "ultrafinance-production"
 }
@@ -131,6 +165,14 @@ resource "aws_ecs_task_definition" "web" {
         {
           name  = "SITE_URL"
           value = "https://ultrafinance.app"
+        },
+        {
+          name  = "NORDIGEN_SECRET_ID"
+          value = var.nordigen_secret_id
+        },
+        {
+          name  = "NORDIGEN_SECRET_KEY"
+          value = var.nordigen_secret_key
         },
       ],
       logConfiguration: {
@@ -387,4 +429,8 @@ resource "aws_acm_certificate" "local" {
   domain_name       = "ultrafinance.app"
   subject_alternative_names = [ "www.ultrafinance.app"]
   validation_method = "DNS"
+}
+
+output "deployed_revision" {
+  value = var.ecr_image_revision
 }

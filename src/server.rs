@@ -1,12 +1,12 @@
 use std::{fmt::Display, pin::Pin, path::PathBuf, str::FromStr};
 
 use actix_files::NamedFile;
-use actix_web::{web::{Data, block}, App, FromRequest, HttpRequest, HttpServer, HttpMessage, dev::Service, http::header};
+use actix_web::{web::{Data, block}, App, FromRequest, HttpRequest, HttpServer, dev::Service, http::header};
 
 use actix_cors::Cors;
 
 use actix_identity::{Identity, IdentityMiddleware, IdentityExt};
-use actix_session::{storage::CookieSessionStore, SessionMiddleware, SessionExt};
+use actix_session::{storage::CookieSessionStore, SessionMiddleware};
 
 use futures::FutureExt;
 use paperclip::actix::{
@@ -20,23 +20,15 @@ use dotenvy::dotenv;
 use serde::Serialize;
 
 use std::env;
-use ultrafinance::hash_api_key;
-use ultrafinance::DbPool;
+use crate::ultrafinance::{hash_api_key, is_dev, DbPool};
+use crate::schema;
+use crate::endpoints;
 
-use self::models::*;
-
-mod endpoints;
-
-pub mod deno;
-pub mod models;
-pub mod nordigen;
-pub mod schema;
-pub mod ultrafinance;
-pub mod utils;
+use crate::models::*;
 
 pub struct AppState {
-    db: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>,
-    url: String,
+    pub db: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>,
+    pub url: String,
 }
 
 impl FromRequest for User {
@@ -62,13 +54,13 @@ impl FromRequest for User {
                                     }).await.unwrap();
                                     user
                                 },
-                                Err(e) => {
+                                Err(_) => {
                                     Err(anyhow::anyhow!("Unable to parse id").into())
                                 },
                             };
                             user
                         },
-                        Err(e) => Err(anyhow::anyhow!("Unable to get id").into()),
+                        Err(_) => Err(anyhow::anyhow!("Unable to get id").into()),
                     };
                     match result {
                         Ok(user) => Ok(user),
@@ -183,7 +175,7 @@ async fn index(_req: HttpRequest) -> actix_web::Result<NamedFile> {
 }
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+pub async fn start() -> std::io::Result<()> {
     dotenv().ok();
     let manager = diesel::r2d2::ConnectionManager::<MysqlConnection>::new(
         env::var("DATABASE_URL").unwrap().as_str(),
@@ -201,17 +193,20 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let session_mw = SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
             // disable secure cookie for local testing
-            .cookie_secure(false)
-            .cookie_same_site(actix_web::cookie::SameSite::None)
+            .cookie_secure(!is_dev())
+            .cookie_same_site( match is_dev() {
+                true => actix_web::cookie::SameSite::None,
+                false => actix_web::cookie::SameSite::Strict,
+            } )
             .build();
 
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin(env::var("SITE_URL").unwrap().as_str())
             .allow_any_header()
             .allow_any_method()
             .supports_credentials()
             .max_age(3600);
-        App::new()
+         App::new()
             .service(
                 actix_files::Files::new("/frontend/dist/", "./frontend/dist/").show_files_listing(),
             )
@@ -220,6 +215,8 @@ async fn main() -> std::io::Result<()> {
                 let has_authorization_header = req.headers().get("Authorization").is_some();
                 srv.call(req).map(move |res| {
                     let res = res.map(|mut response| {
+                        let build_id = option_env!("BUILD_ID").unwrap_or("dev");
+                        response.headers_mut().insert(header::HeaderName::from_str("X-Build").unwrap(), header::HeaderValue::from_str(build_id).unwrap());
                         if identity.is_ok() || has_authorization_header {
                             response.headers_mut().insert(header::HeaderName::from_str("Cache-Control").unwrap(), header::HeaderValue::from_str("private, no-cache, must-revalidate").unwrap());
                         }

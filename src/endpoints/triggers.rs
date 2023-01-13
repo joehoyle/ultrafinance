@@ -6,7 +6,8 @@ use paperclip::actix::{api_v2_operation, web::Json};
 use serde::Deserialize;
 
 use crate::models::{Function, NewTrigger, Trigger, TriggerFilter, TriggerLog, TriggerQueue, User};
-use crate::{AppState, Error, ultrafinance};
+use crate::server::{AppState, Error};
+use crate::ultrafinance;
 
 use diesel::*;
 

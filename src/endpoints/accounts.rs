@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::models::{Account, NewAccount, UpdateAccount, Transaction, User};
 use crate::{nordigen, ultrafinance};
-use crate::{AppState, Error};
+use crate::server::{AppState, Error};
 
 #[derive(Deserialize, Apiv2Schema)]
 pub struct CreateAccounts {

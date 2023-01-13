@@ -5,7 +5,7 @@ use cli_table::Table;
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, env};
 
 #[derive(Deserialize, Table, Serialize, ts_rs::TS, Apiv2Schema)]
 #[ts(export)]
@@ -214,8 +214,8 @@ struct TransactionsResponse {
 impl Nordigen {
     pub fn new() -> Self {
         Self {
-            key: "919729de-d03f-4521-85c3-b2b80c79bbb7".into(),
-            secret: "a85525cac0672d408c95ad684acb2f513e4988441cd56c5fb05179b911bfecd9b00ebb22c3d673d9c1ebec3984f04098ab556da3b42f080e97201addbb4e1bde".into(),
+            key: env::var("NORDIGEN_SECRET_ID").unwrap().into(),
+            secret: env::var("NORDIGEN_SECRET_KEY").unwrap().into(),
             token: None,
             base_url: "https://ob.nordigen.com/api/v2".into(),
         }

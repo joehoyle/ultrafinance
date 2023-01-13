@@ -24,6 +24,7 @@ import MyAccount, { action as MyAccountAction } from './routes/my-account';
 import Login, { action as LoginAction } from './routes/login';
 import Signup, { action as SignupAction } from './routes/signup';
 import Homepage from './routes/homepage';
+import DataCompliance from './routes/data-compliance';
 
 const router = createBrowserRouter([
 	{
@@ -122,6 +123,10 @@ const router = createBrowserRouter([
 		path: '/signup',
 		element: <Signup />,
 		action: SignupAction,
+	},
+	{
+		path: '/data-compliance',
+		element: <DataCompliance />,
 	},
 ]);
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(

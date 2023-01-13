@@ -2,15 +2,10 @@
 name = "ultrafinance"
 version = "0.1.0"
 edition = "2021"
-default-run = "cli"
 
 [[bin]]
-name = "cli"
+name = "ultrafinance"
 path = "src/main.rs"
-
-[[bin]]
-name = "server"
-path = "src/server.rs"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

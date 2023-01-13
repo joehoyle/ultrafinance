@@ -6,7 +6,7 @@ use crate::models::{NordigenRequisition, User};
 use crate::nordigen;
 use crate::schema;
 use crate::ultrafinance::DbPool;
-use crate::{AppState, Error};
+use crate::server::{AppState, Error};
 
 #[api_v2_operation]
 pub async fn get_requisitions_institutions_endpoint(

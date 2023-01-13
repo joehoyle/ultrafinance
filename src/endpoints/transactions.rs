@@ -5,7 +5,7 @@ use paperclip::actix::{api_v2_operation, web::Json};
 use crate::models::{Transaction, User};
 use crate::schema;
 use crate::ultrafinance::DbPool;
-use crate::{AppState, Error};
+use crate::server::{AppState, Error};
 
 #[api_v2_operation]
 pub async fn get_transactions_endpoint(

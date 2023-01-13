@@ -1,5 +1,4 @@
 use actix_identity::Identity;
-use actix_web::dev::Payload;
 use actix_web::web::{self, block};
 use actix_web::{FromRequest, HttpMessage, HttpRequest};
 use paperclip::actix::Apiv2Schema;
@@ -8,7 +7,8 @@ use serde::Deserialize;
 
 use crate::models::{NewUser, UpdateUser, User};
 use crate::ultrafinance::verify_password;
-use crate::{schema, AppState, Error};
+use crate::server::{AppState, Error};
+use crate::schema;
 
 #[api_v2_operation]
 pub async fn get_me_endpoint(user: User) -> Result<Json<User>, Error> {

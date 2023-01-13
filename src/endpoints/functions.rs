@@ -4,9 +4,9 @@ use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web::Json};
 use serde::{Serialize, Deserialize};
 
-use crate::models::{Function, NewFunction, UpdateFunction, User, TriggerParams};
+use crate::models::{Function, NewFunction, UpdateFunction, User};
 use crate::schema;
-use crate::{AppState, Error};
+use crate::server::{AppState, Error};
 
 #[derive(Serialize, Apiv2Schema, ts_rs::TS)]
 #[ts(rename = "Function", export)]

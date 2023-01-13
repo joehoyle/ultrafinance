@@ -8,7 +8,7 @@ use nordigen::Nordigen;
 use std::env;
 use ultrafinance::DbConnection;
 
-use self::models::*;
+pub use self::models::*;
 
 pub mod deno;
 pub mod models;
@@ -16,6 +16,8 @@ pub mod nordigen;
 pub mod schema;
 pub mod ultrafinance;
 pub mod utils;
+pub mod server;
+pub mod endpoints;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -45,6 +47,8 @@ enum Commands {
     /// Triggers commands
     #[command(subcommand)]
     Triggers(TriggersCommand),
+    #[command(subcommand)]
+    Server(ServerCommand),
 }
 
 #[derive(Subcommand)]
@@ -162,6 +166,11 @@ enum TransactionsCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ServerCommand {
+    Start
+}
+
 fn establish_connection() -> DbConnection {
     // MysqlConnection::establish(env::var("DATABASE_URL").unwrap().as_str()).unwrap()
     let manager = diesel::r2d2::ConnectionManager::<MysqlConnection>::new(
@@ -245,7 +254,7 @@ fn main() -> anyhow::Result<()> {
             }
             AccountsCommand::PopulateAccountsDetails => {
                 let mut client = Nordigen::new();
-                let token = client.populate_token()?;
+                client.populate_token()?;
                 let mut con = establish_connection();
                 use diesel::*;
                 let accounts = Account::all().load(&mut con)?;
@@ -289,7 +298,7 @@ fn main() -> anyhow::Result<()> {
             },
             AccountsCommand::UpdateBalances {} => {
                 let mut client = Nordigen::new();
-                let token = client.populate_token()?;
+                client.populate_token()?;
                 let mut con = establish_connection();
                 use diesel::*;
                 let accounts = Account::all().load(&mut con)?;
@@ -466,7 +475,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             TransactionsCommand::Import { account_id } => {
-                let mut con = establish_connection();
+                // let mut con = establish_connection();
                 // use diesel::*;
                 // let account = schema::accounts::dsl::accounts
                 //     .find(account_id)
@@ -483,6 +492,11 @@ fn main() -> anyhow::Result<()> {
 
                 ultrafinance::create_transaction_trigger_queue(&transaction, &mut con)
             }
+        },
+        Commands::Server(command) => match command {
+            ServerCommand::Start => {
+                server::start().map_err(|e|anyhow::anyhow!(e.to_string()))
+            },
         },
     }
 }

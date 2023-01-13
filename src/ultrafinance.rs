@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::mpsc::channel;
 
+pub fn is_dev() -> bool {
+    env::var("IS_DEVELOPMENT").map(|v| v.eq("1") ).unwrap_or(false)
+}
 pub fn import_transactions(
     account: &Account,
     con: &mut DbConnection,
