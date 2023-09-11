@@ -9,7 +9,9 @@ export default function AccountsList({ accounts }: Props) {
 		{accounts.map(account => (
 			<li key={ account.id }>
 				<Link className="flex space-x-3 p-2 bg-white/50 border-b border-b-slate-50 font-medium text-xs text-slate-600 items-center hover:text-purple-900" to={`/accounts/${account.id}`}>
-					<img src={account.icon} className="w-6" />
+					{ account.icon &&
+						<img src={account.icon} className="w-6" />
+					}
 					<span className="flex flex-col">
 						<span>{account.name || '(untitled)'}</span>
 						<span className="text-gray-400">{ [ account.iban || account.bban || account.bic, account.owner_name, account.product, account.currency, account.details ].join( ' ' )}</span>

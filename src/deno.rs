@@ -1,12 +1,12 @@
 use crate::models::Function;
-use deno_runtime::deno_core::v8;
+use deno_runtime::{deno_core::{v8, ResolutionKind}, permissions::PermissionsContainer};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub struct FunctionRuntime {
     runtime: deno_runtime::worker::MainWorker,
-    main_module_id: i32,
+    main_module_id: usize,
 }
 
 impl FunctionRuntime {
@@ -31,15 +31,14 @@ impl FunctionRuntime {
         let create_web_worker_cb = std::sync::Arc::new(|_| {
             todo!("Web workers are not supported in the example");
         });
-        let web_worker_event_cb = std::sync::Arc::new(|_| {
-            todo!("Web workers are not supported in the example");
-        });
+        // let web_worker_event_cb = std::sync::Arc::new(|_| {
+        //     todo!("Web workers are not supported in the example");
+        // });
 
         let options = deno_runtime::worker::WorkerOptions {
             bootstrap: deno_runtime::BootstrapOptions {
                 args: vec![],
                 cpu_count: 1,
-                debug_flag: false,
                 enable_testing_features: false,
                 location: None,
                 no_color: false,
@@ -49,15 +48,18 @@ impl FunctionRuntime {
                 unstable: false,
                 user_agent: "ultrafinance".to_string(),
                 inspect: false,
+                log_level: deno_runtime::WorkerLogLevel::Error,
+                locale: "en-US".to_string(),
+                has_node_modules_dir: false,
+                maybe_binary_npm_command_name: None,
             },
             extensions: vec![],
             unsafely_ignore_certificate_errors: None,
-            root_cert_store: None,
             seed: None,
             source_map_getter: None,
             format_js_error_fn: None,
-            web_worker_preload_module_cb: web_worker_event_cb.clone(),
-            web_worker_pre_execute_module_cb: web_worker_event_cb,
+            // web_worker_preload_module_cb: web_worker_event_cb.clone(),
+            // web_worker_pre_execute_module_cb: web_worker_event_cb,
             create_web_worker_cb,
             maybe_inspector_server: None,
             should_break_on_first_statement: false,
@@ -66,21 +68,26 @@ impl FunctionRuntime {
             get_error_class_fn: None,
             cache_storage_dir: None,
             origin_storage_dir: None,
-            blob_store: deno_runtime::deno_web::BlobStore::default(),
+            blob_store: Arc::new(deno_runtime::deno_web::BlobStore::default()),
             broadcast_channel:
                 deno_runtime::deno_broadcast_channel::InMemoryBroadcastChannel::default(),
             shared_array_buffer_store: None,
             compiled_wasm_module_store: None,
             stdio: Default::default(),
+            startup_snapshot: None,
+            create_params: None,
+            root_cert_store_provider: None,
+            fs: Arc::new(deno_fs::RealFs),
+            should_wait_for_inspector_session: false,
         };
 
         let js_path = std::path::Path::new(&main_file);
-        let main_module = deno_runtime::deno_core::resolve_path(&js_path.to_string_lossy())?;
+        let main_module = deno_runtime::deno_core::resolve_path(&js_path.to_string_lossy(), std::path::Path::new("./"))?;
         let permissions = deno_runtime::permissions::Permissions::allow_all();
 
         let mut worker = deno_runtime::worker::MainWorker::bootstrap_from_options(
             main_module.clone(),
-            permissions,
+            PermissionsContainer::new( permissions),
             options,
         );
         let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -89,12 +96,12 @@ impl FunctionRuntime {
             let module_id = worker.preload_main_module(&main_module).await?;
             worker.evaluate_module(module_id).await?;
             worker.run_event_loop(false).await?;
-            Ok(module_id)
+            Ok(module_id as _)
         });
         let result = result?;
         Ok(Self {
             runtime: worker,
-            main_module_id: result,
+            main_module_id: result as _,
         })
     }
 
@@ -143,7 +150,7 @@ impl FunctionRuntime {
                         let recv = v8::undefined(scope).into();
 
                         // JSON decode params
-                        let json = deno_runtime::deno_core::JsRuntime::grab_global::<v8::Object>(
+                        let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(
                             scope, "JSON",
                         )
                         .unwrap();
@@ -186,7 +193,7 @@ impl FunctionRuntime {
             let result = self.runtime.js_runtime.resolve_value(promise).await?;
 
             let scope = &mut self.runtime.js_runtime.handle_scope();
-            let json = deno_runtime::deno_core::JsRuntime::grab_global::<v8::Object>(scope, "JSON")
+            let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON")
                 .unwrap();
             let json = v8::Global::new(scope, json);
 
@@ -232,7 +239,7 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
         &self,
         _specifier: &str,
         _referrer: &str,
-        _is_main: bool,
+        _kind: ResolutionKind,
     ) -> Result<deno_runtime::deno_core::ModuleSpecifier, anyhow::Error> {
         Ok(deno_runtime::deno_core::ModuleSpecifier::parse(_specifier)?)
     }
@@ -240,7 +247,7 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
     fn load(
         &self,
         module_specifier: &deno_runtime::deno_core::ModuleSpecifier,
-        _maybe_referrer: Option<deno_runtime::deno_core::ModuleSpecifier>,
+        _maybe_referrer: Option<&deno_runtime::deno_core::ModuleSpecifier>,
         _is_dyn_import: bool,
     ) -> std::pin::Pin<Box<deno_runtime::deno_core::ModuleSourceFuture>> {
         use deno_ast::MediaType;
@@ -256,7 +263,7 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
                 .to_file_path()
                 .map_err(|_| anyhow::anyhow!("Only file: URLs are supported."))?;
             let module_file = module_specifier.path().rsplitn(2, '/').next();
-            let media_type = MediaType::from(&path);
+            let media_type = MediaType::from_path(&path);
 
             let code = match module_file {
                 Some(filename) => files.get(filename),
@@ -264,7 +271,7 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
             }
             .ok_or(anyhow::anyhow!("File not found."))?;
 
-            let (module_type, should_transpile) = match MediaType::from(&path) {
+            let (module_type, should_transpile) = match MediaType::from_path(&path) {
                 MediaType::JavaScript | MediaType::Mjs | MediaType::Cjs => {
                     (ModuleType::JavaScript, false)
                 }
@@ -293,12 +300,9 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
             } else {
                 code.clone()
             };
-            let module = ModuleSource {
-                code: code.into_bytes().into_boxed_slice(),
-                module_type,
-                module_url_specified: module_specifier.to_string(),
-                module_url_found: module_specifier.to_string(),
-            };
+
+            let code = FastString::Owned(code.into_boxed_str());
+            let module = ModuleSource::new(module_type, code, &module_specifier);
 
             Ok(module)
         }

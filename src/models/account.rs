@@ -101,7 +101,7 @@ impl Account {
 
     pub fn update_balance(&mut self) -> Result<()> {
         let mut client = nordigen::Nordigen::new();
-        client.populate_token();
+        client.populate_token()?;
         let balances = client.get_account_balances(&self.nordigen_id)?;
         if balances.is_empty() {
             return Err(anyhow::anyhow!("No balances found"));

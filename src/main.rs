@@ -68,16 +68,30 @@ enum UsersCommand {
     },
 }
 
+#[derive(Clone, clap::ValueEnum)]
+enum ListFormat {
+    Json,
+    Table,
+}
+
 #[derive(Subcommand)]
 enum AccountsCommand {
     List,
     ListNordigenTransactions {
         #[arg(long)]
         account_id: i32,
+        #[arg(long, value_enum)]
+        format: ListFormat,
     },
     GetNordigenAccount {
         #[arg(long)]
         account_id: i32,
+    },
+    RenewNordigenRequisition {
+        #[arg(long)]
+        account_id: i32,
+        #[arg(long)]
+        requisition_id: i32,
     },
     GetNordigenAccountBalances {
         #[arg(long)]
@@ -116,6 +130,10 @@ enum RequisitionsCommand {
         user_id: i32,
     },
     Resume {
+        #[arg(long)]
+        requisition_id: i32,
+    },
+    Get {
         #[arg(long)]
         requisition_id: i32,
     },
@@ -227,7 +245,7 @@ fn main() -> anyhow::Result<()> {
                 print_stdout(my_accounts.with_title()).unwrap_or(());
                 Ok(())
             }
-            AccountsCommand::ListNordigenTransactions { account_id } => {
+            AccountsCommand::ListNordigenTransactions { account_id, format } => {
                 let mut client = Nordigen::new();
                 let mut con = establish_connection();
                 let token = client.populate_token()?;
@@ -237,7 +255,16 @@ fn main() -> anyhow::Result<()> {
                     .first(&mut con)?;
                 let transactions =
                     client.get_account_transactions(&account.nordigen_id, &None, &None)?;
-                print_stdout(transactions.with_title()).unwrap_or(());
+
+                match format {
+                    ListFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&transactions)?);
+                    },
+                    ListFormat::Table => {
+                        print_stdout(transactions.with_title()).unwrap_or(());
+                    },
+                };
+
                 Ok(())
             }
             AccountsCommand::GetNordigenAccount { account_id } => {
@@ -250,6 +277,31 @@ fn main() -> anyhow::Result<()> {
                 let account = client.get_account_details(&account.nordigen_id)?;
 
                 dbg!(account);
+                Ok(())
+            }
+            AccountsCommand::RenewNordigenRequisition { account_id, requisition_id } => {
+                let mut client = Nordigen::new();
+                client.populate_token()?;
+                let mut con = establish_connection();
+                use self::schema::nordigen_requisitions::dsl::*;
+                let db_requisition: NordigenRequisition =
+                    nordigen_requisitions.find(requisition_id).first(&mut con)?;
+                let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
+
+                if &requisition.status != "LN" {
+                    bail!("Requisition not yet completed.");
+                }
+
+                if requisition.accounts.len() > 1 {
+                    bail!("More than 1 account found for requisition.");
+                }
+
+                let mut account: Account = schema::accounts::dsl::accounts.find(account_id).first(&mut con)?;
+                account.nordigen_id = requisition.accounts[0].clone();
+                account.update(&mut con)?;
+
+                println!("Account {} updated.", &account_id);
+
                 Ok(())
             }
             AccountsCommand::PopulateAccountsDetails => {
@@ -391,6 +443,19 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 Ok(())
+            },
+            RequisitionsCommand::Get { requisition_id } => {
+                let mut client = Nordigen::new();
+                client.populate_token()?;
+                let mut con = establish_connection();
+                use self::schema::nordigen_requisitions::dsl::*;
+                let db_requisition: NordigenRequisition =
+                    nordigen_requisitions.find(requisition_id).first(&mut con)?;
+                let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
+
+                dbg!(requisition);
+
+                Ok(())
             }
         },
         Commands::Triggers(command) => match command {
@@ -475,13 +540,15 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             TransactionsCommand::Import { account_id } => {
-                // let mut con = establish_connection();
-                // use diesel::*;
-                // let account = schema::accounts::dsl::accounts
-                //     .find(account_id)
-                //     .first(&mut con)?;
-                // let imported_transactions = ultrafinance::import_transactions(account, &mut con)?;
-                // println!("imported {} transactions.", imported_transactions.len());
+                let mut con = establish_connection();
+                use diesel::*;
+
+                 let account: Account = schema::accounts::dsl::accounts
+                    .find(account_id)
+                    .first(&mut con)?;
+
+                let imported_transactions = ultrafinance::import_transactions(&account, &mut con)?;
+                println!("imported {} transactions.", imported_transactions.len());
                 Ok(())
             }
             TransactionsCommand::CreateTrigger { id } => {

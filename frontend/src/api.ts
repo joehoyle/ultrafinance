@@ -17,7 +17,7 @@ import { NewUser } from '../../bindings/NewUser';
 import { TestFunction } from '../../bindings/TestFunction';
 import { UpdateTrigger } from '../../bindings/UpdateTrigger';
 
-const baseUrl = `${import.meta.env.VITE_SITE_URL}/api/v1`;
+const baseUrl = `${import.meta.env.VITE_BACKEND_URL}/api/v1`;
 
 export async function getInstitutions(): Promise<Institution[]> {
 	return await request( '/requisitions/institutions' ) as Institution[];

@@ -1,7 +1,5 @@
-import { useState } from "react";
 import { Form, Link, redirect, useLoaderData } from "react-router-dom";
-import { Trigger } from "../../../bindings/Trigger";
-import { UpdateFunction } from "../../../bindings/UpdateFunction";
+import { UpdateTrigger } from "../../../bindings/UpdateTrigger";
 import { deleteTrigger, getFunctions, getTrigger, updateTrigger } from "../api";
 import Button from "../components/Button";
 import PageHeader from "../components/PageHeader";
@@ -14,9 +12,11 @@ export async function action({ request, params }: { request: Request, params: Ro
 	switch ( request.method ) {
 		case 'POST':
 			const formData = await request.formData();
-			const data = FormDataToJson(formData);
-			data.function_id = Number( data.function_id );
-			return updateTrigger(params.id, data as unknown as UpdateFunction);
+			const data = FormDataToJson<UpdateTrigger>(formData);
+			return updateTrigger(params.id, {
+				...data,
+				function_id: Number( data.function_id ),
+			} as unknown as UpdateTrigger);
 		case 'DELETE': {
 			await deleteTrigger(params.id);
 			return redirect('/triggers');

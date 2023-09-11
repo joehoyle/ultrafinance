@@ -34,7 +34,7 @@ function update(data, keys, value) {
 }
 
 // @ts-ignore
-export default function FormDataToJson(formData: FormData): any {
+export default function FormDataToJson<T>(formData: FormData): { [K in keyof T]: T[K] extends Record<A, B> ? Record<A, B> : string | null } {
 	return Array.from(formData.entries()).reduce((data, [field, value]) => {
 		let [_, prefix, keys] = field.match(/^([^\[]+)((?:\[[^\]]*\])*)/);
 

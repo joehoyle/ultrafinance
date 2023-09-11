@@ -1,13 +1,16 @@
 import { Form, useRouteLoaderData } from "react-router-dom";
+import { UpdateUser } from "../../../bindings/UpdateUser";
 import { User } from "../../../bindings/User";
 import { updateMe } from "../api";
 import Button from "../components/Button";
 import Input from "../components/forms/Input";
 import PageHeader from "../components/PageHeader";
+import FormDataToJson from "../utils/FormDataToJson";
 
 export async function action({ request }: { request: Request }) {
 	const formData = await request.formData();
-	return updateMe(Object.fromEntries(formData.entries()));
+	const data = FormDataToJson<UpdateUser>(formData);
+	return updateMe(data);
 }
 
 export default function MyAccount() {

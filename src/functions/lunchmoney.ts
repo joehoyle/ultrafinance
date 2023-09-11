@@ -21,6 +21,7 @@ type Transaction = {
     debtorName?: string,
     remittanceInformation?: string,
     id: number,
+    externalId: string,
 }
 
 type Params = {
@@ -39,7 +40,7 @@ export default async function ( params: Params, transaction: Transaction ) {
             payee: transaction.creditorName || transaction.debtorName || '',
             notes: transaction.remittanceInformation || '',
             status: 'cleared',
-            external_id: String( transaction.id ),
+            external_id: transaction.externalId,
         }
     ], true, true, true, false );
 

@@ -1,8 +1,17 @@
-import { Link, ScrollRestoration } from "react-router-dom";
+import { Suspense } from "react";
+import { Await, defer, Link, ScrollRestoration, useLoaderData } from "react-router-dom";
+import { User } from "../../../bindings/User";
+import { getMe } from "../api";
 import Footer from "../components/Footer";
 
-export default function Homepage() {
+export function loader() {
+	return defer({
+		user: getMe(),
+	})
+}
 
+export default function Homepage() {
+	const { user } = useLoaderData() as ReturnType<typeof loader>;
 	return <>
 		<ScrollRestoration />
 		<div className="p-8 min-h-screen flex flex-col from-purple-700 to-purple-900 bg-gradient-to-t">
@@ -17,18 +26,29 @@ export default function Homepage() {
 							<polygon points="0 4.54747351e-13 50.3355705 4.54747351e-13 139.563949 185.944453 143.959732 300"></polygon>
 						</clipPath>
 					</defs>
-					<rect clip-path="url(#Group)" id="Rectangle" fill="currentColor" x="0" y="0" width="300" height="300"></rect>
+					<rect clipPath="url(#Group)" id="Rectangle" fill="currentColor" x="0" y="0" width="300" height="300"></rect>
 				</svg>
 
 				<div className="flex space-x-4 items-center font-semibold text-white">
-					<Link className="p-2" to="/login">Log In</Link>
-					<Link className="p-2 px-4 bg-white/20 rounded-lg" to="/signup">Sign Up</Link>
+					<Suspense>
+						<Await resolve={ user } errorElement={
+							<>
+								<Link className="p-2" to="/login">Log In</Link>
+								<Link className="p-2 px-4 bg-white/20 rounded-lg" to="/signup">Sign Up</Link>
+							</>
+						}>
+							{ _ => <Link to="/accounts">Dashboard</Link>}
+						</Await>
+					</Suspense>
 				</div>
 			</div>
 			<div className="grid md:grid-cols-2 my-auto">
 				<div className="">
-					<h1 className="text-2xl font-bold tracking-tigh text-purple-400">Ultrafinance</h1>
-					<h2 className="text-6xl text-white font-bold tracking-tight">Personal DevOps for <br />
+					<div className="flex items-center space-x-4">
+						<h1 className="text-2xl font-bold tracking-tigh text-purple-400">Ultrafinance</h1>
+						<span className="rounded-full bg-gradient-to-r from-teal-500 to-cyan-600 px-3 py-0.5 text-sm text-white font-semibold outline-white/10 outline-4 outline">Early Alpha</span>
+					</div>
+					<h2 className="text-6xl text-white font-bold tracking-tight mt-6">Personal DevOps for <br />
 						<span className="bg-gradient-to-r from-teal-200 to-cyan-400 bg-clip-text pb-3 text-transparent">your finances</span>.</h2>
 					<p className="mt-8 text-base text-purple-200/80 sm:text-xl lg:text-lg xl:text-xl">Ultrafinance allows you to route your financial transactions, accounts and assets to automations and custom functions. Ultrafinance is built for power-users. Even write code in TypeScript &amp; JavaScript to get ultimate flexibility in automation.</p>
 				</div>
@@ -41,7 +61,7 @@ export default function Homepage() {
 			<img src={`${ import.meta.env.BASE_URL }screenshots/accounts.png`} />
 		</div>
 		<div className="p-8 text-center max-w-6xl mx-auto">
-			<h4 className="text-lg font-semibold text-purple-600">Automations read to go</h4>
+			<h4 className="text-lg font-semibold text-purple-600">Automations ready to go</h4>
 			<h3 className="mt-2 text-3xl font-bold tracking-tight text-gray-900">Integrate with pre-existing destinations</h3>
 			<div className="grid lg:grid-cols-3 mt-20 gap-8">
 				<div className="pt-6">
@@ -49,8 +69,8 @@ export default function Homepage() {
 						<div className="-mt-6">
 							<div>
 								<span className="inline-flex items-center justify-center rounded-md bg-gradient-to-r from-purple-500 to-purple-600 p-3 shadow-lg">
-									<svg className="h-6 w-6 text-white" x-description="Heroicon name: outline/cloud-arrow-up" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-										<path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"></path>
+									<svg className="h-6 w-6 text-white" x-description="Heroicon name: outline/cloud-arrow-up" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" aria-hidden="true">
+										<path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"></path>
 									</svg>
 								</span>
 							</div>

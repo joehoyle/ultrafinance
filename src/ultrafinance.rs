@@ -75,7 +75,7 @@ pub fn import_transactions(
                 .clone(),
             currency_exchange_rate: transaction.currencyExchange.clone().map(|c|c.exchangeRate),
             currency_exchange_source_currency: transaction.currencyExchange.clone().map(|c|c.sourceCurrency),
-            currency_exchange_target_currency: transaction.currencyExchange.clone().map(|c|c.targetCurrency),
+            currency_exchange_target_currency: transaction.currencyExchange.clone().and_then(|c|c.targetCurrency),
             account_id: account.id,
             user_id: account.user_id,
             proprietary_bank_transaction_code: transaction.proprietaryBankTransactionCode,

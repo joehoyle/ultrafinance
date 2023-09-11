@@ -23,13 +23,14 @@ import Logs, { loader as LogsLoader } from './routes/logs';
 import MyAccount, { action as MyAccountAction } from './routes/my-account';
 import Login, { action as LoginAction } from './routes/login';
 import Signup, { action as SignupAction } from './routes/signup';
-import Homepage from './routes/homepage';
+import Homepage, { loader as HomepageLoader } from './routes/homepage';
 import DataCompliance from './routes/data-compliance';
 
 const router = createBrowserRouter([
 	{
 		path: "/",
 		element: <Homepage />,
+		loader: HomepageLoader,
 	},
 	{
 		element: <App />,

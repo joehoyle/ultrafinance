@@ -58,7 +58,7 @@ pub struct AccessToken {
     refresh_expires: i64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Serialize)]
 #[serde(untagged)]
 pub enum BankAccount {
     Iban {
@@ -91,7 +91,7 @@ impl std::fmt::Display for BankAccount {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Serialize)]
 pub struct Amount {
     pub currency: String,
     pub amount: String,
@@ -103,12 +103,12 @@ impl Display for Amount {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 #[allow(non_snake_case)]
 pub struct CurrencyExchange {
     pub exchangeRate: String,
     pub sourceCurrency: String,
-    pub targetCurrency: String,
+    pub targetCurrency: Option<String>,
 }
 
 impl std::fmt::Display for CurrencyExchange {
@@ -116,12 +116,12 @@ impl std::fmt::Display for CurrencyExchange {
         write!(
             f,
             "{} -> {} {}",
-            self.sourceCurrency, self.targetCurrency, self.exchangeRate
+            self.sourceCurrency, self.targetCurrency.as_ref().unwrap_or(&"".to_string()), self.exchangeRate
         )
     }
 }
 
-#[derive(Deserialize, Table, Debug)]
+#[derive(Deserialize, Table, Debug, Serialize)]
 #[allow(non_snake_case)]
 pub struct Transaction {
     #[table(title = "ID", display_fn = "display_option")]
@@ -217,7 +217,7 @@ impl Nordigen {
             key: env::var("NORDIGEN_SECRET_ID").unwrap().into(),
             secret: env::var("NORDIGEN_SECRET_KEY").unwrap().into(),
             token: None,
-            base_url: "https://ob.nordigen.com/api/v2".into(),
+            base_url: "https://ob.gocardless.com/api/v2".into(),
         }
     }
 
@@ -306,7 +306,7 @@ impl Nordigen {
                 Some(&args),
             )?
             .text()?;
-
+        println!("{}", &transactions);
         let transactions: TransactionsResponse = serde_json::from_str(transactions.as_str())?;
         let transactions = transactions
             .transactions
@@ -348,6 +348,7 @@ impl Nordigen {
         let mut args: HashMap<String, String> = HashMap::new();
         args.insert("redirect".into(), redirect.clone());
         args.insert("institution_id".into(), institution_id.clone());
+        args.insert("account_selection".into(), "true".into());
 
         self.request(reqwest::Method::POST, "/requisitions/", Some(&args))?
             .json::<Requisition>()
@@ -399,15 +400,14 @@ impl Nordigen {
             Ok(r) => {
                 if r.status().is_success() {
                     return Ok(r);
-                } else {
-                    let error = r.json::<ErrorResponse>()?;
-                    return Err(anyhow::Error::msg(format!(
-                        "{}. {} {}",
-                        error.summary.unwrap_or("No summary".into()),
-                        error.detail.unwrap_or("".into()),
-                        error.status_code.unwrap_or(0)
-                    )));
                 }
+                let error = r.json::<ErrorResponse>()?;
+                Err(anyhow::Error::msg(format!(
+                    "{}. {} {}",
+                    error.summary.unwrap_or("No summary".into()),
+                    error.detail.unwrap_or("".into()),
+                    error.status_code.unwrap_or(0)
+                )))
             }
             Err(e) => Err(e.into()),
         }
