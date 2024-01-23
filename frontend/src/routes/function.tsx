@@ -1,10 +1,11 @@
 import React from 'react';
-import { Form, Link, redirect, useLoaderData } from "react-router-dom";
+import { Form, Link, Params, redirect, useLoaderData } from "react-router-dom";
 import { Function } from "../../../bindings/Function";
 import { deleteFunction, getFunction, testFunction, updateFunction } from "../api";
 import Button from "../components/Button";
 import PageHeader from "../components/PageHeader";
 import Editor from "@monaco-editor/react";
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
 import { UpdateFunction } from "../../../bindings/UpdateFunction";
 import { FormEvent, useRef, useState } from "react";
 import Input from "../components/forms/Input";
@@ -12,30 +13,31 @@ import FunctionParamField from '../components/FunctionParamField';
 import FormDataToJson from '../utils/FormDataToJson';
 import ErrorMessage from '../components/ErrorMessage';
 import Textarea from '../components/forms/Textarea';
+import { TestFunction } from '../../../bindings/TestFunction';
 
-type RouteParams = { id: number }
+type RouteParams = Params;
 
 export async function action({ request, params }: { request: Request, params: RouteParams }) {
 	switch (request.method) {
 		case 'POST':
 			const formData = await request.formData();
-			return updateFunction(params.id, Object.fromEntries(formData.entries()) as unknown as UpdateFunction);
+			return updateFunction(Number(params.id), Object.fromEntries(formData.entries()) as unknown as UpdateFunction);
 		case 'DELETE': {
-			await deleteFunction(params.id);
+			await deleteFunction(Number(params.id));
 			return redirect('/functions');
 		}
 	}
 }
 
-export async function loader({ params }: { params: { id: number } }) {
+export async function loader({ params }: { params: RouteParams }) {
 	return {
-		_function: await getFunction(params.id)
+		_function: await getFunction(Number(params.id!))
 	}
 }
 
 export default function FunctionSingle() {
 	const { _function } = useLoaderData() as { _function: Function };
-	const editorRef = useRef(null);
+	const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 	const sourceRef = useRef<HTMLInputElement>(null);
 	const [isShowingTestRun, setIsShowingTestRun] = useState(false);
 	const [isRunningTest, setIsRunningTest] = useState(false);
@@ -57,7 +59,7 @@ export default function FunctionSingle() {
 		e.preventDefault();
 		setIsRunningTest(true);
 		const formData = new FormData(e.target as HTMLFormElement);
-		const data = FormDataToJson(formData);
+		const data = FormDataToJson<TestFunction>(formData);
 		try {
 			const result = await testFunction(_function.id, {
 				params: JSON.stringify(data.params),
@@ -70,7 +72,7 @@ export default function FunctionSingle() {
 		setIsRunningTest(false);
 	}
 
-	function handleEditorDidMount(editor: any) {
+	function handleEditorDidMount(editor: monaco.editor.IStandaloneCodeEditor) {
 		editorRef.current = editor;
 	}
 	function onSubmit(event: FormEvent) {

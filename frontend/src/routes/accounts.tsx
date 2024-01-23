@@ -32,8 +32,15 @@ export default function Accounts() {
 		</PageHeader>
 		<main className="flex-grow p-10">
 			<Suspense fallback={<LoadingList />}>
-				<Await resolve={ accounts }>
-					{ accounts => <AccountsList accounts={accounts} /> }
+				<Await resolve={accounts}>
+					{(accounts: Account[]) => {
+						const total_balance = accounts.reduce((total, account) => total + Number(account.balance), 0);
+						return (
+							<div>
+								<AccountsList accounts={accounts} />
+							</div>
+						)
+					} }
 				</Await>
 			</Suspense>
 		</main>

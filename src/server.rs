@@ -250,7 +250,12 @@ pub async fn start() -> std::io::Result<()> {
                     .service(
                         web::resource("/accounts/{account_id}")
                             .route(web::get().to(endpoints::accounts::get_account_endpoint))
-                            .route(web::post().to(endpoints::accounts::update_account_endpoint)),
+                            .route(web::post().to(endpoints::accounts::update_account_endpoint))
+                            .route(web::delete().to(endpoints::accounts::delete_account_endpoint)),
+                    )
+                    .service(
+                        web::resource("/accounts/{account_id}/relink")
+                            .route(web::post().to(endpoints::accounts::relink_account_endpoint)),
                     )
                     .service(
                         web::resource("/accounts/{account_id}/sync")

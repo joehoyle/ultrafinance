@@ -1,11 +1,14 @@
-use crate::utils::display_option;
+use crate::{
+    accounts::{Amount, SourceTransaction},
+    utils::display_option,
+};
 use anyhow::anyhow;
 use chrono::{naive::NaiveDate, DateTime, Utc};
 use cli_table::Table;
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fmt::Display, env};
+use std::{collections::HashMap, env};
 
 #[derive(Deserialize, Table, Serialize, ts_rs::TS, Apiv2Schema)]
 #[ts(export)]
@@ -72,8 +75,6 @@ pub enum BankAccount {
         masked_pan: String,
     },
     Empty {},
-    // pub iban: String,
-    // pub bban: String,
 }
 
 impl std::fmt::Display for BankAccount {
@@ -91,18 +92,6 @@ impl std::fmt::Display for BankAccount {
     }
 }
 
-#[derive(Deserialize, Debug, Serialize)]
-pub struct Amount {
-    pub currency: String,
-    pub amount: String,
-}
-
-impl Display for Amount {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}", self.amount, self.currency)
-    }
-}
-
 #[derive(Deserialize, Debug, Clone, Serialize)]
 #[allow(non_snake_case)]
 pub struct CurrencyExchange {
@@ -116,7 +105,9 @@ impl std::fmt::Display for CurrencyExchange {
         write!(
             f,
             "{} -> {} {}",
-            self.sourceCurrency, self.targetCurrency.as_ref().unwrap_or(&"".to_string()), self.exchangeRate
+            self.sourceCurrency,
+            self.targetCurrency.as_ref().unwrap_or(&"".to_string()),
+            self.exchangeRate
         )
     }
 }
@@ -152,7 +143,7 @@ pub struct Transaction {
     pub currencyExchange: Option<CurrencyExchange>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 #[allow(non_snake_case)]
 pub struct Account {
     pub id: String,
@@ -182,18 +173,12 @@ struct AccountResponse {
     account: AccountDetails,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[allow(non_snake_case)]
 pub struct Balance {
-    pub balanceAmount: BalanceAmount,
+    pub balanceAmount: Amount,
     pub balanceType: String,
     pub referenceDate: Option<chrono::NaiveDate>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct BalanceAmount {
-    pub amount: String,
-    pub currency: String,
 }
 
 #[derive(Deserialize)]
@@ -262,7 +247,7 @@ impl Nordigen {
                 None,
             )?
             .text()?;
-
+        dbg!(json.as_str());
         let response = serde_json::from_str::<AccountResponse>(json.as_str())?;
         Ok(response.account)
     }
@@ -348,7 +333,7 @@ impl Nordigen {
         let mut args: HashMap<String, String> = HashMap::new();
         args.insert("redirect".into(), redirect.clone());
         args.insert("institution_id".into(), institution_id.clone());
-        args.insert("account_selection".into(), "true".into());
+        // args.insert("account_selection".into(), "true".into());
 
         self.request(reqwest::Method::POST, "/requisitions/", Some(&args))?
             .json::<Requisition>()
@@ -422,5 +407,80 @@ impl Nordigen {
         let token = token.json::<AccessToken>()?;
         self.token = Some(token.clone());
         Ok(token)
+    }
+}
+
+impl From<Transaction> for SourceTransaction {
+    fn from(transaction: Transaction) -> Self {
+        Self {
+            id: transaction.transactionId.unwrap(),
+            creditor_name: transaction.creditorName,
+            debtor_name: transaction.debtorName,
+            remittance_information: transaction.remittanceInformationUnstructured,
+            booking_date: transaction.bookingDate.unwrap(),
+            booking_datetime: transaction.bookingDateTime.map(|d| d.naive_utc()),
+            transaction_amount: transaction.transactionAmount.unwrap(),
+            currency_exchange_rate: transaction
+                .currencyExchange
+                .as_ref()
+                .map(|c| c.exchangeRate.clone()),
+            proprietary_bank_transaction_code: transaction.proprietaryBankTransactionCode,
+            currency_exchange_source_currency: transaction
+                .currencyExchange
+                .as_ref()
+                .map(|c| c.sourceCurrency.clone()),
+            currency_exchange_target_currency: transaction
+                .currencyExchange
+                .as_ref()
+                .and_then(|c| c.targetCurrency.clone()),
+        }
+    }
+}
+
+impl crate::accounts::SourceAccount for Account {
+    fn details(&self) -> Result<crate::accounts::SourceAccountDetails, anyhow::Error> {
+        let mut client = Nordigen::new();
+        client.populate_token()?;
+        let account = client.get_account(&self.id)?;
+        let account_details = client.get_account_details(&self.id)?;
+        let institution = client.get_institution(&account.institution_id)?;
+
+        let number = account_details
+            .iban
+            .or(account_details.bban)
+            .or(account_details.bic)
+            .or(account_details.pan)
+            .or(account_details.maskedPan);
+
+        Ok(crate::accounts::SourceAccountDetails {
+            id: self.id.clone(),
+            number: number.unwrap_or("".into()),
+            currency: account_details.currency,
+            details: account_details.details.unwrap_or("".into()),
+            owner_name: account_details.ownerName,
+            icon: Some(institution.logo),
+            institution_name: institution.name,
+        })
+    }
+
+    fn balance(&self) -> Result<crate::accounts::Amount, anyhow::Error> {
+        let mut client = Nordigen::new();
+        client.populate_token().unwrap();
+        Ok(client
+            .get_account_balances(&self.id)?
+            .first().ok_or(anyhow!("Account not found"))?
+            .balanceAmount
+            .clone())
+    }
+
+    fn transactions(
+        &self,
+        date_from: &Option<NaiveDate>,
+        date_to: &Option<NaiveDate>,
+    ) -> Result<Vec<SourceTransaction>, anyhow::Error> {
+        let mut client = Nordigen::new();
+        client.populate_token().unwrap();
+        let transactions = client.get_account_transactions(&self.id, date_from, date_to)?;
+        Ok(transactions.into_iter().map(|t| t.into()).collect())
     }
 }

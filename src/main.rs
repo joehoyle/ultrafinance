@@ -8,6 +8,8 @@ use nordigen::Nordigen;
 use std::env;
 use ultrafinance::DbConnection;
 
+use crate::accounts::{get_source_account, SourceAccount};
+
 pub use self::models::*;
 
 pub mod deno;
@@ -18,6 +20,8 @@ pub mod ultrafinance;
 pub mod utils;
 pub mod server;
 pub mod endpoints;
+pub mod accounts;
+pub mod ntropy;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -48,6 +52,8 @@ enum Commands {
     #[command(subcommand)]
     Triggers(TriggersCommand),
     #[command(subcommand)]
+    Merchants(MerchantsCommand),
+    #[command(subcommand)]
     Server(ServerCommand),
 }
 
@@ -77,6 +83,12 @@ enum ListFormat {
 #[derive(Subcommand)]
 enum AccountsCommand {
     List,
+    ListSourceTransactions {
+        #[arg(long)]
+        account_id: i32,
+        #[arg(long, value_enum)]
+        format: ListFormat,
+    },
     ListNordigenTransactions {
         #[arg(long)]
         account_id: i32,
@@ -91,14 +103,18 @@ enum AccountsCommand {
         #[arg(long)]
         account_id: i32,
         #[arg(long)]
-        requisition_id: i32,
-    },
-    GetNordigenAccountBalances {
-        #[arg(long)]
-        account_id: i32,
+        requisition_id: Option<String>,
     },
     PopulateAccountsDetails,
     UpdateBalances,
+    Add {
+        #[arg(long)]
+        user_id: i32,
+        #[arg(long, name = "type")]
+        type_: String,
+        #[arg(long)]
+        config: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -161,6 +177,11 @@ enum TriggersCommand {
 }
 
 #[derive(Subcommand)]
+enum MerchantsCommand {
+    List,
+}
+
+#[derive(Subcommand)]
 enum TriggersQueueCommand {
     List,
     Process,
@@ -182,6 +203,11 @@ enum TransactionsCommand {
         #[arg(long)]
         id: i32,
     },
+    Enrich {
+        #[arg(long)]
+        id: i32,
+    },
+    AssignMerchants {},
 }
 
 #[derive(Subcommand)]
@@ -238,6 +264,18 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Accounts(command) => match command {
+            AccountsCommand::Add { user_id, type_, config } => {
+                let source_account = get_source_account(type_, config).ok_or(anyhow::anyhow!("No source found"))?;
+
+                let mut new_account = NewAccount::from(source_account.details()?);
+                new_account.user_id = *user_id;
+                new_account.config = Some(config.clone());
+                new_account.account_type = type_.clone();
+                let mut con = establish_connection();
+                let account = new_account.create(&mut con)?;
+                dbg!(account);
+                Ok(())
+            },
             AccountsCommand::List => {
                 let mut con = establish_connection();
                 use self::schema::accounts::dsl::*;
@@ -245,11 +283,27 @@ fn main() -> anyhow::Result<()> {
                 print_stdout(my_accounts.with_title()).unwrap_or(());
                 Ok(())
             }
+            AccountsCommand::ListSourceTransactions { account_id, format } => {
+                let mut con = establish_connection();
+                let account: Account = schema::accounts::dsl::accounts
+                    .find(account_id)
+                    .first(&mut con)?;
+                let source = account.source()?;
+                let transactions = source.transactions(&None, &None)?;
+                match format {
+                    ListFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&transactions)?);
+                    },
+                    ListFormat::Table => {
+                        print_stdout(transactions.with_title()).unwrap_or(());
+                    },
+                };
+                Ok(())
+            }
             AccountsCommand::ListNordigenTransactions { account_id, format } => {
                 let mut client = Nordigen::new();
                 let mut con = establish_connection();
-                let token = client.populate_token()?;
-                dbg!(token);
+                let _token = client.populate_token()?;
                 let account: Account = schema::accounts::dsl::accounts
                     .find(account_id)
                     .first(&mut con)?;
@@ -274,33 +328,54 @@ fn main() -> anyhow::Result<()> {
                 let account: Account = schema::accounts::dsl::accounts
                     .find(account_id)
                     .first(&mut con)?;
-                let account = client.get_account_details(&account.nordigen_id)?;
 
-                dbg!(account);
+                let _nordigen_account = client.get_account(&account.nordigen_id)?;
+                let _account_details = client.get_account_details(&account.nordigen_id)?;
                 Ok(())
             }
             AccountsCommand::RenewNordigenRequisition { account_id, requisition_id } => {
                 let mut client = Nordigen::new();
                 client.populate_token()?;
                 let mut con = establish_connection();
-                use self::schema::nordigen_requisitions::dsl::*;
-                let db_requisition: NordigenRequisition =
-                    nordigen_requisitions.find(requisition_id).first(&mut con)?;
-                let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
+                let account: Account = schema::accounts::dsl::accounts
+                    .find(account_id)
+                    .first(&mut con)?;
+
+                let nordigen_account = client.get_account(&account.nordigen_id)?;
+                let requisition = match requisition_id {
+                    Some(requisition_id) => client.get_requisition(&requisition_id)?,
+                    None => {
+                        let requisition = client.create_requisition(&"oob://".to_owned(), &nordigen_account.institution_id)?;
+                        println!("Visit {} to complete setup", requisition.link );
+                        let _input: String = dialoguer::Input::new().with_prompt("Press return when completed.").interact_text()?;
+                        client.get_requisition(&requisition.id)?
+
+                    },
+                };
 
                 if &requisition.status != "LN" {
                     bail!("Requisition not yet completed.");
                 }
 
-                if requisition.accounts.len() > 1 {
-                    bail!("More than 1 account found for requisition.");
+                let account: Account = schema::accounts::dsl::accounts.find(account_id).first(&mut con)?;
+
+                for account_id in requisition.accounts {
+                    let nordigen_account = client.get_account(&account_id)?;
+                    let details = nordigen_account.details()?;
+                    dbg!(&details);
+                    let select_account = Account::by_source_account_details(details, account.user_id);
+
+                    let mut account = match select_account.first::<Account>(&mut con) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            println!("Error getting account {}: {}, skipping.", account_id, e);
+                            continue;
+                        }
+                    };
+                    account.config = serde_json::to_string(&nordigen_account).ok();
+                    account.update(&mut con)?;
+                    println!("Account {} updated.", &account_id);
                 }
-
-                let mut account: Account = schema::accounts::dsl::accounts.find(account_id).first(&mut con)?;
-                account.nordigen_id = requisition.accounts[0].clone();
-                account.update(&mut con)?;
-
-                println!("Account {} updated.", &account_id);
 
                 Ok(())
             }
@@ -309,45 +384,22 @@ fn main() -> anyhow::Result<()> {
                 client.populate_token()?;
                 let mut con = establish_connection();
                 use diesel::*;
-                let accounts = Account::all().load(&mut con)?;
+                let accounts = Account::all().load::<Account>(&mut con)?;
                 for account in accounts {
-                    let nordigen_details = client.get_account_details(&account.nordigen_id)?;
-                    let nordigen_account = client.get_account(&account.nordigen_id)?;
-                    let nordigen_institution = client.get_institution(&nordigen_account.institution_id)?;
-                    {
-                        UpdateAccount {
-                            id: Some(account.id),
-                            name: None,
-                            iban: nordigen_details.iban,
-                            bic: nordigen_details.bic,
-                            bban: nordigen_details.bban,
-                            pan: nordigen_details.pan,
-                            currency: nordigen_details.currency,
-                            product: nordigen_details.product,
-                            cash_account_type: nordigen_details.cashAccountType,
-                            status: nordigen_details.status,
-                            details: nordigen_details.details,
-                            owner_name: nordigen_details.ownerName,
-                            icon: Some(nordigen_institution.logo),
-                            institution_name: Some(nordigen_institution.name),
-                            account_type: Some("cash".into()),
-                        }.update(&mut con)?;
-                        // ));
-                    }
+                    let Ok(account_source) = account.source() else {
+                        println!("Error getting account source");
+                        continue;
+                    };
+                    let Ok(source_account) = account_source.details() else {
+                        println!("Error getting account details");
+                        continue;
+                    };
+                    let mut update_account = UpdateAccount::from(source_account);
+                    update_account.id = Some(account.id);
+                    let _ = update_account.update(&mut con);
                 }
                 Ok(())
             }
-            AccountsCommand::GetNordigenAccountBalances { account_id } => {
-                let mut client = Nordigen::new();
-                let mut con = establish_connection();
-                client.populate_token()?;
-                let account: Account = schema::accounts::dsl::accounts
-                    .find(account_id)
-                    .first(&mut con)?;
-                let balances = client.get_account_balances(&account.nordigen_id)?;
-                dbg!(balances);
-                Ok(())
-            },
             AccountsCommand::UpdateBalances {} => {
                 let mut client = Nordigen::new();
                 client.populate_token()?;
@@ -355,8 +407,13 @@ fn main() -> anyhow::Result<()> {
                 use diesel::*;
                 let accounts = Account::all().load(&mut con)?;
                 for mut account in accounts {
-                    account.update_balance()?;
-                    account.update(&mut con)?;
+                    match account.update_balance() {
+                        Ok(_) => {
+                            println!("Updated balance for account {} to {}", account.id, account.balance);
+                            let _ = account.update(&mut con);
+                        },
+                        Err(err) => println!("Error updating balance for account {}: {}", account.id, err),
+                    }
                 }
                 Ok(())
             },
@@ -432,13 +489,15 @@ fn main() -> anyhow::Result<()> {
                     bail!("Requisition not yet completed.");
                 }
 
-                let user = schema::users::dsl::users
+                let user: User = schema::users::dsl::users
                     .find(db_requisition.user_id)
                     .first(&mut con)?;
 
                 for account_id in requisition.accounts {
-                    let account_details = client.get_account_details(&account_id)?;
-                    NewAccount::new("", &account_id, &account_details, &user)?;
+                    let account_details = accounts::SourceAccount::details(&client.get_account(&account_id)?)?;
+                    let mut account = NewAccount::from(account_details);
+                    account.user_id = user.id;
+                    let _account = account.create(&mut con)?;
                     println!("Account {} added.", &account_id);
                 }
 
@@ -559,7 +618,56 @@ fn main() -> anyhow::Result<()> {
 
                 ultrafinance::create_transaction_trigger_queue(&transaction, &mut con)
             }
+            TransactionsCommand::Enrich { id } => {
+                let mut con = establish_connection();
+                let transaction: Transaction = self::schema::transactions::dsl::transactions
+                    .find(id)
+                    .first(&mut con)?;
+
+                let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
+                let enriched_transaction = client.enrich_transactions(vec![transaction.into()])?;
+                println!("Enriched transaction: {:?}", enriched_transaction);
+                Ok(())
+            }
+            TransactionsCommand::AssignMerchants {} => {
+                use self::schema::transactions::dsl::*;
+                use diesel::*;
+                let mut con = establish_connection();
+                let transactions_to_do: Vec<Transaction> = Transaction::all()
+                    .filter(merchant_id.is_null()).order(id.desc()).limit(200).load(&mut con)?;
+
+                let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
+                // Call .into() on all transactions_to_do
+                let enriched_transactions = client.enrich_transactions(transactions_to_do.into_iter().map(|t| t.into()).collect())?;
+                for enriched_transaction in enriched_transactions {
+                    match NewMerchant::try_from(&enriched_transaction) {
+                        Ok(merchant) => {
+                            match merchant.create_or_fetch(&mut con) {
+                                Ok(merchant) => {
+                                    let t_id = enriched_transaction.transaction_id.parse::<i32>().unwrap();
+                                    let mut transaction: Transaction = Transaction::by_id_only(t_id).first(&mut con)?;
+                                    transaction.merchant_id = Some(merchant.id);
+                                    transaction.update(&mut con)?;
+                                },
+                                Err(err) => {
+                                    println!("Error creating merchant: {}", err);
+                                    continue;
+                                }
+                            }
+                        },
+                        Err(err) => println!("Error getting merchant: {}", err),
+                    }
+                }
+                Ok(())
+            }
         },
+        Commands::Merchants(command) => match command {
+            MerchantsCommand::List => {
+                let merchants = Merchant::all().load::<Merchant>(&mut establish_connection())?;
+                print_stdout(merchants.with_title()).unwrap_or(());
+                Ok(())
+            }
+        }
         Commands::Server(command) => match command {
             ServerCommand::Start => {
                 server::start().map_err(|e|anyhow::anyhow!(e.to_string()))

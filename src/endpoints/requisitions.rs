@@ -1,9 +1,10 @@
+use diesel::RunQueryDsl;
 use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web, web::Json};
 use serde::Deserialize;
 
 use crate::models::{NordigenRequisition, User};
-use crate::nordigen;
+use crate::{nordigen, Account};
 use crate::schema;
 use crate::ultrafinance::DbPool;
 use crate::server::{AppState, Error};
@@ -29,7 +30,8 @@ pub async fn get_requisitions_institutions_endpoint(
 
 #[derive(Deserialize, Apiv2Schema)]
 pub struct CreateRequisition {
-    institution_id: String,
+    institution_id: Option<String>,
+    account_id: Option<i32>,
 }
 
 #[api_v2_operation]
@@ -40,17 +42,31 @@ pub async fn create_requisition_endpoint(
 ) -> Result<Json<nordigen::Requisition>, Error> {
     let mut nordigen = nordigen::Nordigen::new();
     let db = state.db.clone();
-    let requisition: anyhow::Result<nordigen::Requisition> = actix_web::web::block(move || {
-        nordigen.populate_token()?;
-        let requisition = nordigen.create_requisition(
-            &format!("{}{}", &state.url, "/accounts/resume"),
-            &data.institution_id,
-        )?;
-        //
-        Ok(requisition)
-    })
-    .await
-    .unwrap();
+
+    let requisition = if let Some(institution_id) = data.institution_id.clone() {
+        actix_web::web::block(move || {
+            nordigen.populate_token()?;
+            nordigen.create_requisition(
+                &format!("{}{}", &state.url, "/accounts/resume"),
+                &institution_id,
+            )
+        })
+        .await
+        .unwrap()
+    } else if let Some(account_id) = data.account_id {
+        let mut con = db.get().map_err(anyhow::Error::msg).unwrap();
+        actix_web::web::block(move || {
+
+            let account = Account::by_id(account_id, user.id).first(&mut con)?;
+            nordigen.populate_token()?;
+            let nordigen_account = nordigen.get_account(&account.nordigen_id)?;
+            nordigen.create_requisition(&format!("{}/accounts/{}/resume", &state.url, account_id), &nordigen_account.institution_id)
+        })
+        .await
+        .unwrap()
+    } else {
+        Err(anyhow::anyhow!("No institution_id or account_id provided."))
+    };
 
     match requisition {
         Ok(requisition) => {

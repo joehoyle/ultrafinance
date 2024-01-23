@@ -58,7 +58,7 @@ export default function AccountsNew() {
 								}
 								return <>
 									{institutions.map(institution => (
-										<li className="flex">
+										<li className="flex" key={ institution.id }>
 											<button onClick={() => onSelectInstitution(institution)} className="flex flex-1 space-x-3 py-2 bg-white/50 border-b border-b-slate-50 font-medium text-xs text-slate-600 items-center hover:text-purple-900">
 												<img loading="lazy" src={institution.logo} className="w-8 flex-0" />
 												<div className="flex-1 text-left flex flex-col">

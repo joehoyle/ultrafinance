@@ -5,6 +5,7 @@ import { UpdateFunction } from '../../bindings/UpdateFunction';
 import { CreateFunction } from '../../bindings/CreateFunction';
 import type { Institution } from '../../bindings/Institution';
 import type { Requisition } from '../../bindings/Requisition';
+import { TransactionWithMerchant } from '../../bindings/TransactionWithMerchant';
 import { Transaction } from '../../bindings/Transaction';
 import { Trigger } from '../../bindings/Trigger';
 import { User } from '../../bindings/User';
@@ -35,6 +36,17 @@ export async function updateAccount( accountId: number, account: UpdateAccount )
 	return await request( `/accounts/${accountId}`, "POST", account ) as Account;
 }
 
+export async function deleteAccount( accountId: number ): Promise<undefined> {
+	await request( `/accounts/${accountId}`, "DELETE" );
+	return undefined;
+}
+
+export async function relinkAccount( accountId: number, requisitionId: string ): Promise<Account> {
+	return await request( `/accounts/${accountId}/relink`, "POST", {
+		requisition_id: requisitionId,
+	} ) as Account;
+}
+
 export async function getMe(): Promise<User> {
 	return await request( `/users/me` ) as User;
 }
@@ -47,16 +59,27 @@ export async function updateMe( user: UpdateUser ): Promise<User> {
 	return await request( `/users/me`, "POST", user ) as User;
 }
 
-export async function getTransaction( transactionId: number): Promise<Transaction> {
-	return await request( `/transactions/${ transactionId }` ) as Transaction;
+export async function getTransaction( transactionId: number): Promise<TransactionWithMerchant> {
+	return await request( `/transactions/${ transactionId }` ) as TransactionWithMerchant;
 }
 
 export async function deleteTransaction( transactionId: number): Promise<null> {
 	return await request( `/transactions/${ transactionId }`, 'DELETE' ) as null;
 }
 
-export async function getTransactions(): Promise<Transaction[]> {
-	return await request( '/transactions' ) as Transaction[];
+export async function getTransactions(search?: string, page?: number, per_page?: number): Promise<TransactionWithMerchant[]> {
+	const args: Record<string, string | number> = {};
+	if ( search ) {
+		args['search'] = search;
+	}
+	if ( page ) {
+		args['page'] = page;
+	}
+	if ( per_page ) {
+		args['per_page'] = per_page;
+	}
+
+	return await request( '/transactions', 'GET', args ) as TransactionWithMerchant[];
 }
 
 export async function getFunctions(): Promise<Function[]> {
@@ -115,9 +138,10 @@ export async function getTriggerLog(): Promise<TriggerLog[]> {
 	return await request( `/triggers/log` ) as TriggerLog[];
 }
 
-export async function createRequisition(institutionId: string): Promise<Requisition> {
+export async function createRequisition(institutionId?: string, accountId?: number): Promise<Requisition> {
 	return await request( '/requisitions', 'POST', {
 		institution_id: institutionId,
+		account_id: accountId,
 	} ) as Requisition;
 }
 
@@ -154,6 +178,8 @@ export async function request(url: string, method: 'POST' | 'DELETE' | "GET" = "
 
 	if ( method === 'POST' ) {
 		params.body = JSON.stringify( data );
+	} else {
+		url += '?' + new URLSearchParams( data ).toString();
 	}
 
 	const minTime = wait(300);

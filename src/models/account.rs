@@ -1,5 +1,6 @@
+use crate::accounts::{get_source_account, SourceAccount, SourceAccountDetails};
 use crate::utils::display_option;
-use crate::{nordigen, schema::*};
+use crate::schema::*;
 use anyhow::Result;
 use cli_table::Table;
 
@@ -7,7 +8,7 @@ use diesel::mysql::Mysql;
 use diesel::*;
 use diesel::{Associations, Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::models::User;
 use crate::schema;
@@ -27,7 +28,6 @@ use crate::schema;
 )]
 #[ts(export)]
 #[diesel(belongs_to(User))]
-
 pub struct Account {
     #[table(title = "Account ID")]
     pub id: i32,
@@ -35,14 +35,6 @@ pub struct Account {
     pub name: String,
     #[table(title = "Type")]
     pub account_type: String,
-    #[table(title = "IBAN", display_fn = "display_option")]
-    pub iban: Option<String>,
-    #[table(title = "BIC", display_fn = "display_option")]
-    pub bic: Option<String>,
-    #[table(title = "BBAN", display_fn = "display_option")]
-    pub bban: Option<String>,
-    #[table(title = "PAN", display_fn = "display_option")]
-    pub pan: Option<String>,
     pub currency: String,
     #[table(title = "Product", display_fn = "display_option")]
     pub product: Option<String>,
@@ -67,6 +59,10 @@ pub struct Account {
     pub created_at: chrono::NaiveDateTime,
     #[table(title = "Updated At")]
     pub updated_at: chrono::NaiveDateTime,
+    #[table(title = "Config", display_fn = "display_option")]
+    pub config: Option<String>,
+    #[table(title = "Number", display_fn = "display_option")]
+    pub number: Option<String>,
 }
 
 type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Account, Mysql>>;
@@ -89,88 +85,63 @@ impl Account {
             .filter(schema::accounts::user_id.eq(user_id))
     }
 
+    pub fn by_source_account_details(
+        details: SourceAccountDetails,
+        user_id: i32,
+    ) -> BoxedQuery<'static> {
+        Self::all()
+            .filter(schema::accounts::user_id.eq(user_id))
+            .filter(schema::accounts::number.eq(details.number))
+            .filter(schema::accounts::institution_name.eq(details.institution_name))
+    }
+
     pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
         diesel::delete(&self).execute(con)?;
         Ok(())
     }
 
-    pub fn update(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::update(&self).set(&self).execute(con)?;
+    pub fn update(&mut self, con: &mut MysqlConnection) -> Result<()> {
+        self.updated_at = chrono::Local::now().naive_local();
+        diesel::update(&*self).set(&*self).execute(con)?;
         Ok(())
     }
 
     pub fn update_balance(&mut self) -> Result<()> {
-        let mut client = nordigen::Nordigen::new();
-        client.populate_token()?;
-        let balances = client.get_account_balances(&self.nordigen_id)?;
-        if balances.is_empty() {
-            return Err(anyhow::anyhow!("No balances found"));
-        }
+        let balance = self.source()?.balance()?;
 
-        self.balance = balances.get(0).unwrap().balanceAmount.amount.parse()?;
+        self.balance = balance.amount.parse::<f32>()?;
         Ok(())
+    }
+
+    pub fn source(&self) -> Result<Box<dyn SourceAccount>> {
+        let config = match &self.config {
+            Some(config) => config,
+            None => return Err(anyhow::anyhow!("No config found")),
+        };
+        get_source_account(&self.account_type, config).ok_or(anyhow::anyhow!("No source found"))
     }
 }
 
 #[derive(Insertable, Default, Debug)]
 #[diesel(table_name = accounts)]
 pub struct NewAccount {
-    name: String,
-    account_type: String,
-    nordigen_id: String,
-    iban: Option<String>,
-    bic: Option<String>,
-    bban: Option<String>,
-    pan: Option<String>,
-    currency: String,
-    product: Option<String>,
-    cash_account_type: Option<String>,
-    details: String,
-    owner_name: Option<String>,
-    status: String,
-    icon: String,
-    institution_name: String,
-    user_id: i32,
+    pub name: String,
+    pub number: Option<String>,
+    pub account_type: String,
+    pub nordigen_id: String,
+    pub currency: String,
+    pub product: Option<String>,
+    pub cash_account_type: Option<String>,
+    pub details: String,
+    pub owner_name: Option<String>,
+    pub status: String,
+    pub icon: String,
+    pub institution_name: String,
+    pub config: Option<String>,
+    pub user_id: i32,
 }
 
 impl NewAccount {
-    pub fn new(
-        account_name: &str,
-        nordigen_account_id: &String,
-        nordigen_account_details: &nordigen::AccountDetails,
-        user: &User,
-    ) -> Result<Self> {
-        let mut nordigen = nordigen::Nordigen::new();
-        nordigen.populate_token()?;
-
-        let nordigen_account = nordigen.get_account(nordigen_account_id)?;
-        let nordigen_institution = nordigen.get_institution(&nordigen_account.institution_id)?;
-        Ok(Self {
-            name: account_name.to_owned(),
-            account_type: "cash".into(),
-            iban: nordigen_account_details.iban.clone(),
-            bic: nordigen_account_details.bic.clone(),
-            bban: nordigen_account_details.bban.clone(),
-            pan: nordigen_account_details.pan.clone(),
-            currency: nordigen_account_details.currency.clone(),
-            product: nordigen_account_details.product.clone(),
-            cash_account_type: nordigen_account_details.cashAccountType.clone(),
-            details: nordigen_account_details
-                .details
-                .clone()
-                .unwrap_or("".into()),
-            owner_name: nordigen_account_details.ownerName.clone(),
-            status: nordigen_account_details
-                .status
-                .clone()
-                .unwrap_or("enabled".into()),
-            icon: nordigen_institution.logo,
-            institution_name: nordigen_institution.name,
-            nordigen_id: nordigen_account_id.clone(),
-            user_id: user.id,
-        })
-    }
-
     pub fn create(self, con: &mut MysqlConnection) -> Result<Account> {
         use self::accounts::dsl::*;
         match insert_into(accounts).values(self).execute(con) {
@@ -184,18 +155,36 @@ impl NewAccount {
     }
 }
 
+impl From<SourceAccountDetails> for NewAccount {
+    fn from(details: SourceAccountDetails) -> Self {
+        Self {
+            name: "".to_string(),
+            number: Some(details.number),
+            account_type: "".into(),
+            currency: details.currency,
+            product: None,
+            cash_account_type: None,
+            details: details.details,
+            owner_name: details.owner_name,
+            status: "active".into(),
+            icon: details.icon.unwrap_or("".into()),
+            institution_name: details.institution_name,
+            nordigen_id: "".into(),
+            user_id: 0,
+            config: None,
+        }
+    }
+}
+
 #[derive(Deserialize, Apiv2Schema, AsChangeset, ts_rs::TS)]
 #[diesel(table_name = accounts)]
 #[ts(export)]
 pub struct UpdateAccount {
     pub id: Option<i32>,
+    pub number: Option<String>,
     pub name: Option<String>,
     pub account_type: Option<String>,
-    pub iban: Option<String>,
-    pub bic: Option<String>,
-    pub bban: Option<String>,
-    pub pan: Option<String>,
-    pub currency: String,
+    pub currency: Option<String>,
     pub product: Option<String>,
     pub cash_account_type: Option<String>,
     pub details: Option<String>,
@@ -215,6 +204,27 @@ impl UpdateAccount {
             .map_err(|e| anyhow::anyhow!(e))?;
 
         Account::all()
-            .filter(schema::accounts::id.eq(id)).first(con).map_err(|e| anyhow::anyhow!(e))
+            .filter(schema::accounts::id.eq(id))
+            .first(con)
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+impl From<SourceAccountDetails> for UpdateAccount {
+    fn from(details: SourceAccountDetails) -> Self {
+        Self {
+            id: None,
+            name: None,
+            number: Some(details.number),
+            account_type: None,
+            currency: Some(details.currency),
+            product: None,
+            cash_account_type: None,
+            details: Some(details.details),
+            owner_name: details.owner_name,
+            status: None,
+            icon: details.icon,
+            institution_name: Some(details.institution_name),
+        }
     }
 }

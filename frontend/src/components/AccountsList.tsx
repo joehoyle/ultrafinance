@@ -14,7 +14,7 @@ export default function AccountsList({ accounts }: Props) {
 					}
 					<span className="flex flex-col">
 						<span>{account.name || '(untitled)'}</span>
-						<span className="text-gray-400">{ [ account.iban || account.bban || account.bic, account.owner_name, account.product, account.currency, account.details ].join( ' ' )}</span>
+						<span className="text-gray-400">{ account.number }</span>
 					</span>
 					<span className="flex-1"></span>
 					{ !! account.balance &&

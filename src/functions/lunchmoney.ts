@@ -7,6 +7,10 @@ export const params = {
         name: 'Lunchmoney Account Id',
         type: 'string',
     },
+    openaiApiKey: {
+        name: 'OpenAI API Key',
+        type: 'string',
+    },
 };
 
 export const supportedEvents = [
@@ -24,13 +28,32 @@ type Transaction = {
     externalId: string,
 }
 
+// Take the type of Params from `params`, but extract the "type" property as the type.
 type Params = {
-    apiKey: string;
-    accountId: string;
-}
+    [key in keyof typeof params]: typeof params[key]['type']
+};
 
 export default async function ( params: Params, transaction: Transaction ) {
+    const oai = new openai.Client({apiKey: params.openaiApiKey});
     const lm = new lunchmoney.LunchMoney({ token: params.apiKey } );
+
+    const categories = await lm.getCategories();
+    const chat = await oai.chat( [
+        {
+            role: 'system',
+            text: `You are an assistant to categorize financial transactions. You only repond with the exact category name and nothing else.
+            The available categories are:
+
+            ${ categories.map( category => category.name ).join( '\n' ) } }`,
+        },
+        {
+            role: 'user',
+            text: JSON.stringify( transaction ),
+        },
+    ] );
+
+    console.log(chat);
+
     let result = await lm.createTransactions([
         {
             asset_id: Number( params.accountId ),
@@ -135,15 +158,15 @@ namespace lunchmoney {
     }
 
     export interface Category {
-        id:	number,
-        name:	string,
-        description:	string,
-        is_income:	boolean,
-        exclude_from_budget:	boolean,
-        exclude_from_totals:	boolean,
-        updated_at:	string,
-        created_at:	string,
-        is_group:	boolean,
+        id: number,
+        name: string,
+        description: string,
+        is_income: boolean,
+        exclude_from_budget: boolean,
+        exclude_from_totals: boolean,
+        updated_at: string,
+        created_at: string,
+        is_group: boolean,
         group_id?: number,
     }
 
@@ -283,6 +306,36 @@ namespace lunchmoney {
                 debit_as_negative: debitAsNegative,
                 skip_balance_update: skipBalanceUpdate,
             } ];
+        }
+    }
+}
+
+
+namespace openai {
+    interface Message {
+        role: string,
+        text: string,
+    }
+
+    export class Client {
+        apiKey: string;
+        constructor( args: { apiKey: string } ) {
+            this.apiKey = args.apiKey;
+        }
+        async chat( messages: Message[] ) : Promise<Message[]> {
+            let response = await fetch( 'hhttps://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + this.apiKey,
+                },
+                body: JSON.stringify( {
+                    messages,
+                    model: 'gpt-4-turbo',
+                } ),
+            } );
+            let data = await response.json();
+            return data.choices;
         }
     }
 }

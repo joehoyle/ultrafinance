@@ -6,6 +6,7 @@ pub mod trigger;
 pub mod trigger_log;
 pub mod trigger_queue;
 pub mod user;
+pub mod merchant;
 
 pub use account::*;
 pub use function::*;
@@ -15,3 +16,4 @@ pub use trigger::*;
 pub use trigger_log::*;
 pub use trigger_queue::*;
 pub use user::*;
+pub use merchant::*;

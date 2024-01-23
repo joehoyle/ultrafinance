@@ -1,12 +1,15 @@
 use crate::models::Function;
-use deno_runtime::{deno_core::{v8, ResolutionKind}, permissions::PermissionsContainer};
+use anyhow::anyhow;
+use deno_runtime::{deno_core::{v8, ResolutionKind, ModuleSpecifier, PollEventLoopOptions}, permissions::PermissionsContainer, deno_io::Stdio};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use tempfile::tempfile;
+use std::{collections::HashMap, sync::Arc, fs::File, io::Read};
 
 pub struct FunctionRuntime {
     runtime: deno_runtime::worker::MainWorker,
     main_module_id: usize,
+    stdio: Stdio,
 }
 
 impl FunctionRuntime {
@@ -26,25 +29,28 @@ impl FunctionRuntime {
                 function.source.clone(),
             );
         }
-
         let module_loader = std::rc::Rc::new(module_loader);
         let create_web_worker_cb = std::sync::Arc::new(|_| {
             todo!("Web workers are not supported in the example");
         });
-        // let web_worker_event_cb = std::sync::Arc::new(|_| {
-        //     todo!("Web workers are not supported in the example");
-        // });
+
+        let stdio = Stdio {
+            stdin: deno_runtime::deno_io::StdioPipe::File(tempfile()?),
+            stdout: deno_runtime::deno_io::StdioPipe::File(tempfile()?),
+            stderr: deno_runtime::deno_io::StdioPipe::File(dbg!(tempfile()?)),
+        };
 
         let options = deno_runtime::worker::WorkerOptions {
             bootstrap: deno_runtime::BootstrapOptions {
                 args: vec![],
-                cpu_count: 1,
+                cpu_count: Default::default(),
+
                 enable_testing_features: false,
                 location: None,
                 no_color: false,
                 is_tty: false,
-                runtime_version: "1.0.0".to_string(),
-                ts_version: "x".to_string(),
+                // runtime_version: "1.0.0".to_string(),
+                // ts_version: "x".to_string(),
                 unstable: false,
                 user_agent: "ultrafinance".to_string(),
                 inspect: false,
@@ -52,14 +58,15 @@ impl FunctionRuntime {
                 locale: "en-US".to_string(),
                 has_node_modules_dir: false,
                 maybe_binary_npm_command_name: None,
+                enable_op_summary_metrics: true,
+                unstable_features: vec![],
+                node_ipc_fd: None,
             },
             extensions: vec![],
             unsafely_ignore_certificate_errors: None,
             seed: None,
             source_map_getter: None,
             format_js_error_fn: None,
-            // web_worker_preload_module_cb: web_worker_event_cb.clone(),
-            // web_worker_pre_execute_module_cb: web_worker_event_cb,
             create_web_worker_cb,
             maybe_inspector_server: None,
             should_break_on_first_statement: false,
@@ -73,16 +80,19 @@ impl FunctionRuntime {
                 deno_runtime::deno_broadcast_channel::InMemoryBroadcastChannel::default(),
             shared_array_buffer_store: None,
             compiled_wasm_module_store: None,
-            stdio: Default::default(),
+            stdio: stdio.clone(),
             startup_snapshot: None,
             create_params: None,
             root_cert_store_provider: None,
-            fs: Arc::new(deno_fs::RealFs),
+            fs: Arc::new(deno_runtime::deno_fs::RealFs {}),
             should_wait_for_inspector_session: false,
+            skip_op_registration: false,
+            strace_ops: None,
+            feature_checker: Default::default(),
         };
 
         let js_path = std::path::Path::new(&main_file);
-        let main_module = deno_runtime::deno_core::resolve_path(&js_path.to_string_lossy(), std::path::Path::new("./"))?;
+        let main_module = ModuleSpecifier::parse(&format!("https://localhost/{}", &js_path.to_string_lossy()).as_str())?;
         let permissions = deno_runtime::permissions::Permissions::allow_all();
 
         let mut worker = deno_runtime::worker::MainWorker::bootstrap_from_options(
@@ -102,6 +112,7 @@ impl FunctionRuntime {
         Ok(Self {
             runtime: worker,
             main_module_id: result as _,
+            stdio,
         })
     }
 
@@ -131,7 +142,7 @@ impl FunctionRuntime {
         let mut rt = tokio::runtime::Runtime::new().unwrap();
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&mut rt, async {
-            let promise: v8::Global<v8::Value>;
+            let promise: Result<v8::Global<v8::Value>, anyhow::Error>;
             {
                 let module_namespace = self
                     .runtime
@@ -152,15 +163,14 @@ impl FunctionRuntime {
                         // JSON decode params
                         let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(
                             scope, "JSON",
-                        )
-                        .unwrap();
+                        ).ok_or(anyhow::anyhow!("JSON not found."))?;
                         let json = v8::Global::new(scope, json);
 
-                        let parse = v8::String::new(scope, "parse").unwrap().into();
-                        let parse = json.open(scope).get(scope, parse).unwrap();
+                        let parse = v8::String::new(scope, "parse").ok_or(anyhow!("Can't make string"))?.into();
+                        let parse = json.open(scope).get(scope, parse).ok_or(anyhow!("Can't get string"))?;
                         let parse: v8::Local<v8::Function> = parse.try_into()?;
 
-                        let arg = v8::String::new(scope, params.as_str()).unwrap().into();
+                        let arg = v8::String::new(scope, params.as_str()).ok_or(anyhow!("Can't make string"))?.into();
                         let this = v8::undefined(scope).into();
                         let params = match parse.call(scope, this, &[arg]) {
                             Some(r) => Ok(r),
@@ -175,7 +185,7 @@ impl FunctionRuntime {
                         }?;
 
                         let try_scope = &mut v8::TryCatch::new(scope);
-                        let value = function.call(try_scope, recv, &[params, payload]).unwrap();
+                        let value = function.call(try_scope, recv, &[params, payload]).ok_or(anyhow!("No globa promise found"))?;
                         if try_scope.has_caught() || try_scope.has_terminated() {
                             dbg!("caught terminated");
                             try_scope.rethrow();
@@ -186,10 +196,10 @@ impl FunctionRuntime {
                         Ok(promise_global)
                     }
                     None => Err(anyhow::Error::msg("No default export found.")),
-                }?;
+                }
             }
-
-            self.runtime.js_runtime.run_event_loop(false).await?;
+            let promise = promise?;
+            self.runtime.js_runtime.run_event_loop(PollEventLoopOptions::default()).await?;
             let result = self.runtime.js_runtime.resolve_value(promise).await?;
 
             let scope = &mut self.runtime.js_runtime.handle_scope();
@@ -210,6 +220,25 @@ impl FunctionRuntime {
             Ok(result.to_rust_string_lossy(scope))
         })?;
         return Ok(result);
+    }
+
+    pub fn stdout(&self) -> Option<String> {
+        let mut str = String::new();
+        match &self.stdio.stdout {
+            deno_runtime::deno_io::StdioPipe::File(file) => file.clone().read_to_string(&mut str).ok().map(|_| str),
+            _ => None,
+        }
+    }
+
+    pub fn stderr(&self) -> Option<String> {
+        let mut str = String::new();
+        match &self.stdio.stderr {
+            deno_runtime::deno_io::StdioPipe::File(file) => {
+                dbg!(&file);
+                file.clone().read_to_string(&mut str).ok().map(|_| str)
+            },
+            _ => None,
+        }
     }
 }
 
@@ -312,6 +341,8 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
     use chrono::NaiveDateTime;
 
@@ -328,7 +359,7 @@ mod tests {
         };
 
         let mut runtime = FunctionRuntime::new(&function).unwrap();
-        dbg!(runtime.get_params().unwrap());
+        // dbg!(runtime.get_params());
     }
 
     #[test]
@@ -360,5 +391,40 @@ mod tests {
         .to_string();
         dbg!(&transaction);
         let _result = runtime.run(&params, &transaction);
+    }
+
+    #[test]
+    fn run_source_function() {
+        let function = Function {
+            id: 1,
+            name: "Test".into(),
+            function_type: "source".into(),
+            source: "export default function () {
+                return 'ji';
+            }".into(),
+            user_id: 1,
+            created_at: NaiveDateTime::from_timestamp(0, 0),
+            updated_at: NaiveDateTime::from_timestamp(0, 0),
+        };
+
+        let mut runtime = FunctionRuntime::new(&function).unwrap();
+        let params = serde_json::json!({
+            "apiKey": "123",
+            "accountId": "41112",
+        })
+        .to_string();
+        let transaction = serde_json::json!({
+            "id": 12345,
+            "bookingDate": chrono::Utc::now().to_rfc3339(),
+            "transactionAmount": "100",
+            "transactionAmountCurrency": "EUR",
+            "creditorName": "Joe Test",
+            "remittanceInformation": "Test transaction",
+        })
+        .to_string();
+        let result = runtime.run(&params, &transaction).unwrap();
+
+        dbg!(runtime.stdout().unwrap());
+        dbg!(runtime.stderr().unwrap());
     }
 }

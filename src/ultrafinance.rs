@@ -1,5 +1,4 @@
 use crate::models::*;
-use crate::nordigen::Nordigen;
 use crate::schema;
 use anyhow::anyhow;
 use chrono::Duration;
@@ -33,19 +32,13 @@ pub fn import_transactions(
     // Get all transactions from 7 days before the last transaction to account for slow to confirm transaction.
     let from_date = latest_transaction.map(|t| t.booking_date - Duration::days(7));
 
-    let mut client = Nordigen::new();
-    client.populate_token()?;
-    let nordigen_transactions =
-        client.get_account_transactions(&account.nordigen_id, &from_date, &None)?;
+    let other_transactions = account.source()?.transactions(&from_date, &None)?;
 
     let mut new_transactions: Vec<transaction::NewTransaction> = vec![];
-    for transaction in nordigen_transactions {
-        if transaction.bookingDate.is_none() || transaction.transactionAmount.is_none() {
-            continue;
-        }
+    for transaction in other_transactions {
         let exists: bool = diesel::dsl::select(diesel::dsl::exists(
             schema::transactions::dsl::transactions
-                .filter(external_id.eq(transaction.transactionId.as_ref().unwrap()))
+                .filter(external_id.eq(&transaction.id))
                 .filter(account_id.eq(account.id)),
         ))
         .get_result(con)?;
@@ -54,33 +47,9 @@ pub fn import_transactions(
             continue;
         }
 
-        let new_transaction = transaction::NewTransaction {
-            external_id: transaction.transactionId.unwrap(),
-            creditor_name: transaction.creditorName,
-            debtor_name: transaction.debtorName,
-            remittance_information: transaction.remittanceInformationUnstructured,
-            booking_date: transaction.bookingDate.unwrap(),
-            booking_datetime: transaction.bookingDateTime.map( |date| date.naive_utc() ),
-            transaction_amount: transaction
-                .transactionAmount
-                .as_ref()
-                .unwrap()
-                .amount
-                .clone(),
-            transaction_amount_currency: transaction
-                .transactionAmount
-                .as_ref()
-                .unwrap()
-                .currency
-                .clone(),
-            currency_exchange_rate: transaction.currencyExchange.clone().map(|c|c.exchangeRate),
-            currency_exchange_source_currency: transaction.currencyExchange.clone().map(|c|c.sourceCurrency),
-            currency_exchange_target_currency: transaction.currencyExchange.clone().and_then(|c|c.targetCurrency),
-            account_id: account.id,
-            user_id: account.user_id,
-            proprietary_bank_transaction_code: transaction.proprietaryBankTransactionCode,
-        };
-
+        let mut new_transaction = NewTransaction::from(transaction);
+        new_transaction.account_id = account.id;
+        new_transaction.user_id = account.user_id;
         new_transactions.push(new_transaction);
     }
 
@@ -95,6 +64,9 @@ pub fn import_transactions(
         .limit(inserted as i64)
         .get_results(con)
         .map_err(anyhow::Error::msg)?;
+
+    // Enrich the transactions that were inserted
+    let inserted_transactions = enrich_transactions(inserted_transactions, con)?;
 
     // Create the triggers
     for transaction in &inserted_transactions {
@@ -133,7 +105,7 @@ pub fn hash_api_key(api_key: &str) -> String {
     let salt = env::var("API_KEY_SALT").unwrap();
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    let api_key = format!("{}:{}", salt, api_key.clone());
+    let api_key = format!("{}:{}", salt, api_key);
     hasher.update(api_key);
     let hash = hasher.finalize();
     let hash = format!("{:x}", hash);
@@ -156,7 +128,7 @@ pub fn verify_password(hash: &str, password: &str) -> anyhow::Result<()> {
     }
 }
 
-pub fn sync_accounts( accounts: &Vec<Account>, db_pool: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>> ) -> HashMap<i32, anyhow::Result<Vec<Transaction>>> {
+pub fn sync_accounts( accounts: &Vec<Account>, db_pool: &diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>> ) -> HashMap<i32, anyhow::Result<Vec<Transaction>>> {
     let thread_pool = threadpool::ThreadPool::new(8);
     let (tx, rx) = channel::<(i32, anyhow::Result<Vec<Transaction>>)>();
 
@@ -208,4 +180,36 @@ pub fn process_trigger_queue( queue: &Vec<TriggerQueue>, db_pool: diesel::r2d2::
     }
 
     result_map
+}
+
+fn enrich_transactions(
+    transactions: Vec<Transaction>,
+    con: &mut DbConnection,
+) -> anyhow::Result<Vec<Transaction>> {
+    let client = crate::ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
+    let enriched_transactions = client.enrich_transactions(transactions.into_iter().map(|t| t.into()).collect())?;
+    let mut transactions: Vec<Transaction> = vec![];
+    for enriched_transaction in enriched_transactions {
+        match NewMerchant::try_from(&enriched_transaction) {
+            Ok(merchant) => {
+                match merchant.create_or_fetch(con) {
+                    Ok(merchant) => {
+                        let t_id = enriched_transaction.transaction_id.parse::<i32>().unwrap();
+                        let mut transaction: Transaction = Transaction::by_id_only(t_id).first(con)?;
+                        transaction.merchant_id = Some(merchant.id);
+                        transaction.update(con)?;
+                        transactions.push(transaction);
+                    },
+                    Err(err) => {
+                        println!("Error creating merchant: {}", err);
+                        continue;
+                    }
+                }
+            },
+            Err(err) => println!("Error getting merchant: {}", err),
+        }
+    }
+
+    Ok(transactions)
+
 }

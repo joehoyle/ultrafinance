@@ -12,7 +12,8 @@ import Account, { loader as AccountLoader, action as AccountAction } from './rou
 import AccountAdd, { loader as AccountAddLoader } from './routes/account-new';
 import Transactions, { loader as TransactionsLoader, action as TransactionsAction } from './routes/transactions';
 import Transaction, { loader as TransactionLoader, action as TransactionAction } from './routes/transaction';
-import AccountsResume, { loader as AccountResumeLoader } from './routes/account-resume';
+import AccountNewResume, { loader as AccountNewResumeLoader } from './routes/account-new-resume';
+import AccountRelinkResume, { loader as AccountRelinkResumeLoader } from './routes/account-relink-resume';
 import Functions, { loader as FunctionsLoader } from './routes/functions';
 import Function, { action as FunctionAction, loader as FunctionLoader } from './routes/function';
 import FunctionAdd, { action as FunctionAddAction } from './routes/function-new';
@@ -26,7 +27,7 @@ import Signup, { action as SignupAction } from './routes/signup';
 import Homepage, { loader as HomepageLoader } from './routes/homepage';
 import DataCompliance from './routes/data-compliance';
 
-const router = createBrowserRouter([
+export const router = createBrowserRouter([
 	{
 		path: "/",
 		element: <Homepage />,
@@ -49,14 +50,19 @@ const router = createBrowserRouter([
 			},
 			{
 				path: '/accounts/resume',
-				element: <AccountsResume />,
-				loader: AccountResumeLoader,
+				element: <AccountNewResume />,
+				loader: AccountNewResumeLoader,
 			},
 			{
 				path: '/accounts/:id',
 				element: <Account />,
 				loader: AccountLoader,
 				action: AccountAction,
+			},
+			{
+				path: '/accounts/:id/resume',
+				element: <AccountRelinkResume />,
+				loader: AccountRelinkResumeLoader,
 			},
 			{
 				path: '/transactions',

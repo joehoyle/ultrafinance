@@ -14,10 +14,6 @@ diesel::table! {
         id -> Int4,
         name -> Text,
         account_type -> Text,
-        iban -> Nullable<Text>,
-        bic -> Nullable<Text>,
-        bban -> Nullable<Text>,
-        pan -> Nullable<Text>,
         currency -> Text,
         product -> Nullable<Text>,
         cash_account_type -> Nullable<Text>,
@@ -31,6 +27,8 @@ diesel::table! {
         user_id -> Int4,
         created_at -> Datetime,
         updated_at -> Datetime,
+        config -> Nullable<Text>,
+        number -> Nullable<Text>,
     }
 }
 
@@ -72,6 +70,7 @@ diesel::table! {
         currency_exchange_rate -> Nullable<Text>,
         currency_exchange_source_currency -> Nullable<Text>,
         currency_exchange_target_currency -> Nullable<Text>,
+        merchant_id -> Nullable<Int4>,
         account_id -> Int4,
         user_id -> Int4,
         created_at -> Datetime,
@@ -124,4 +123,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    merchants (id) {
+        id -> Int4,
+        name -> Text,
+        logo_url -> Nullable<Text>,
+        location -> Nullable<Text>,
+        location_structured -> Nullable<Text>,
+        labels -> Nullable<Text>,
+        external_id -> Nullable<Text>,
+        website -> Nullable<Text>,
+        created_at -> Datetime,
+    }
+}
+
+diesel::joinable!(transactions -> merchants (merchant_id));
+diesel::allow_tables_to_appear_in_same_query!(
+    transactions,
+    merchants,
+);
 diesel::sql_function!(fn last_insert_id() -> Integer);

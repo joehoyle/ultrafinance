@@ -4,6 +4,7 @@ import { createFunction } from "../api";
 import Button from "../components/Button";
 import PageHeader from "../components/PageHeader";
 import Editor from "@monaco-editor/react";
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
 import { CreateFunction } from "../../../bindings/CreateFunction";
 import { FormEvent, useRef } from "react";
 import Input from "../components/forms/Input";
@@ -45,9 +46,9 @@ export async function action({ request }: { request: Request }) {
 }
 
 export default function FunctionNew() {
-	const editorRef = useRef(null);
+	const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 	const sourceRef = useRef<HTMLInputElement>(null);
-	function handleEditorDidMount(editor: any) {
+	function handleEditorDidMount(editor: monaco.editor.IStandaloneCodeEditor) {
 		editorRef.current = editor;
 	}
 	function onSubmit(event: FormEvent) {
