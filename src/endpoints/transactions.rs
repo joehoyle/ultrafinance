@@ -48,7 +48,7 @@ pub async fn get_transactions_endpoint(
                     .or(schema::transactions::debtor_name.like(format!("%{}%", search)))
                     .or(schema::transactions::creditor_name.like(format!("%{}%", search)))
                     .or(schema::transactions::remittance_information.like(format!("%{}%", search)))
-                    .or(schema::merchants::name.like(format!("%{}%", search))),
+                    .or(schema::merchants::name.like(format!("%{}%", search)))
                     .or(schema::merchants::labels.like(format!("%{}%", search))),
             ),
             None => transactions,
@@ -67,10 +67,10 @@ pub async fn get_transactions_endpoint(
 pub async fn get_transaction_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<TransactionWithMerchant>, Error> {
     let db = state.db.clone();
-    let transaction_id: i32 = path.into_inner();
+    let transaction_id: u32 = path.into_inner();
     let transaction = get_transaction_for_user(transaction_id, &user, &db).await;
     match transaction {
         Ok(transaction) => Ok(Json(transaction)),
@@ -79,7 +79,7 @@ pub async fn get_transaction_endpoint(
 }
 
 pub async fn get_transaction_for_user(
-    transaction_id: i32,
+    transaction_id: u32,
     user: &User,
     db_pool: &DbPool,
 ) -> Result<TransactionWithMerchant, anyhow::Error> {
@@ -105,10 +105,10 @@ pub async fn get_transaction_for_user(
 pub async fn delete_transaction_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<()>, Error> {
     let db = state.db.clone();
-    let transaction_id: i32 = path.into_inner();
+    let transaction_id: u32 = path.into_inner();
     let transaction = block(move || -> Result<(), Error> {
         let mut con = db.get()?;
         use diesel::*;

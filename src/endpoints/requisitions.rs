@@ -31,7 +31,7 @@ pub async fn get_requisitions_institutions_endpoint(
 #[derive(Deserialize, Apiv2Schema)]
 pub struct CreateRequisition {
     institution_id: Option<String>,
-    account_id: Option<i32>,
+    account_id: Option<u32>,
 }
 
 #[api_v2_operation]
@@ -100,7 +100,7 @@ pub async fn create_nordigen_requisition(
             .execute(&mut con)
         {
             Ok(_) => {
-                let requesition_id: i32 = select(schema::last_insert_id()).first(&mut con)?;
+                let requesition_id: u32 = select(schema::last_insert_id()).first(&mut con)?;
                 let requesition: NordigenRequisition =
                     nordigen_requisitions.find(requesition_id).first(&mut con)?;
                 Ok(requesition)

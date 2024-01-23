@@ -1,18 +1,18 @@
-use crate::utils::display_option;
 use crate::schema::*;
+use crate::utils::display_option;
 use anyhow::Result;
 use cli_table::Table;
 
+use diesel::deserialize::FromSql;
 use diesel::mysql::Mysql;
+use diesel::mysql::MysqlValue;
+use diesel::serialize::{IsNull, Output, ToSql};
+use diesel::sql_types::Text;
 use diesel::*;
 use diesel::{Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-use diesel::deserialize::FromSql;
-use diesel::serialize::{IsNull, Output, ToSql};
-use diesel::sql_types::Text;
 use std::error::Error;
-use diesel::mysql::MysqlValue;
 
 use crate::schema;
 
@@ -31,7 +31,7 @@ use crate::schema;
 #[ts(export)]
 pub struct Merchant {
     #[table(title = "Merchant ID")]
-    pub id: i32,
+    pub id: u32,
     #[table(title = "Name")]
     pub name: String,
     #[table(skip)]
@@ -51,7 +51,7 @@ pub struct Merchant {
 }
 
 #[derive(
-    Deserialize, Serialize, Debug, FromSqlRow, ts_rs::TS, Apiv2Schema, AsExpression, Default, Clone
+    Deserialize, Serialize, Debug, FromSqlRow, ts_rs::TS, Apiv2Schema, AsExpression, Default, Clone,
 )]
 #[diesel(sql_type = Text)]
 #[ts(export)]
@@ -68,6 +68,11 @@ pub struct Location {
     pub store_number: Option<f32>,
 }
 
+impl From<String> for Location {
+    fn from(s: String) -> Self {
+        serde_json::from_str(s.as_str()).unwrap()
+    }
+}
 
 impl ToSql<Text, Mysql> for Location {
     fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Mysql>) -> serialize::Result {
@@ -93,14 +98,12 @@ impl Merchant {
             .select(Self::as_select())
             .into_boxed()
     }
-    pub fn by_id(id: i32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::merchants::id.eq(id))
+    pub fn by_id(id: u32) -> BoxedQuery<'static> {
+        Self::all().filter(schema::merchants::id.eq(id))
     }
 
     pub fn by_external_id(id: &str) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::merchants::external_id.eq(id.to_string()))
+        Self::all().filter(schema::merchants::external_id.eq(id.to_string()))
     }
 
     pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
@@ -111,6 +114,164 @@ impl Merchant {
     pub fn update(self, con: &mut MysqlConnection) -> Result<()> {
         diesel::update(&self).set(&self).execute(con)?;
         Ok(())
+    }
+
+    pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        let query_args =
+            <sqlx::mysql::MySql as ::sqlx::database::HasArguments>::Arguments::default();
+        ::sqlx::query_with::<sqlx::mysql::MySql, _>("SELECT * FROM merchants", query_args)
+            .try_map(|row: sqlx::mysql::MySqlRow| {
+                use ::sqlx::Row as _;
+                let sqlx_query_as_id = row.try_get_unchecked::<u32, _>(0usize)?.into();
+                let sqlx_query_as_name = row.try_get_unchecked::<String, _>(1usize)?.into();
+                let sqlx_query_as_logo_url = row
+                    .try_get_unchecked::<::std::option::Option<String>, _>(2usize)?
+                    .into();
+                let sqlx_query_as_location = row
+                    .try_get_unchecked::<::std::option::Option<String>, _>(3usize)?
+                    .into();
+                let sqlx_query_as_location_structured = row
+                    .try_get_unchecked::<::std::option::Option<String>, _>(4usize)?
+                    .map(|a| a.into());
+                let sqlx_query_as_labels = row
+                    .try_get_unchecked::<::std::option::Option<String>, _>(5usize)?
+                    .into();
+                let sqlx_query_as_external_id = row
+                    .try_get_unchecked::<::std::option::Option<String>, _>(6usize)?
+                    .into();
+                let sqlx_query_as_website = row
+                    .try_get_unchecked::<::std::option::Option<String>, _>(7usize)?
+                    .into();
+                let sqlx_query_as_created_at = row
+                    .try_get_unchecked::<sqlx::types::chrono::NaiveDateTime, _>(8usize)?
+                    .into();
+                ::std::result::Result::Ok(Merchant {
+                    r#id: sqlx_query_as_id,
+                    r#name: sqlx_query_as_name,
+                    r#logo_url: sqlx_query_as_logo_url,
+                    r#location: sqlx_query_as_location,
+                    r#location_structured: sqlx_query_as_location_structured,
+                    r#labels: sqlx_query_as_labels,
+                    r#external_id: sqlx_query_as_external_id,
+                    r#website: sqlx_query_as_website,
+                    r#created_at: sqlx_query_as_created_at,
+                })
+            })
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_id(id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        use ::sqlx::Arguments as _;
+        let arg0 = &(id);
+        let mut query_args =
+            <sqlx::mysql::MySql as ::sqlx::database::HasArguments>::Arguments::default();
+        query_args.reserve(
+            1usize,
+            0 + ::sqlx::encode::Encode::<sqlx::mysql::MySql>::size_hint(arg0),
+        );
+        query_args.add(arg0);
+        ::sqlx::query_with::<sqlx::mysql::MySql, _>(
+            "SELECT * FROM merchants WHERE id = ?",
+            query_args,
+        )
+        .try_map(|row: sqlx::mysql::MySqlRow| {
+            use ::sqlx::Row as _;
+            let sqlx_query_as_id = row.try_get_unchecked::<u32, _>(0usize)?.into();
+            let sqlx_query_as_name = row.try_get_unchecked::<String, _>(1usize)?.into();
+            let sqlx_query_as_logo_url = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(2usize)?
+                .into();
+            let sqlx_query_as_location = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(3usize)?
+                .into();
+            let sqlx_query_as_location_structured = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(4usize)?
+                .map(|a| a.into());
+            let sqlx_query_as_labels = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(5usize)?
+                .into();
+            let sqlx_query_as_external_id = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(6usize)?
+                .into();
+            let sqlx_query_as_website = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(7usize)?
+                .into();
+            let sqlx_query_as_created_at = row
+                .try_get_unchecked::<sqlx::types::chrono::NaiveDateTime, _>(8usize)?
+                .into();
+            ::std::result::Result::Ok(Self {
+                r#id: sqlx_query_as_id,
+                r#name: sqlx_query_as_name,
+                r#logo_url: sqlx_query_as_logo_url,
+                r#location: sqlx_query_as_location,
+                r#location_structured: sqlx_query_as_location_structured,
+                r#labels: sqlx_query_as_labels,
+                r#external_id: sqlx_query_as_external_id,
+                r#website: sqlx_query_as_website,
+                r#created_at: sqlx_query_as_created_at,
+            })
+        })
+        .fetch_one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_external_id(external_id: &String, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        use ::sqlx::Arguments as _;
+        let arg0 = &(external_id);
+        let mut query_args =
+            <sqlx::mysql::MySql as ::sqlx::database::HasArguments>::Arguments::default();
+        query_args.reserve(
+            1usize,
+            0 + ::sqlx::encode::Encode::<sqlx::mysql::MySql>::size_hint(arg0),
+        );
+        query_args.add(arg0);
+        ::sqlx::query_with::<sqlx::mysql::MySql, _>(
+            "SELECT * FROM merchants WHERE external_id = ?",
+            query_args,
+        )
+        .try_map(|row: sqlx::mysql::MySqlRow| {
+            use ::sqlx::Row as _;
+            let sqlx_query_as_id = row.try_get_unchecked::<u32, _>(0usize)?.into();
+            let sqlx_query_as_name = row.try_get_unchecked::<String, _>(1usize)?.into();
+            let sqlx_query_as_logo_url = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(2usize)?
+                .into();
+            let sqlx_query_as_location = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(3usize)?
+                .into();
+            let sqlx_query_as_location_structured = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(4usize)?
+                .map(|a| a.into());
+            let sqlx_query_as_labels = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(5usize)?
+                .into();
+            let sqlx_query_as_external_id = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(6usize)?
+                .into();
+            let sqlx_query_as_website = row
+                .try_get_unchecked::<::std::option::Option<String>, _>(7usize)?
+                .into();
+            let sqlx_query_as_created_at = row
+                .try_get_unchecked::<sqlx::types::chrono::NaiveDateTime, _>(8usize)?
+                .into();
+            ::std::result::Result::Ok(Self {
+                r#id: sqlx_query_as_id,
+                r#name: sqlx_query_as_name,
+                r#logo_url: sqlx_query_as_logo_url,
+                r#location: sqlx_query_as_location,
+                r#location_structured: sqlx_query_as_location_structured,
+                r#labels: sqlx_query_as_labels,
+                r#external_id: sqlx_query_as_external_id,
+                r#website: sqlx_query_as_website,
+                r#created_at: sqlx_query_as_created_at,
+            })
+        })
+        .fetch_one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -131,7 +292,7 @@ impl NewMerchant {
         use self::merchants::dsl::*;
         match insert_into(merchants).values(self).execute(con) {
             Ok(_) => {
-                let merchant_id: i32 = select(schema::last_insert_id()).first(con)?;
+                let merchant_id: u32 = select(schema::last_insert_id()).first(con)?;
                 let merchant: Merchant = merchants.find(merchant_id).first(con)?;
                 Ok(merchant)
             }
@@ -139,19 +300,67 @@ impl NewMerchant {
         }
     }
 
+    pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<Merchant> {
+        let result = sqlx::query!(
+            "INSERT INTO merchants (name, logo_url, location, location_structured, labels, external_id, website) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            self.name,
+            self.logo_url,
+            self.location,
+            serde_json::json!(self.location_structured).to_string(),
+            self.labels,
+            self.external_id,
+            self.website
+        ) .execute(db)
+            .await?;
+        Merchant::sqlx_by_id(result.last_insert_id() as u32, db).await
+    }
+
     pub fn create_or_fetch(self, con: &mut MysqlConnection) -> Result<Merchant> {
         match &self.external_id {
-            Some(external_id) => {
-                match Merchant::by_external_id(external_id).first(con) {
-                    Ok(merchant) => Ok(merchant),
-                    Err(_) => {
-                        let merchant = self.create(con)?;
-                        Ok(merchant)
-                    }
+            Some(external_id) => match Merchant::by_external_id(external_id).first(con) {
+                Ok(merchant) => Ok(merchant),
+                Err(_) => {
+                    let merchant = self.create(con)?;
+                    Ok(merchant)
                 }
-            }
+            },
             None => {
                 let merchant = self.create(con)?;
+                Ok(merchant)
+            }
+        }
+    }
+
+    pub async fn sqlx_create_or_fetch(self, db: &sqlx::MySqlPool) -> Result<Merchant> {
+        match &self.external_id {
+            Some(external_id) => match Merchant::sqlx_by_external_id(external_id, db).await {
+                Ok(merchant) => Ok(merchant),
+                Err(_) => {
+                    let merchant = self.sqlx_create(db).await?;
+                    Ok(merchant)
+                }
+            },
+            None => {
+                let merchant = self.sqlx_create(db).await?;
+                Ok(merchant)
+            }
+        }
+    }
+
+    pub async fn sqlx_create_of_fetch(
+        self,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Merchant, anyhow::Error> {
+        match &self.external_id {
+            Some(external_id) => match Merchant::sqlx_by_external_id(external_id, db).await {
+                Ok(merchant) => Ok(merchant),
+                Err(_) => {
+                    let merchant = self.sqlx_create(db).await?;
+                    Ok(merchant)
+                }
+            },
+            None => {
+                let merchant = self.sqlx_create(db).await?;
                 Ok(merchant)
             }
         }

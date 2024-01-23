@@ -1,22 +1,35 @@
-use crate::schema::{*, self};
+use crate::schema::{self, *};
 
 use cli_table::Table;
 
-use diesel::*;
 use diesel::mysql::Mysql;
+use diesel::*;
 use diesel::{Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
+use sqlx::query::QueryAs;
+use sqlx::QueryBuilder;
 
 use crate::ultrafinance::{hash_api_key, hash_password};
 
-#[derive(Table, Identifiable, Queryable, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone, Selectable)]
+#[derive(
+    Table,
+    Identifiable,
+    Queryable,
+    Debug,
+    Serialize,
+    ts_rs::TS,
+    Apiv2Schema,
+    Clone,
+    Selectable,
+    sqlx::FromRow,
+)]
 #[ts(export)]
 pub struct User {
     #[table(title = "User ID")]
-    pub id: i32,
+    pub id: u32,
     #[table(title = "Name")]
     pub name: String,
     #[table(title = "Email")]
@@ -34,17 +47,30 @@ type BoxedQuery<'a> = crate::schema::users::BoxedQuery<'a, Mysql, SqlType>;
 
 impl User {
     pub fn all() -> BoxedQuery<'static> {
-        schema::users::table
-            .select(Self::as_select())
-            .into_boxed()
+        schema::users::table.select(Self::as_select()).into_boxed()
     }
 
-    pub fn by_id(id: i32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::users::id.eq(id))
+    pub fn by_id(id: u32) -> BoxedQuery<'static> {
+        Self::all().filter(schema::users::id.eq(id))
+    }
+
+    pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::QueryBuilder::new("SELECT * FROM users")
+            .build_query_as::<Self>()
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_id(id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        sqlx::QueryBuilder::new("SELECT * FROM users WHERE id = ?")
+            .push_bind(id)
+            .build_query_as::<Self>()
+            .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
-
 
 #[derive(Insertable, Default, Debug, Apiv2Schema, Deserialize, ts_rs::TS)]
 #[diesel(table_name = users)]
@@ -61,21 +87,30 @@ impl NewUser {
         self.password = hash_password(&self.password)?;
         match insert_into(users).values(self).execute(con) {
             Ok(_) => {
-                let user_id: i32 = select(schema::last_insert_id()).first(con)?;
+                let user_id: u32 = select(schema::last_insert_id()).first(con)?;
                 let user: User = users.find(user_id).first(con)?;
                 Ok(user)
             }
             Err(e) => Err(e.into()),
         }
     }
-}
 
+    pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<User, anyhow::Error> {
+        let result = sqlx::query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)")
+            .bind(self.name)
+            .bind(self.email)
+            .bind(hash_password(&self.password)?)
+            .execute(db)
+            .await?;
+        User::sqlx_by_id(result.last_insert_id() as u32, db).await
+    }
+}
 
 #[derive(AsChangeset, Deserialize, Apiv2Schema, ts_rs::TS, Debug, Identifiable)]
 #[diesel(table_name = users)]
 #[ts(export)]
 pub struct UpdateUser {
-    pub id: Option<i32>,
+    pub id: Option<u32>,
     pub name: Option<String>,
     pub email: Option<String>,
     pub password: Option<String>,
@@ -93,26 +128,26 @@ impl UpdateUser {
             .filter(id.eq(self.id.ok_or(anyhow::anyhow!("No id found"))?))
             .set((&self, updated_at.eq(chrono::offset::Utc::now().naive_utc())));
         dbg!(diesel::debug_query::<Mysql, _>(&update_statement));
-        update_statement.execute(con)
+        update_statement
+            .execute(con)
             .map_err(|e| anyhow::anyhow!(e))?;
         Ok(())
     }
 }
 
-pub fn create_api_key(
+pub async fn create_api_key(
     user: &User,
-    con: &mut MysqlConnection,
-) -> Result<String, diesel::result::Error> {
-    use self::user_api_keys::dsl::*;
+    con: &sqlx::MySqlPool,
+) -> Result<String, anyhow::Error> {
     use uuid::Uuid;
     let raw_api_key = Uuid::new_v4().to_string();
     let ph = hash_api_key(raw_api_key.as_str());
 
-    match insert_into(user_api_keys)
-        .values((user_id.eq(user.id), api_key.eq(ph)))
+    sqlx::query("INSERT INTO user_api_keys (user_id, api_key) VALUES (?, ?)")
+        .bind(user.id)
+        .bind(ph)
         .execute(con)
-    {
-        Ok(_) => Ok(raw_api_key),
-        Err(e) => Err(e),
-    }
+        .await?;
+
+    Ok(raw_api_key)
 }

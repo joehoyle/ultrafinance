@@ -45,4 +45,9 @@ deno_fs = "0.40.0"
 dialoguer = "0.10.4"
 tempfile = "3.9.0"
 serde_path_to_error = "0.1.15"
-sqlx = { version = "0.7.3", features = ["runtime-tokio-rustls", "mysql"], default-features = false  }
+sqlx = { version = "0.7.2", features = [
+	"runtime-tokio-rustls",
+	"mysql",
+	"macros",
+	"chrono",
+], default-features = false }

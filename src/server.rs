@@ -45,7 +45,7 @@ impl FromRequest for User {
                     let id = id.id();
                     let result = match id {
                         Ok(user_id) => {
-                            let user = match user_id.parse::<i32>() {
+                            let user = match user_id.parse::<u32>() {
                                 Ok(user_id) => {
                                     let user = block(move || -> Result<User, Error> {
                                         use diesel::*;
@@ -365,7 +365,7 @@ pub async fn get_user_by_api_key(
         use diesel::*;
         use schema::user_api_keys::dsl::*;
         let query = user_api_keys.select(user_id).filter(api_key.eq(hashed));
-        let found_user_id: i32 = query.first(&mut db)?;
+        let found_user_id: u32 = query.first(&mut db)?;
         let user: User = schema::users::dsl::users
             .find(found_user_id)
             .first(&mut db)?;

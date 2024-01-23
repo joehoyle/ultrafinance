@@ -7,6 +7,7 @@ use crate::NewMerchant;
 
 pub struct ApiClient {
     client: reqwest::blocking::Client,
+    async_client: reqwest::Client,
 }
 
 impl ApiClient {
@@ -23,7 +24,18 @@ impl ApiClient {
             .timeout(None)
             .build()
             .unwrap();
-        ApiClient { client }
+        let async_client = reqwest::Client::builder()
+            .default_headers({
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    "X-API-KEY",
+                    reqwest::header::HeaderValue::from_str(&api_key).unwrap(),
+                );
+                headers
+            })
+            .build()
+            .unwrap();
+        ApiClient { client, async_client }
     }
 
     /// Enrich and add transactions to the ledger of account holders synchronously.
@@ -39,6 +51,22 @@ impl ApiClient {
         let text = self.client.post(url).json(&transactions).send()?.text()?;
 
         dbg!(&text);
+        let jd = &mut serde_json::Deserializer::from_str(&text);
+        let result: Result<Vec<TransactionOutput>> =
+            serde_path_to_error::deserialize(jd).map_err(|e| e.into());
+        result
+    }
+
+    /// Enrich and add transactions to the ledger of account holders synchronously.
+    ///
+    /// Add transactions to the ledgers of account holders and get back enriched version of the transactions in the response. Accepts batch sizes up to 4k transactions. A single transaction should take ~100ms. A batch of 4000 transactions should take ~40s.
+    pub async fn async_enrich_transactions(
+        &self,
+        transactions: Vec<TransactionInput>,
+    ) -> Result<Vec<TransactionOutput>> {
+        let url = "https://api.ntropy.com/v2/transactions/sync";
+
+        let text = self.async_client.post(url).json(&transactions).send().await?.text().await?;
         let jd = &mut serde_json::Deserializer::from_str(&text);
         let result: Result<Vec<TransactionOutput>> =
             serde_path_to_error::deserialize(jd).map_err(|e| e.into());

@@ -49,11 +49,11 @@ pub async fn get_functions_endpoint(
 pub async fn get_function_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<FunctionWithParams>, Error> {
     let user = user.clone();
     let db = state.db.clone();
-    let function_id: i32 = path.into_inner();
+    let function_id: u32 = path.into_inner();
     let function = block(move || -> Result<FunctionWithParams, Error> {
         let mut con = db.get()?;
         use diesel::*;
@@ -109,10 +109,10 @@ pub async fn update_function_endpoint(
     user: User,
     state: web::Data<AppState>,
     data: web::Json<UpdateFunction>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Function>, Error> {
     let db = state.db.clone();
-    let function_id: i32 = path.into_inner();
+    let function_id: u32 = path.into_inner();
     let mut update_function = data.into_inner();
     update_function.id = Some(function_id);
     let function = block(move || -> Result<Function, Error> {
@@ -140,10 +140,10 @@ pub async fn test_function_endpoint(
     user: User,
     state: web::Data<AppState>,
     data: web::Json<TestFunction>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<String>, Error> {
     let db = state.db.clone();
-    let function_id: i32 = path.into_inner();
+    let function_id: u32 = path.into_inner();
     let test_data = data.into_inner();
     let function = block(move || -> Result<String, Error> {
         use diesel::*;
@@ -164,10 +164,10 @@ pub async fn test_function_endpoint(
 pub async fn delete_function_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<()>, Error> {
     let db = state.db.clone();
-    let function_id: i32 = path.into_inner();
+    let function_id: u32 = path.into_inner();
     let function = block(move || -> Result<(), Error> {
         use diesel::*;
         let mut con = db.get()?;

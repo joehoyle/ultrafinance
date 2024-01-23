@@ -14,25 +14,34 @@ use crate::models::User;
 
 use anyhow::Result;
 
-use super::{TriggerParams, TriggerLog};
 use super::trigger_log::NewTriggerLog;
+use super::{TriggerLog, TriggerParams};
 
 #[derive(
-    Table, Identifiable, Queryable, Associations, ts_rs::TS, Serialize, Apiv2Schema, Selectable, Clone
+    Table,
+    Identifiable,
+    Queryable,
+    Associations,
+    ts_rs::TS,
+    Serialize,
+    Apiv2Schema,
+    Selectable,
+    Clone,
 )]
 #[ts(export)]
 #[diesel(belongs_to(User))]
 #[diesel(belongs_to(Trigger))]
 #[diesel(table_name = trigger_queue)]
+#[derive(sqlx::FromRow)]
 pub struct TriggerQueue {
     #[table(title = "Queue ID")]
-    pub id: i32,
+    pub id: u32,
     #[table(skip)]
     pub payload: String,
     #[table(title = "User ID")]
-    pub user_id: i32,
+    pub user_id: u32,
     #[table(title = "Trigger ID")]
-    pub trigger_id: i32,
+    pub trigger_id: u32,
     #[table(title = "Date Created")]
     pub created_at: chrono::NaiveDateTime,
     #[table(title = "Updated At")]
@@ -52,7 +61,10 @@ impl TriggerQueue {
         let user: User = users::dsl::users.find(trigger.user_id).first(con)?;
 
         let mut deno_runtime = crate::deno::FunctionRuntime::new(&function)?;
-        let result = deno_runtime.run(&serde_json::to_string::<TriggerParams>(&trigger.params)?, &self.payload);
+        let result = deno_runtime.run(
+            &serde_json::to_string::<TriggerParams>(&trigger.params)?,
+            &self.payload,
+        );
         let payload = match &result {
             Ok(p) => (p.clone(), "completed"),
             Err(e) => (e.to_string(), "failed"),
@@ -73,6 +85,34 @@ impl TriggerQueue {
         Ok(log)
     }
 
+    pub async fn sqlx_run(self, db: &sqlx::MySqlPool) -> anyhow::Result<TriggerLog> {
+        let trigger = Trigger::sqlx_by_id(self.trigger_id, db).await?;
+        let function = Function::sqlx_by_id(trigger.function_id, db).await?;
+        let user = User::sqlx_by_id(self.user_id, db).await?;
+
+        let mut deno_runtime = crate::deno::FunctionRuntime::new(&function)?;
+        let result = deno_runtime.run(
+            &serde_json::to_string::<TriggerParams>(&trigger.params)?,
+            &self.payload,
+        );
+        let payload = match &result {
+            Ok(p) => (p.clone(), "completed"),
+            Err(e) => (e.to_string(), "failed"),
+        };
+
+        let log = NewTriggerLog {
+            payload: payload.0,
+            status: payload.1.to_owned(),
+            user_id: user.id,
+            trigger_id: trigger.id,
+        }
+        .sqlx_create(db)
+        .await?;
+
+        self.sqlx_delete(db).await?;
+        Ok(log)
+    }
+
     pub fn all() -> BoxedQuery<'static> {
         schema::trigger_queue::table
             .select(Self::as_select())
@@ -83,10 +123,32 @@ impl TriggerQueue {
         Self::all().filter(schema::trigger_queue::user_id.eq(user.id))
     }
 
-    pub fn by_id(id: i32, user_id: i32) -> BoxedQuery<'static> {
+    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
         Self::all()
             .filter(schema::trigger_queue::id.eq(id))
             .filter(schema::trigger_queue::user_id.eq(user_id))
+    }
+
+    pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM trigger_queue")
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_id(id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM trigger_queue WHERE id = ?", id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_delete(self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
+        sqlx::query!("DELETE FROM trigger_queue WHERE id = ?", self.id)
+            .execute(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
     }
 }
 
@@ -94,8 +156,8 @@ impl TriggerQueue {
 #[diesel(table_name = trigger_queue)]
 pub struct NewTriggerQueue {
     pub payload: String,
-    pub user_id: i32,
-    pub trigger_id: i32,
+    pub user_id: u32,
+    pub trigger_id: u32,
 }
 
 impl NewTriggerQueue {
@@ -103,12 +165,24 @@ impl NewTriggerQueue {
         use self::trigger_queue::dsl::*;
         match insert_into(trigger_queue).values(self).execute(con) {
             Ok(_) => {
-                let trigger_queue_id: i32 = select(schema::last_insert_id()).first(con)?;
+                let trigger_queue_id: u32 = select(schema::last_insert_id()).first(con)?;
                 let trigger_queue_id: TriggerQueue =
                     trigger_queue.find(trigger_queue_id).first(con)?;
                 Ok(trigger_queue_id)
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<TriggerQueue, anyhow::Error> {
+        let result = sqlx::query!(
+            "INSERT INTO trigger_queue (payload, user_id, trigger_id) VALUES (?, ?, ?)",
+            self.payload,
+            self.user_id,
+            self.trigger_id
+        )
+        .execute(db)
+        .await?;
+        TriggerQueue::sqlx_by_id(result.last_insert_id() as u32, db).await
     }
 }

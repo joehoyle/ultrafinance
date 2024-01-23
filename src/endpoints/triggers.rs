@@ -14,7 +14,7 @@ use diesel::*;
 #[derive(Apiv2Schema)]
 #[allow(dead_code)]
 pub struct GetTriggersQuery {
-    function_id: Option<i32>,
+    function_id: Option<u32>,
 }
 
 #[api_v2_operation]
@@ -40,10 +40,10 @@ pub async fn get_triggers_endpoint(
 pub async fn get_trigger_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Trigger>, Error> {
     let db = state.db.clone();
-    let trigger_id: i32 = path.into_inner();
+    let trigger_id: u32 = path.into_inner();
     let trigger = block(move || -> Result<Trigger, Error> {
         use diesel::*;
         let mut con = db.get()?;
@@ -60,7 +60,7 @@ pub async fn get_trigger_endpoint(
 #[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
 #[ts(export)]
 pub struct CreateTrigger {
-    function_id: i32,
+    function_id: u32,
     params: HashMap<String, String>,
     event: String,
     name: String,
@@ -96,7 +96,7 @@ pub async fn create_trigger_endpoint(
 #[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
 #[ts(export)]
 pub struct UpdateTrigger {
-    function_id: Option<i32>,
+    function_id: Option<u32>,
     params: Option<HashMap<String, String>>,
     event: Option<String>,
     name: Option<String>,
@@ -123,10 +123,10 @@ pub async fn update_trigger_endpoint(
     user: User,
     state: web::Data<AppState>,
     data: web::Json<UpdateTrigger>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Trigger>, Error> {
     let db = state.db.clone();
-    let trigger_id: i32 = path.into_inner();
+    let trigger_id: u32 = path.into_inner();
     let trigger = block(move || -> Result<Trigger, Error> {
         let mut con = db.get()?;
         let data = data.into_inner();
@@ -147,7 +147,7 @@ pub async fn update_trigger_endpoint(
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct GetTriggerQueue {
-    trigger_id: Option<i32>,
+    trigger_id: Option<u32>,
 }
 
 #[api_v2_operation]
@@ -173,10 +173,10 @@ pub async fn get_trigger_queue_endpoint(
 pub async fn process_trigger_queue_endpoint(
     user: User,
     state: web::Data<AppState>,
-) -> Result<Json<HashMap<i32, Result<TriggerLog, Error>>>, Error> {
+) -> Result<Json<HashMap<u32, Result<TriggerLog, Error>>>, Error> {
     let db = state.db.clone();
 
-    let logs = block(move || -> Result<HashMap<i32, Result<TriggerLog, Error>>, Error> {
+    let logs = block(move || -> Result<HashMap<u32, Result<TriggerLog, Error>>, Error> {
         use diesel::*;
         let mut con = db.get()?;
         let queue = TriggerQueue::by_user(&user).load(&mut con).map_err(|e| -> Error { e.into() })?;
@@ -218,10 +218,10 @@ pub async fn get_trigger_log_endpoint(
 pub async fn delete_trigger_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<()>, Error> {
     let db = state.db.clone();
-    let trigger_id: i32 = path.into_inner();
+    let trigger_id: u32 = path.into_inner();
     let trigger = block(move || -> Result<(), Error> {
         use diesel::*;
         let mut con = db.get()?;

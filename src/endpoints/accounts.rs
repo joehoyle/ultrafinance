@@ -69,10 +69,10 @@ pub async fn create_accounts_endpoint(
 pub async fn sync_account_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Vec<Transaction>>, Error> {
     let db = state.db.clone();
-    let account_id: i32 = path.into_inner();
+    let account_id: u32 = path.into_inner();
 
     let transactions = block(move || -> Result<Vec<Transaction>, Error> {
         use diesel::*;
@@ -93,11 +93,11 @@ pub async fn sync_account_endpoint(
 pub async fn sync_accounts_endpoint(
     user: User,
     state: web::Data<AppState>,
-) -> Result<Json<HashMap<i32, Result<Vec<TransactionWithMerchant>, Error>>>, Error> {
+) -> Result<Json<HashMap<u32, Result<Vec<TransactionWithMerchant>, Error>>>, Error> {
     let db = state.db.clone();
 
     let transactions = block(
-        move || -> Result<HashMap<i32, Result<Vec<TransactionWithMerchant>, Error>>, Error> {
+        move || -> Result<HashMap<u32, Result<Vec<TransactionWithMerchant>, Error>>, Error> {
             use diesel::*;
             let mut con = db.get()?;
             let accounts = Account::by_user(&user)
@@ -125,10 +125,10 @@ pub async fn sync_accounts_endpoint(
 pub async fn get_account_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Account>, Error> {
     let db = state.db.clone();
-    let account_id: i32 = path.into_inner();
+    let account_id: u32 = path.into_inner();
     let account = block(move || -> Result<Account, Error> {
         use diesel::*;
         let mut con = db.get()?;
@@ -147,10 +147,10 @@ pub async fn update_account_endpoint(
     user: User,
     state: web::Data<AppState>,
     data: web::Json<UpdateAccount>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Account>, Error> {
     let db = state.db.clone();
-    let account_id: i32 = path.into_inner();
+    let account_id: u32 = path.into_inner();
     let mut update_account = data.into_inner();
     update_account.id = Some(account_id);
     let account = block(move || -> Result<Account, Error> {
@@ -170,10 +170,10 @@ pub async fn update_account_endpoint(
 pub async fn delete_account_endpoint(
     user: User,
     state: web::Data<AppState>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<()>, Error> {
     let db = state.db.clone();
-    let account_id: i32 = path.into_inner();
+    let account_id: u32 = path.into_inner();
     let account = block(move || -> Result<(), Error> {
         use diesel::*;
         let mut con = db.get()?;
@@ -197,9 +197,9 @@ pub async fn relink_account_endpoint(
     user: User,
     state: web::Data<AppState>,
     data: web::Json<RelinkAccount>,
-    path: web::Path<i32>,
+    path: web::Path<u32>,
 ) -> Result<Json<Account>, Error> {
-    let account_id: i32 = path.into_inner();
+    let account_id: u32 = path.into_inner();
     block(move || {
         let mut nordigen = nordigen::Nordigen::new();
         nordigen.populate_token()?;

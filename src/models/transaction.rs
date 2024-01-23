@@ -33,9 +33,10 @@ use crate::models::Merchant;
 #[diesel(belongs_to(User))]
 #[diesel(belongs_to(Account))]
 #[diesel(belongs_to(Merchant))]
+#[derive(sqlx::FromRow)]
 pub struct Transaction {
     #[table(title = "Transaction ID")]
-    pub id: i32,
+    pub id: u32,
     #[table(skip)]
     pub external_id: String,
     #[table(title = "Creditor Name", display_fn = "display_option")]
@@ -56,20 +57,20 @@ pub struct Transaction {
         title = "Proprietary Bank Transaction Code",
         display_fn = "display_option"
     )]
-    proprietary_bank_transaction_code: Option<String>,
+    pub proprietary_bank_transaction_code: Option<String>,
     #[table(title = "Exchange Rate", display_fn = "display_option")]
-    currency_exchange_rate: Option<String>,
+    pub currency_exchange_rate: Option<String>,
     #[table(title = "Exchange Source Currency", display_fn = "display_option")]
-    currency_exchange_source_currency: Option<String>,
+    pub currency_exchange_source_currency: Option<String>,
     #[table(title = "Exchange Target Currency", display_fn = "display_option")]
-    currency_exchange_target_currency: Option<String>,
+    pub currency_exchange_target_currency: Option<String>,
     #[table(skip)]
-    pub merchant_id: Option<i32>,
+    pub merchant_id: Option<u32>,
     #[table(title = "Account ID")]
-    pub account_id: i32,
+    pub account_id: u32,
     #[table(title = "User ID")]
     #[serde(skip_serializing)]
-    pub user_id: i32,
+    pub user_id: u32,
     #[table(title = "Date Created")]
     pub created_at: chrono::NaiveDateTime,
     #[table(title = "Updated At")]
@@ -77,11 +78,7 @@ pub struct Transaction {
 }
 
 type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Transaction, Mysql>>;
-type JoinSqlType = diesel::dsl::SqlTypeOf<diesel::dsl::InnerJoin<transactions::table, merchants::table>>;
 type BoxedQuery<'a> = crate::schema::transactions::BoxedQuery<'a, Mysql, SqlType>;
-type JoinBoxedQuery<'a> = crate::schema::transactions::BoxedQuery<'a, Mysql, JoinSqlType>;
-
-type TransactionJoinMerchant = diesel::dsl::InnerJoin<transactions::table, merchants::table>;
 
 impl Transaction {
     pub fn all() -> BoxedQuery<'static> {
@@ -94,7 +91,7 @@ impl Transaction {
         Self::all().filter(schema::transactions::user_id.eq(user.id))
     }
 
-    pub fn by_id(id: i32, user_id: i32) -> BoxedQuery<'static> {
+    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
         Self::all()
             .filter(schema::transactions::id.eq(id))
             .filter(schema::transactions::user_id.eq(user_id))
@@ -117,7 +114,7 @@ impl Transaction {
 
     // }
 
-    pub fn by_id_only(id: i32) -> BoxedQuery<'static> {
+    pub fn by_id_only(id: u32) -> BoxedQuery<'static> {
         Self::all()
             .filter(schema::transactions::id.eq(id))
     }
@@ -131,6 +128,65 @@ impl Transaction {
     pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
         diesel::delete(&self).execute(con)?;
         Ok(())
+    }
+
+    pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::QueryBuilder::new("SELECT * FROM transactions")
+            .build_query_as::<Self>()
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_id(id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        sqlx::QueryBuilder::new("SELECT * FROM transactions WHERE id = ?")
+            .push_bind(id)
+            .build_query_as::<Self>()
+            .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_account(account_id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        sqlx::QueryBuilder::new("SELECT * FROM transactions WHERE account_id = ?")
+            .push_bind(account_id)
+            .build_query_as::<Self>()
+            .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_without_merchant_liimt_100(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM transactions WHERE merchant_id = NULL ORDER BY booking_date DESC LIMIT 100")
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_update(&mut self, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        self.updated_at = chrono::Local::now().naive_local();
+        sqlx::query_as::<_, Self>("UPDATE transactions SET external_id = ?, creditor_name = ?, debtor_name = ?, remittance_information = ?, booking_date = ?, booking_datetime = ?, transaction_amount = ?, transaction_amount_currency = ?, proprietary_bank_transaction_code = ?, currency_exchange_rate = ?, currency_exchange_source_currency = ?, currency_exchange_target_currency = ?, merchant_id = ?, account_id = ?, user_id = ?, created_at = ?, updated_at = ? WHERE id = ?")
+            .bind(&self.external_id)
+            .bind(&self.creditor_name)
+            .bind(&self.debtor_name)
+            .bind(&self.remittance_information)
+            .bind(&self.booking_date)
+            .bind(&self.booking_datetime)
+            .bind(&self.transaction_amount)
+            .bind(&self.transaction_amount_currency)
+            .bind(&self.proprietary_bank_transaction_code)
+            .bind(&self.currency_exchange_rate)
+            .bind(&self.currency_exchange_source_currency)
+            .bind(&self.currency_exchange_target_currency)
+            .bind(&self.merchant_id)
+            .bind(&self.account_id)
+            .bind(&self.user_id)
+            .bind(&self.created_at)
+            .bind(&self.updated_at)
+            .bind(&self.id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -149,8 +205,8 @@ pub struct NewTransaction {
     pub currency_exchange_rate: Option<String>,
     pub currency_exchange_source_currency: Option<String>,
     pub currency_exchange_target_currency: Option<String>,
-    pub account_id: i32,
-    pub user_id: i32,
+    pub account_id: u32,
+    pub user_id: u32,
 }
 
 impl From<SourceTransaction> for NewTransaction {
