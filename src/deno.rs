@@ -1,10 +1,14 @@
 use crate::models::Function;
 use anyhow::anyhow;
-use deno_runtime::{deno_core::{v8, ResolutionKind, ModuleSpecifier, PollEventLoopOptions}, permissions::PermissionsContainer, deno_io::Stdio};
+use deno_runtime::{
+    deno_core::{v8, ModuleSpecifier, PollEventLoopOptions, ResolutionKind},
+    deno_io::Stdio,
+    permissions::PermissionsContainer,
+};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, io::Read, sync::Arc};
 use tempfile::tempfile;
-use std::{collections::HashMap, sync::Arc, io::Read};
 
 pub struct FunctionRuntime {
     runtime: deno_runtime::worker::MainWorker,
@@ -24,10 +28,9 @@ impl FunctionRuntime {
                 include_str!("functions/lunchmoney.ts").to_owned(),
             );
         } else {
-            module_loader.files.insert(
-                main_file.to_owned(),
-                function.source.clone(),
-            );
+            module_loader
+                .files
+                .insert(main_file.to_owned(), function.source.clone());
         }
         let module_loader = std::rc::Rc::new(module_loader);
         let create_web_worker_cb = std::sync::Arc::new(|_| {
@@ -92,12 +95,14 @@ impl FunctionRuntime {
         };
 
         let js_path = std::path::Path::new(&main_file);
-        let main_module = ModuleSpecifier::parse(&format!("https://localhost/{}", &js_path.to_string_lossy()).as_str())?;
+        let main_module = ModuleSpecifier::parse(
+            &format!("https://localhost/{}", &js_path.to_string_lossy()).as_str(),
+        )?;
         let permissions = deno_runtime::permissions::Permissions::allow_all();
 
         let mut worker = deno_runtime::worker::MainWorker::bootstrap_from_options(
             main_module.clone(),
-            PermissionsContainer::new( permissions),
+            PermissionsContainer::new(permissions),
             options,
         );
         // let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -163,16 +168,23 @@ impl FunctionRuntime {
                         let recv = v8::undefined(scope).into();
 
                         // JSON decode params
-                        let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(
-                            scope, "JSON",
-                        ).ok_or(anyhow::anyhow!("JSON not found."))?;
+                        let json =
+                            deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON")
+                                .ok_or(anyhow::anyhow!("JSON not found."))?;
                         let json = v8::Global::new(scope, json);
 
-                        let parse = v8::String::new(scope, "parse").ok_or(anyhow!("Can't make string"))?.into();
-                        let parse = json.open(scope).get(scope, parse).ok_or(anyhow!("Can't get string"))?;
+                        let parse = v8::String::new(scope, "parse")
+                            .ok_or(anyhow!("Can't make string"))?
+                            .into();
+                        let parse = json
+                            .open(scope)
+                            .get(scope, parse)
+                            .ok_or(anyhow!("Can't get string"))?;
                         let parse: v8::Local<v8::Function> = parse.try_into()?;
 
-                        let arg = v8::String::new(scope, params.as_str()).ok_or(anyhow!("Can't make string"))?.into();
+                        let arg = v8::String::new(scope, params.as_str())
+                            .ok_or(anyhow!("Can't make string"))?
+                            .into();
                         let this = v8::undefined(scope).into();
                         let params = match parse.call(scope, this, &[arg]) {
                             Some(r) => Ok(r),
@@ -187,7 +199,9 @@ impl FunctionRuntime {
                         }?;
 
                         let try_scope = &mut v8::TryCatch::new(scope);
-                        let value = function.call(try_scope, recv, &[params, payload]).ok_or(anyhow!("No globa promise found"))?;
+                        let value = function
+                            .call(try_scope, recv, &[params, payload])
+                            .ok_or(anyhow!("No globa promise found"))?;
                         if try_scope.has_caught() || try_scope.has_terminated() {
                             dbg!("caught terminated");
                             try_scope.rethrow();
@@ -201,12 +215,15 @@ impl FunctionRuntime {
                 }
             }
             let promise = promise?;
-            self.runtime.js_runtime.run_event_loop(PollEventLoopOptions::default()).await?;
+            self.runtime
+                .js_runtime
+                .run_event_loop(PollEventLoopOptions::default())
+                .await?;
             let result = self.runtime.js_runtime.resolve_value(promise).await?;
 
             let scope = &mut self.runtime.js_runtime.handle_scope();
-            let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON")
-                .unwrap();
+            let json =
+                deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON").unwrap();
             let json = v8::Global::new(scope, json);
 
             let stringify = v8::String::new(scope, "stringify").unwrap().into();
@@ -227,7 +244,9 @@ impl FunctionRuntime {
     pub fn stdout(&self) -> Option<String> {
         let mut str = String::new();
         match &self.stdio.stdout {
-            deno_runtime::deno_io::StdioPipe::File(file) => file.clone().read_to_string(&mut str).ok().map(|_| str),
+            deno_runtime::deno_io::StdioPipe::File(file) => {
+                file.clone().read_to_string(&mut str).ok().map(|_| str)
+            }
             _ => None,
         }
     }
@@ -238,7 +257,7 @@ impl FunctionRuntime {
             deno_runtime::deno_io::StdioPipe::File(file) => {
                 dbg!(&file);
                 file.clone().read_to_string(&mut str).ok().map(|_| str)
-            },
+            }
             _ => None,
         }
     }
@@ -403,7 +422,8 @@ mod tests {
             function_type: "source".into(),
             source: "export default function () {
                 return 'ji';
-            }".into(),
+            }"
+            .into(),
             user_id: 1,
             created_at: NaiveDateTime::from_timestamp(0, 0),
             updated_at: NaiveDateTime::from_timestamp(0, 0),

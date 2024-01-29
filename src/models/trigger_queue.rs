@@ -12,13 +12,7 @@ use anyhow::Result;
 use super::trigger_log::NewTriggerLog;
 use super::{TriggerLog, TriggerParams};
 
-#[derive(
-    Table,
-    ts_rs::TS,
-    Serialize,
-    Apiv2Schema,
-    Clone,
-)]
+#[derive(Table, ts_rs::TS, Serialize, Apiv2Schema, Clone)]
 #[ts(export)]
 #[derive(sqlx::FromRow)]
 pub struct TriggerQueue {
@@ -83,10 +77,14 @@ impl TriggerQueue {
         user_id: u32,
         db: &sqlx::MySqlPool,
     ) -> Result<Vec<Self>, anyhow::Error> {
-        sqlx::query_as!(Self, "SELECT * FROM trigger_queue WHERE user_id = ?", user_id)
-            .fetch_all(db)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM trigger_queue WHERE user_id = ?",
+            user_id
+        )
+        .fetch_all(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn sqlx_delete(self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {

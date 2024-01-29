@@ -5,14 +5,7 @@ use cli_table::Table;
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Table,
-    Debug,
-    Serialize,
-    ts_rs::TS,
-    Apiv2Schema,
-    Clone,
-)]
+#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone)]
 #[ts(export)]
 pub struct Merchant {
     #[table(title = "Merchant ID")]
@@ -35,9 +28,7 @@ pub struct Merchant {
     pub created_at: chrono::NaiveDateTime,
 }
 
-#[derive(
-    Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default, Clone,
-)]
+#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default, Clone)]
 #[ts(export)]
 pub struct Location {
     pub address: Option<String>,
@@ -161,7 +152,10 @@ impl Merchant {
         .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_by_external_id(external_id: &String, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+    pub async fn sqlx_by_external_id(
+        external_id: &String,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Self, anyhow::Error> {
         use ::sqlx::Arguments as _;
         let arg0 = &(external_id);
         let mut query_args =

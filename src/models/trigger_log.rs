@@ -5,13 +5,7 @@ use serde::Serialize;
 
 use anyhow::Result;
 
-#[derive(
-    Table,
-    Debug,
-    ts_rs::TS,
-    Serialize,
-    Apiv2Schema,
-)]
+#[derive(Table, Debug, ts_rs::TS, Serialize, Apiv2Schema)]
 #[ts(export)]
 pub struct TriggerLog {
     #[table(title = "Log ID")]
@@ -45,7 +39,10 @@ impl TriggerLog {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_by_user(user_id: u32, db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+    pub async fn sqlx_by_user(
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(Self, "SELECT * FROM trigger_log WHERE user_id = ?", user_id)
             .fetch_all(db)
             .await
@@ -53,8 +50,7 @@ impl TriggerLog {
     }
 }
 
-#[derive(Default, Debug)]
-#[derive(sqlx::FromRow)]
+#[derive(Default, Debug, sqlx::FromRow)]
 pub struct NewTriggerLog {
     pub payload: String,
     pub status: String,

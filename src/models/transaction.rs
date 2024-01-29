@@ -7,14 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-#[derive(
-    Table,
-    Debug,
-    Serialize,
-    Deserialize,
-    ts_rs::TS,
-    Apiv2Schema,
-)]
+#[derive(Table, Debug, Serialize, Deserialize, ts_rs::TS, Apiv2Schema)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 #[derive(sqlx::FromRow)]
@@ -62,7 +55,6 @@ pub struct Transaction {
 }
 
 impl Transaction {
-
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::QueryBuilder::new("SELECT * FROM transactions")
             .build_query_as::<Self>()

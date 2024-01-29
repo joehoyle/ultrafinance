@@ -67,7 +67,6 @@ pub async fn delete_transaction_endpoint(
     Ok(Json(()))
 }
 
-
 pub async fn sqlx_add_merchants(
     transactions: Vec<Transaction>,
     db_pool: &sqlx::MySqlPool,

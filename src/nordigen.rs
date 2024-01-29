@@ -468,7 +468,8 @@ impl crate::accounts::SourceAccount for Account {
         client.populate_token().unwrap();
         Ok(client
             .get_account_balances(&self.id)?
-            .first().ok_or(anyhow!("Account not found"))?
+            .first()
+            .ok_or(anyhow!("Account not found"))?
             .balanceAmount
             .clone())
     }

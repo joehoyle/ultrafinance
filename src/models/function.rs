@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-#[derive(
-    Table, Serialize, Apiv2Schema, ts_rs::TS,
-)]
-#[derive(sqlx::FromRow)]
+#[derive(Table, Serialize, Apiv2Schema, ts_rs::TS, sqlx::FromRow)]
 pub struct Function {
     #[table(title = "Account ID")]
     pub id: u32,
@@ -50,14 +47,26 @@ impl Function {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_by_id_by_user(id: u32, user_id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
-        sqlx::query_as!(Self, "SELECT * FROM functions WHERE id = ? AND user_id = ?", id, user_id )
-            .fetch_one(db)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+    pub async fn sqlx_by_id_by_user(
+        id: u32,
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Self, anyhow::Error> {
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM functions WHERE id = ? AND user_id = ?",
+            id,
+            user_id
+        )
+        .fetch_one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_by_user(user_id: u32, db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+    pub async fn sqlx_by_user(
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(Self, "SELECT * FROM functions WHERE user_id = ?", user_id)
             .fetch_all(db)
             .await
@@ -113,7 +122,9 @@ impl UpdateFunction {
             self.name,
             self.source,
             id
-        ).execute(db).await?;
+        )
+        .execute(db)
+        .await?;
         Function::sqlx_by_id(id, db).await
     }
 }

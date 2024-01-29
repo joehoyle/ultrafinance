@@ -451,14 +451,20 @@ async fn main() -> anyhow::Result<()> {
                 let requisition =
                     client.create_requisition(&"oob://".to_owned(), institution_id)?;
                 let user = User::sqlx_by_id(*user_id, &sqlx_pool).await?;
-                nordigen_requisition::sqlx_create_nordigen_requisition(&requisition, &user, &sqlx_pool).await?;
+                nordigen_requisition::sqlx_create_nordigen_requisition(
+                    &requisition,
+                    &user,
+                    &sqlx_pool,
+                )
+                .await?;
                 println!("Visit {} to complete setup. Once complete, run requisitions resume --requisition-id <id>", requisition.link );
                 Ok(())
             }
             RequisitionsCommand::Resume { requisition_id } => {
                 let mut client = Nordigen::new();
                 client.populate_token()?;
-                let db_requisition = NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
+                let db_requisition =
+                    NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
                 let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
 
                 if &requisition.status != "LN" {
@@ -481,7 +487,8 @@ async fn main() -> anyhow::Result<()> {
             RequisitionsCommand::Get { requisition_id } => {
                 let mut client = Nordigen::new();
                 client.populate_token()?;
-                let db_requisition = NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
+                let db_requisition =
+                    NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
                 let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
 
                 dbg!(requisition);
@@ -514,7 +521,8 @@ async fn main() -> anyhow::Result<()> {
                     user_id: user.id,
                     function_id: function.id,
                 }
-                .sqlx_create(&sqlx_pool).await?;
+                .sqlx_create(&sqlx_pool)
+                .await?;
                 dbg!(trigger);
                 Ok(())
             }
@@ -556,7 +564,8 @@ async fn main() -> anyhow::Result<()> {
             TransactionsCommand::Import { account_id } => {
                 let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
 
-                let imported_transactions = ultrafinance::sqlx_import_transactions(&account, &sqlx_pool).await?;
+                let imported_transactions =
+                    ultrafinance::sqlx_import_transactions(&account, &sqlx_pool).await?;
                 println!("imported {} transactions.", imported_transactions.len());
                 Ok(())
             }
@@ -568,25 +577,31 @@ async fn main() -> anyhow::Result<()> {
                 let transaction = Transaction::sqlx_by_id(*id, &sqlx_pool).await?;
                 let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
 
-                let enriched_transaction = client.async_enrich_transactions(vec![transaction.into()]).await?;
+                let enriched_transaction = client
+                    .async_enrich_transactions(vec![transaction.into()])
+                    .await?;
                 println!("Enriched transaction: {:?}", enriched_transaction);
                 Ok(())
             }
             TransactionsCommand::AssignMerchants {} => {
-                let transactions_to_do = Transaction::sqlx_without_merchant_liimt_100(&sqlx_pool).await?;
+                let transactions_to_do =
+                    Transaction::sqlx_without_merchant_liimt_100(&sqlx_pool).await?;
 
                 let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
                 // Call .into() on all transactions_to_do
-                let enriched_transactions = client.async_enrich_transactions(
-                    transactions_to_do.into_iter().map(|t| t.into()).collect(),
-                ).await?;
+                let enriched_transactions = client
+                    .async_enrich_transactions(
+                        transactions_to_do.into_iter().map(|t| t.into()).collect(),
+                    )
+                    .await?;
                 for enriched_transaction in enriched_transactions {
                     match NewMerchant::try_from(&enriched_transaction) {
                         Ok(merchant) => match merchant.sqlx_create_or_fetch(&sqlx_pool).await {
                             Ok(merchant) => {
                                 let t_id =
                                     enriched_transaction.transaction_id.parse::<u32>().unwrap();
-                                let mut transaction = Transaction::sqlx_by_id(t_id, &sqlx_pool).await?;
+                                let mut transaction =
+                                    Transaction::sqlx_by_id(t_id, &sqlx_pool).await?;
                                 transaction.merchant_id = Some(merchant.id);
                                 transaction.sqlx_update(&sqlx_pool).await?;
                             }
@@ -609,7 +624,9 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Server(command) => match command {
-            ServerCommand::Start => server::start().await.map_err(|e| anyhow::anyhow!(e.to_string())),
+            ServerCommand::Start => server::start()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string())),
         },
     }
 }

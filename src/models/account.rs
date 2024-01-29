@@ -6,14 +6,7 @@ use cli_table::Table;
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Table,
-    Debug,
-    Serialize,
-    ts_rs::TS,
-    Apiv2Schema,
-    Clone,
-)]
+#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone)]
 #[ts(export)]
 #[derive(sqlx::FromRow)]
 pub struct Account {
@@ -54,7 +47,6 @@ pub struct Account {
 }
 
 impl Account {
-
     pub fn update_balance(&mut self) -> Result<()> {
         let balance = self.source()?.balance()?;
 
@@ -240,7 +232,6 @@ pub struct UpdateAccount {
 }
 
 impl UpdateAccount {
-
     pub async fn sqlx_update(self, db: &sqlx::MySqlPool) -> Result<Account, anyhow::Error> {
         let result = sqlx::query("UPDATE accounts SET name = ?, number = ?, account_type = ?, nordigen_id = ?, currency = ?, product = ?, cash_account_type = ?, details = ?, owner_name = ?, status = ?, icon = ?, institution_name = ?, config = ?, user_id = ?, updated_at = ? WHERE id = ?")
             .bind(&self.name)

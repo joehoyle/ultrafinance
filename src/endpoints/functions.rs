@@ -2,7 +2,7 @@ use actix_web::web::{self, block};
 use anyhow::Result;
 use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web::Json};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::models::{Function, NewFunction, UpdateFunction, User};
 use crate::server::{AppState, Error};
@@ -26,12 +26,10 @@ pub async fn get_functions_endpoint(
     let functions = block(move || -> Result<Vec<FunctionWithParams>, Error> {
         Ok(functions
             .into_iter()
-            .map(|f| {
-                FunctionWithParams {
-                    params: f.get_params().ok(),
-                    function: f,
-                }
-            } )
+            .map(|f| FunctionWithParams {
+                params: f.get_params().ok(),
+                function: f,
+            })
             .collect::<Vec<FunctionWithParams>>())
     })
     .await
@@ -82,7 +80,8 @@ pub async fn create_function_endpoint(
         source: data.source.clone(),
         user_id: user.id,
     }
-    .sqlx_create(db).await?;
+    .sqlx_create(db)
+    .await?;
     Ok(Json(function))
 }
 
@@ -124,7 +123,9 @@ pub async fn test_function_endpoint(
     let function = block(move || -> Result<String, Error> {
         let mut deno_runtime = crate::deno::FunctionRuntime::new(&function)?;
         dbg!(&test_data.payload);
-        deno_runtime.run(&test_data.params, &test_data.payload).map_err(|e|e.into())
+        deno_runtime
+            .run(&test_data.params, &test_data.payload)
+            .map_err(|e| e.into())
     })
     .await
     .unwrap();

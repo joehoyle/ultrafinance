@@ -3,8 +3,8 @@ use paperclip::actix::{api_v2_operation, web, web::Json};
 use serde::Deserialize;
 
 use crate::models::User;
-use crate::{nordigen, sqlx_create_nordigen_requisition, Account};
 use crate::server::{AppState, Error};
+use crate::{nordigen, sqlx_create_nordigen_requisition, Account};
 
 #[api_v2_operation]
 pub async fn get_requisitions_institutions_endpoint(
@@ -55,7 +55,10 @@ pub async fn create_requisition_endpoint(
         actix_web::web::block(move || {
             nordigen.populate_token()?;
             let nordigen_account = nordigen.get_account(&account.nordigen_id)?;
-            nordigen.create_requisition(&format!("{}/accounts/{}/resume", &state.url, account_id), &nordigen_account.institution_id)
+            nordigen.create_requisition(
+                &format!("{}/accounts/{}/resume", &state.url, account_id),
+                &nordigen_account.institution_id,
+            )
         })
         .await
         .unwrap()
@@ -65,7 +68,8 @@ pub async fn create_requisition_endpoint(
 
     match requisition {
         Ok(requisition) => {
-            let inserted_requisition = sqlx_create_nordigen_requisition(&requisition, &user, &db).await;
+            let inserted_requisition =
+                sqlx_create_nordigen_requisition(&requisition, &user, &db).await;
             match inserted_requisition {
                 Ok(_inserted_requisition) => Ok(Json(requisition)),
                 Err(e) => Err(e.into()),

@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::models;
-use crate::Transaction;
 use crate::NewMerchant;
+use crate::Transaction;
 
 pub struct ApiClient {
     client: reqwest::blocking::Client,
@@ -35,7 +35,10 @@ impl ApiClient {
             })
             .build()
             .unwrap();
-        ApiClient { client, async_client }
+        ApiClient {
+            client,
+            async_client,
+        }
     }
 
     /// Enrich and add transactions to the ledger of account holders synchronously.
@@ -66,7 +69,14 @@ impl ApiClient {
     ) -> Result<Vec<TransactionOutput>> {
         let url = "https://api.ntropy.com/v2/transactions/sync";
 
-        let text = self.async_client.post(url).json(&transactions).send().await?.text().await?;
+        let text = self
+            .async_client
+            .post(url)
+            .json(&transactions)
+            .send()
+            .await?
+            .text()
+            .await?;
         let jd = &mut serde_json::Deserializer::from_str(&text);
         let result: Result<Vec<TransactionOutput>> =
             serde_path_to_error::deserialize(jd).map_err(|e| e.into());
@@ -202,7 +212,10 @@ impl TryFrom<&TransactionOutput> for NewMerchant {
     type Error = anyhow::Error;
     fn try_from(value: &TransactionOutput) -> Result<Self> {
         Ok(NewMerchant {
-            name: value.merchant.clone().ok_or(anyhow::anyhow!("No merchant"))?,
+            name: value
+                .merchant
+                .clone()
+                .ok_or(anyhow::anyhow!("No merchant"))?,
             logo_url: value.logo.clone(),
             location: value.location.clone(),
             location_structured: match &value.location_structured {
