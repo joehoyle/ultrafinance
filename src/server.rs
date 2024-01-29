@@ -15,7 +15,6 @@ use paperclip::actix::{
     OpenApiExt,
 };
 
-use diesel::mysql::MysqlConnection;
 use dotenvy::dotenv;
 use serde::Serialize;
 
@@ -26,7 +25,6 @@ use std::env;
 use crate::models::*;
 
 pub struct AppState {
-    pub db: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>,
     pub sqlx_pool: sqlx::MySqlPool,
     pub url: String,
 }
@@ -136,14 +134,6 @@ impl From<r2d2::Error> for Error {
     }
 }
 
-impl From<diesel::result::Error> for Error {
-    fn from(err: diesel::result::Error) -> Error {
-        Error {
-            err: anyhow::anyhow!(err.to_string()),
-        }
-    }
-}
-
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Error {
         Error {
@@ -166,10 +156,6 @@ async fn index(_req: HttpRequest) -> actix_web::Result<NamedFile> {
 #[actix_web::main]
 pub async fn start() -> std::io::Result<()> {
     dotenv().ok();
-    let manager = diesel::r2d2::ConnectionManager::<MysqlConnection>::new(
-        env::var("DATABASE_URL").unwrap().as_str(),
-    );
-    let pool = diesel::r2d2::Pool::builder().build(manager).unwrap();
     println!("Listening on http://0.0.0.0:3000");
 
     let secret_key = env::var("COOKIE_SECRET").unwrap();
@@ -234,7 +220,6 @@ pub async fn start() -> std::io::Result<()> {
             .with_json_spec_at("/api/spec/v2")
             .with_swagger_ui_at("/docs")
             .app_data(Data::new(AppState {
-                db: pool.clone(),
                 url: env::var("SITE_URL").unwrap().to_owned(),
                 sqlx_pool: sqlx_pool.clone(),
             }))

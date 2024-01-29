@@ -1,6 +1,6 @@
 [package]
 name = "ultrafinance"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -16,7 +16,6 @@ chrono = { version = "0.4.31", features = ["serde"] }
 clap = { version = "4.0.17", features = ["derive"] }
 cli-table = "0.4.7"
 deno_runtime = { version = "0.137.0", features = [] }
-diesel = { version = "2.0.0", features = ["mysql", "chrono", "r2d2", "serde_json"] }
 reqwest = { version = "0.11.12", features = ["json", "blocking"] }
 serde = { version = "1.0.146", features = ["serde_derive"] }
 serde_json = "1.0.87"
@@ -32,11 +31,8 @@ rand = "0.8.5"
 ts-rs = { version = "6.2.1", features = ["chrono", "chrono-impl"] }
 actix-cors = "0.6.4"
 derive_more = "0.99.17"
-diesel-enum = "0.1.0"
 paperclip = { version = "0.8.2", features = ["actix4", "swagger-ui", "chrono"] }
 r2d2 = "0.8.10"
-serde_with = "2.1.0"
-threadpool = "1.8.1"
 actix-session = { version = "0.7.2", features = ["cookie-session"] }
 actix-identity = "0.5.2"
 base64 = "0.21.0"
