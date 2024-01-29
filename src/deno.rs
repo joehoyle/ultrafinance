@@ -100,9 +100,10 @@ impl FunctionRuntime {
             PermissionsContainer::new( permissions),
             options,
         );
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
-        let local = tokio::task::LocalSet::new();
-        let result: anyhow::Result<i32> = local.block_on(&mut rt, async {
+        // let mut rt = tokio::runtime::Runtime::new().unwrap();
+        // let local = tokio::task::LocalSet::new();
+        let handle = tokio::runtime::Handle::current();
+        let result: anyhow::Result<i32> = handle.block_on(async {
             let module_id = worker.preload_main_module(&main_module).await?;
             worker.evaluate_module(module_id).await?;
             worker.run_event_loop(false).await?;
@@ -139,9 +140,10 @@ impl FunctionRuntime {
     }
 
     pub fn run(&mut self, params: &String, payload: &String) -> anyhow::Result<String> {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
-        let local = tokio::task::LocalSet::new();
-        let result = local.block_on(&mut rt, async {
+        // let mut rt = tokio::runtime::Runtime::new().unwrap();
+        // let local = tokio::task::LocalSet::new();
+        let handle = tokio::runtime::Handle::current();
+        let result = handle.block_on(async {
             let promise: Result<v8::Global<v8::Value>, anyhow::Error>;
             {
                 let module_namespace = self

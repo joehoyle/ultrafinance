@@ -609,7 +609,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Server(command) => match command {
-            ServerCommand::Start => server::start().map_err(|e| anyhow::anyhow!(e.to_string())),
+            ServerCommand::Start => server::start().await.map_err(|e| anyhow::anyhow!(e.to_string())),
         },
     }
 }

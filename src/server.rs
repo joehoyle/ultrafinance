@@ -153,7 +153,6 @@ async fn index(_req: HttpRequest) -> actix_web::Result<NamedFile> {
     Ok(NamedFile::open(path)?)
 }
 
-#[actix_web::main]
 pub async fn start() -> std::io::Result<()> {
     dotenv().ok();
     println!("Listening on http://0.0.0.0:3000");
