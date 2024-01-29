@@ -1,32 +1,17 @@
-use crate::schema::*;
 use crate::utils::display_option;
 use anyhow::Result;
 use cli_table::Table;
 
-use diesel::deserialize::FromSql;
-use diesel::mysql::Mysql;
-use diesel::mysql::MysqlValue;
-use diesel::serialize::{IsNull, Output, ToSql};
-use diesel::sql_types::Text;
-use diesel::*;
-use diesel::{Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
-
-use crate::schema;
 
 #[derive(
     Table,
-    Identifiable,
-    Queryable,
     Debug,
     Serialize,
     ts_rs::TS,
     Apiv2Schema,
-    Selectable,
     Clone,
-    AsChangeset,
 )]
 #[ts(export)]
 pub struct Merchant {
@@ -51,9 +36,8 @@ pub struct Merchant {
 }
 
 #[derive(
-    Deserialize, Serialize, Debug, FromSqlRow, ts_rs::TS, Apiv2Schema, AsExpression, Default, Clone,
+    Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default, Clone,
 )]
-#[diesel(sql_type = Text)]
 #[ts(export)]
 pub struct Location {
     pub address: Option<String>,
@@ -74,48 +58,7 @@ impl From<String> for Location {
     }
 }
 
-impl ToSql<Text, Mysql> for Location {
-    fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Mysql>) -> serialize::Result {
-        serde_json::to_writer(out, self)
-            .map(|_| IsNull::No)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
-    }
-}
-
-impl FromSql<Text, Mysql> for Location {
-    fn from_sql(bytes: MysqlValue<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        serde_json::from_slice(bytes.as_bytes())
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
-    }
-}
-
-type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Merchant, Mysql>>;
-type BoxedQuery<'a> = crate::schema::merchants::BoxedQuery<'a, Mysql, SqlType>;
-
 impl Merchant {
-    pub fn all() -> BoxedQuery<'static> {
-        schema::merchants::table
-            .select(Self::as_select())
-            .into_boxed()
-    }
-    pub fn by_id(id: u32) -> BoxedQuery<'static> {
-        Self::all().filter(schema::merchants::id.eq(id))
-    }
-
-    pub fn by_external_id(id: &str) -> BoxedQuery<'static> {
-        Self::all().filter(schema::merchants::external_id.eq(id.to_string()))
-    }
-
-    pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::delete(&self).execute(con)?;
-        Ok(())
-    }
-
-    pub fn update(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::update(&self).set(&self).execute(con)?;
-        Ok(())
-    }
-
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
         let query_args =
             <sqlx::mysql::MySql as ::sqlx::database::HasArguments>::Arguments::default();
@@ -275,8 +218,7 @@ impl Merchant {
     }
 }
 
-#[derive(Insertable, Default, Debug)]
-#[diesel(table_name = merchants)]
+#[derive(Default, Debug)]
 pub struct NewMerchant {
     pub name: String,
     pub logo_url: Option<String>,
@@ -288,18 +230,6 @@ pub struct NewMerchant {
 }
 
 impl NewMerchant {
-    pub fn create(self, con: &mut MysqlConnection) -> Result<Merchant> {
-        use self::merchants::dsl::*;
-        match insert_into(merchants).values(self).execute(con) {
-            Ok(_) => {
-                let merchant_id: u32 = select(schema::last_insert_id()).first(con)?;
-                let merchant: Merchant = merchants.find(merchant_id).first(con)?;
-                Ok(merchant)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<Merchant> {
         let result = sqlx::query!(
             "INSERT INTO merchants (name, logo_url, location, location_structured, labels, external_id, website) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -313,22 +243,6 @@ impl NewMerchant {
         ) .execute(db)
             .await?;
         Merchant::sqlx_by_id(result.last_insert_id() as u32, db).await
-    }
-
-    pub fn create_or_fetch(self, con: &mut MysqlConnection) -> Result<Merchant> {
-        match &self.external_id {
-            Some(external_id) => match Merchant::by_external_id(external_id).first(con) {
-                Ok(merchant) => Ok(merchant),
-                Err(_) => {
-                    let merchant = self.create(con)?;
-                    Ok(merchant)
-                }
-            },
-            None => {
-                let merchant = self.create(con)?;
-                Ok(merchant)
-            }
-        }
     }
 
     pub async fn sqlx_create_or_fetch(self, db: &sqlx::MySqlPool) -> Result<Merchant> {

@@ -1,11 +1,11 @@
-use std::{fmt::Display, pin::Pin, path::PathBuf, str::FromStr};
+use std::{fmt::Display, path::PathBuf, pin::Pin, str::FromStr};
 
 use actix_files::NamedFile;
-use actix_web::{web::{Data, block}, App, FromRequest, HttpRequest, HttpServer, dev::Service, http::header};
+use actix_web::{dev::Service, http::header, web::Data, App, FromRequest, HttpRequest, HttpServer};
 
 use actix_cors::Cors;
 
-use actix_identity::{Identity, IdentityMiddleware, IdentityExt};
+use actix_identity::{Identity, IdentityExt, IdentityMiddleware};
 use actix_session::{storage::CookieSessionStore, SessionMiddleware};
 
 use futures::FutureExt;
@@ -19,15 +19,15 @@ use diesel::mysql::MysqlConnection;
 use dotenvy::dotenv;
 use serde::Serialize;
 
-use std::env;
-use crate::ultrafinance::{hash_api_key, is_dev, DbPool};
-use crate::schema;
 use crate::endpoints;
+use crate::ultrafinance::{hash_api_key, is_dev};
+use std::env;
 
 use crate::models::*;
 
 pub struct AppState {
     pub db: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>,
+    pub sqlx_pool: sqlx::MySqlPool,
     pub url: String,
 }
 
@@ -36,7 +36,7 @@ impl FromRequest for User {
     type Future = Pin<Box<dyn futures::Future<Output = Result<User, actix_web::Error>>>>;
 
     fn from_request(req: &HttpRequest, _pl: &mut actix_web::dev::Payload) -> Self::Future {
-        let db = req.app_data::<Data<AppState>>().unwrap().db.clone();
+        let db = req.app_data::<Data<AppState>>().unwrap().sqlx_pool.clone();
 
         let id = Identity::from_request(req, _pl).into_inner();
         match id {
@@ -46,20 +46,11 @@ impl FromRequest for User {
                     let result = match id {
                         Ok(user_id) => {
                             let user = match user_id.parse::<u32>() {
-                                Ok(user_id) => {
-                                    let user = block(move || -> Result<User, Error> {
-                                        use diesel::*;
-                                        let con = db.get();
-                                        User::by_id(user_id).first(&mut con.unwrap()).map_err(|e|e.into())
-                                    }).await.unwrap();
-                                    user
-                                },
-                                Err(_) => {
-                                    Err(anyhow::anyhow!("Unable to parse id").into())
-                                },
+                                Ok(user_id) => User::sqlx_by_id(user_id, &db).await,
+                                Err(_) => Err(anyhow::anyhow!("Unable to parse id").into()),
                             };
                             user
-                        },
+                        }
                         Err(_) => Err(anyhow::anyhow!("Unable to get id").into()),
                     };
                     match result {
@@ -68,9 +59,7 @@ impl FromRequest for User {
                     }
                 });
             }
-            Err(_) => {
-
-            }
+            Err(_) => {}
         }
 
         let authorization_header = req.headers().get("Authorization");
@@ -182,23 +171,28 @@ pub async fn start() -> std::io::Result<()> {
     );
     let pool = diesel::r2d2::Pool::builder().build(manager).unwrap();
     println!("Listening on http://0.0.0.0:3000");
-    // let secret_key = actix_web::cookie::Key::generate();
-    // let output = &secret_key.master();
-    // let secret: String = base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, *output);
 
     let secret_key = env::var("COOKIE_SECRET").unwrap();
-    let secret_key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD_NO_PAD, secret_key).unwrap();
+    let secret_key = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD_NO_PAD,
+        secret_key,
+    )
+    .unwrap();
     let secret_key = actix_web::cookie::Key::from(secret_key.as_slice());
+    let sqlx_pool = sqlx::MySqlPool::connect(&env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
 
     HttpServer::new(move || {
-        let session_mw = SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
-            // disable secure cookie for local testing
-            .cookie_secure(!is_dev())
-            .cookie_same_site( match is_dev() {
-                true => actix_web::cookie::SameSite::None,
-                false => actix_web::cookie::SameSite::Strict,
-            } )
-            .build();
+        let session_mw =
+            SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
+                // disable secure cookie for local testing
+                .cookie_secure(!is_dev())
+                .cookie_same_site(match is_dev() {
+                    true => actix_web::cookie::SameSite::None,
+                    false => actix_web::cookie::SameSite::Strict,
+                })
+                .build();
 
         let cors = Cors::default()
             .allowed_origin(env::var("SITE_URL").unwrap().as_str())
@@ -206,7 +200,7 @@ pub async fn start() -> std::io::Result<()> {
             .allow_any_method()
             .supports_credentials()
             .max_age(3600);
-         App::new()
+        App::new()
             .service(
                 actix_files::Files::new("/frontend/dist/", "./frontend/dist/").show_files_listing(),
             )
@@ -216,12 +210,19 @@ pub async fn start() -> std::io::Result<()> {
                 srv.call(req).map(move |res| {
                     let res = res.map(|mut response| {
                         let build_id = option_env!("BUILD_ID").unwrap_or("dev");
-                        response.headers_mut().insert(header::HeaderName::from_str("X-Build").unwrap(), header::HeaderValue::from_str(build_id).unwrap());
+                        response.headers_mut().insert(
+                            header::HeaderName::from_str("X-Build").unwrap(),
+                            header::HeaderValue::from_str(build_id).unwrap(),
+                        );
                         if identity.is_ok() || has_authorization_header {
-                            response.headers_mut().insert(header::HeaderName::from_str("Cache-Control").unwrap(), header::HeaderValue::from_str("private, no-cache, must-revalidate").unwrap());
+                            response.headers_mut().insert(
+                                header::HeaderName::from_str("Cache-Control").unwrap(),
+                                header::HeaderValue::from_str("private, no-cache, must-revalidate")
+                                    .unwrap(),
+                            );
                         }
                         response
-                    } );
+                    });
                     res
                 })
             })
@@ -235,6 +236,7 @@ pub async fn start() -> std::io::Result<()> {
             .app_data(Data::new(AppState {
                 db: pool.clone(),
                 url: env::var("SITE_URL").unwrap().to_owned(),
+                sqlx_pool: sqlx_pool.clone(),
             }))
             .service(
                 web::scope("/api/v1")
@@ -270,27 +272,36 @@ pub async fn start() -> std::io::Result<()> {
                         web::resource("/functions/{function_id}")
                             .route(web::get().to(endpoints::functions::get_function_endpoint))
                             .route(web::post().to(endpoints::functions::update_function_endpoint))
-                            .route(web::delete().to(endpoints::functions::delete_function_endpoint)),
+                            .route(
+                                web::delete().to(endpoints::functions::delete_function_endpoint),
+                            ),
                     )
                     .service(
                         web::resource("/functions/{function_id}/test")
-                            .route(web::post().to(endpoints::functions::test_function_endpoint))
+                            .route(web::post().to(endpoints::functions::test_function_endpoint)),
                     )
-                    .service(
-                        web::resource("/requisitions")
-                            .route(web::post().to(endpoints::requisitions::create_requisition_endpoint)),
-                    )
-                    .service(web::resource("/requisitions/institutions").route(
-                        web::get().to(endpoints::requisitions::get_requisitions_institutions_endpoint),
+                    .service(web::resource("/requisitions").route(
+                        web::post().to(endpoints::requisitions::create_requisition_endpoint),
                     ))
                     .service(
-                        web::resource("/transactions")
-                            .route(web::get().to(endpoints::transactions::get_transactions_endpoint)),
+                        web::resource("/requisitions/institutions").route(
+                            web::get().to(
+                                endpoints::requisitions::get_requisitions_institutions_endpoint,
+                            ),
+                        ),
+                    )
+                    .service(
+                        web::resource("/transactions").route(
+                            web::get().to(endpoints::transactions::get_transactions_endpoint),
+                        ),
                     )
                     .service(
                         web::resource("/transactions/{transaction_id}")
                             .route(web::get().to(endpoints::transactions::get_transaction_endpoint))
-                            .route(web::delete().to(endpoints::transactions::delete_transaction_endpoint)),
+                            .route(
+                                web::delete()
+                                    .to(endpoints::transactions::delete_transaction_endpoint),
+                            ),
                     )
                     .service(
                         web::resource("/triggers")
@@ -302,8 +313,9 @@ pub async fn start() -> std::io::Result<()> {
                             .route(web::get().to(endpoints::triggers::get_trigger_queue_endpoint)),
                     )
                     .service(
-                        web::resource("/triggers/queue/process")
-                            .route(web::post().to(endpoints::triggers::process_trigger_queue_endpoint)),
+                        web::resource("/triggers/queue/process").route(
+                            web::post().to(endpoints::triggers::process_trigger_queue_endpoint),
+                        ),
                     )
                     .service(
                         web::resource("/triggers/log")
@@ -328,7 +340,7 @@ pub async fn start() -> std::io::Result<()> {
                     .service(
                         web::resource("/users")
                             .route(web::post().to(endpoints::users::create_user_endpoint)),
-                    )
+                    ),
             )
             .build()
             .route("/", actix_web::web::get().to(index))
@@ -339,7 +351,10 @@ pub async fn start() -> std::io::Result<()> {
             .route("/accounts/resume", actix_web::web::get().to(index))
             .route("/accounts/{account_id}", actix_web::web::get().to(index))
             .route("/transactions", actix_web::web::get().to(index))
-            .route("/transactions/{transaction_id}", actix_web::web::get().to(index))
+            .route(
+                "/transactions/{transaction_id}",
+                actix_web::web::get().to(index),
+            )
             .route("/functions", actix_web::web::get().to(index))
             .route("/functions/new", actix_web::web::get().to(index))
             .route("/functions/{function_id}", actix_web::web::get().to(index))
@@ -356,20 +371,15 @@ pub async fn start() -> std::io::Result<()> {
 
 pub async fn get_user_by_api_key(
     raw_api_key: String,
-    db_pool: &DbPool,
+    db: &sqlx::MySqlPool,
 ) -> Result<User, anyhow::Error> {
-    let mut db = db_pool.get().map_err(anyhow::Error::msg).unwrap();
+    let hashed = hash_api_key(raw_api_key.as_str());
 
-    actix_web::web::block(move || {
-        let hashed = hash_api_key(raw_api_key.as_str());
-        use diesel::*;
-        use schema::user_api_keys::dsl::*;
-        let query = user_api_keys.select(user_id).filter(api_key.eq(hashed));
-        let found_user_id: u32 = query.first(&mut db)?;
-        let user: User = schema::users::dsl::users
-            .find(found_user_id)
-            .first(&mut db)?;
-        Ok(user)
-    })
-    .await?
+    sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = (SELECT user_id FROM user_api_keys WHERE api_key = ?)",
+    )
+    .bind(hashed)
+    .fetch_one(db)
+    .await
+    .map_err(|e| anyhow::anyhow!(e))
 }

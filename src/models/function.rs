@@ -1,23 +1,13 @@
-use crate::schema::{self, *};
-
 use cli_table::Table;
 
-use diesel::mysql::Mysql;
-use diesel::*;
-use diesel::{Associations, Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
-use crate::models::User;
 use anyhow::Result;
 
-type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Function, Mysql>>;
-type BoxedQuery<'a> = crate::schema::functions::BoxedQuery<'a, Mysql, SqlType>;
-
 #[derive(
-    Table, Identifiable, Queryable, Associations, Serialize, Apiv2Schema, Selectable, ts_rs::TS,
+    Table, Serialize, Apiv2Schema, ts_rs::TS,
 )]
-#[diesel(belongs_to(User))]
 #[derive(sqlx::FromRow)]
 pub struct Function {
     #[table(title = "Account ID")]
@@ -44,27 +34,6 @@ impl Function {
         runtime.get_params()
     }
 
-    pub fn all() -> BoxedQuery<'static> {
-        schema::functions::table
-            .select(Self::as_select())
-            .into_boxed()
-    }
-
-    pub fn by_user(user: &User) -> BoxedQuery<'static> {
-        Self::all().filter(schema::functions::user_id.eq(user.id))
-    }
-
-    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::functions::id.eq(id))
-            .filter(schema::functions::user_id.eq(user_id))
-    }
-
-    pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::delete(&self).execute(con)?;
-        Ok(())
-    }
-
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::QueryBuilder::new("SELECT * FROM functions")
             .build_query_as::<Self>()
@@ -80,10 +49,31 @@ impl Function {
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    pub async fn sqlx_by_id_by_user(id: u32, user_id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM functions WHERE id = ? AND user_id = ?", id, user_id )
+            .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_user(user_id: u32, db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM functions WHERE user_id = ?", user_id)
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_delete(&self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
+        sqlx::query!("DELETE FROM accounts WHERE id = ?", &self.id)
+            .execute(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
 }
 
-#[derive(Insertable, AsChangeset, Default, Debug)]
-#[diesel(table_name = functions)]
+#[derive(Default, Debug)]
 pub struct NewFunction {
     pub name: String,
     pub function_type: String,
@@ -92,18 +82,6 @@ pub struct NewFunction {
 }
 
 impl NewFunction {
-    pub fn create(&self, con: &mut MysqlConnection) -> Result<Function> {
-        use self::functions::dsl::*;
-        match insert_into(functions).values(self).execute(con) {
-            Ok(_) => {
-                let function_id: u32 = select(schema::last_insert_id()).first(con)?;
-                let function: Function = functions.find(function_id).first(con)?;
-                Ok(function)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<Function, anyhow::Error> {
         let result = sqlx::query!(
             "INSERT INTO functions (name, function_type, source, user_id) VALUES (?, ?, ?, ?)",
@@ -119,8 +97,7 @@ impl NewFunction {
     }
 }
 
-#[derive(Deserialize, Apiv2Schema, AsChangeset, ts_rs::TS)]
-#[diesel(table_name = functions)]
+#[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
 #[ts(export)]
 pub struct UpdateFunction {
     pub id: Option<u32>,
@@ -129,17 +106,14 @@ pub struct UpdateFunction {
 }
 
 impl UpdateFunction {
-    pub fn update(self, con: &mut MysqlConnection) -> Result<Function> {
-        use self::functions::dsl::*;
-        diesel::update(functions)
-            .filter(id.eq(self.id.ok_or(anyhow::anyhow!("No id found"))?))
-            .set((&self, updated_at.eq(chrono::offset::Utc::now().naive_utc())))
-            .execute(con)
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        Function::all()
-            .filter(schema::functions::id.eq(id))
-            .first(con)
-            .map_err(|e| anyhow::anyhow!(e))
+    pub async fn sqlx_update(self, db: &sqlx::MySqlPool) -> Result<Function, anyhow::Error> {
+        let id = self.id.ok_or(anyhow::anyhow!("No id found"))?;
+        sqlx::query!(
+            "UPDATE functions SET name = ?, source = ? WHERE id = ?",
+            self.name,
+            self.source,
+            id
+        ).execute(db).await?;
+        Function::sqlx_by_id(id, db).await
     }
 }

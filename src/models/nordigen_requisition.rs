@@ -1,18 +1,13 @@
 use crate::nordigen::Requisition;
-use crate::schema::*;
 
 use cli_table::Table;
-
-use diesel::*;
-use diesel::{Associations, Identifiable, MysqlConnection, Queryable};
 
 use serde::Serialize;
 
 use crate::models::User;
 
-#[derive(Table, Identifiable, Queryable, Associations, Debug, Serialize, ts_rs::TS)]
+#[derive(Table, Debug, Serialize, ts_rs::TS)]
 #[ts(export)]
-#[diesel(belongs_to(User))]
 #[derive(sqlx::FromRow)]
 pub struct NordigenRequisition {
     #[table(title = "Requisition ID")]
@@ -44,25 +39,6 @@ impl NordigenRequisition {
             .fetch_one(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-pub fn create_nordigen_requisition(
-    requisition: &Requisition,
-    user: &User,
-    con: &mut MysqlConnection,
-) -> Result<(), diesel::result::Error> {
-    use self::nordigen_requisitions::dsl::*;
-    match insert_into(nordigen_requisitions)
-        .values((
-            nordigen_id.eq(requisition.id.clone()),
-            status.eq(requisition.status.clone()),
-            user_id.eq(user.id),
-        ))
-        .execute(con)
-    {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
     }
 }
 

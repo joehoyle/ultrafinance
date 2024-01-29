@@ -1,33 +1,20 @@
 use crate::accounts::{get_source_account, SourceAccount, SourceAccountDetails};
-use crate::schema::*;
 use crate::utils::display_option;
 use anyhow::Result;
 use cli_table::Table;
 
-use diesel::mysql::Mysql;
-use diesel::*;
-use diesel::{Associations, Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
-use crate::models::User;
-use crate::schema;
-
 #[derive(
     Table,
-    Identifiable,
-    Queryable,
-    Associations,
     Debug,
     Serialize,
     ts_rs::TS,
     Apiv2Schema,
-    Selectable,
     Clone,
-    AsChangeset,
 )]
 #[ts(export)]
-#[diesel(belongs_to(User))]
 #[derive(sqlx::FromRow)]
 pub struct Account {
     #[table(title = "Account ID")]
@@ -66,46 +53,7 @@ pub struct Account {
     pub number: Option<String>,
 }
 
-type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Account, Mysql>>;
-type BoxedQuery<'a> = crate::schema::accounts::BoxedQuery<'a, Mysql, SqlType>;
-
 impl Account {
-    pub fn all() -> BoxedQuery<'static> {
-        schema::accounts::table
-            .select(Self::as_select())
-            .into_boxed()
-    }
-
-    pub fn by_user(user: &User) -> BoxedQuery<'static> {
-        Self::all().filter(schema::accounts::user_id.eq(user.id))
-    }
-
-    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::accounts::id.eq(id))
-            .filter(schema::accounts::user_id.eq(user_id))
-    }
-
-    pub fn by_source_account_details(
-        details: SourceAccountDetails,
-        user_id: u32,
-    ) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::accounts::user_id.eq(user_id))
-            .filter(schema::accounts::number.eq(details.number))
-            .filter(schema::accounts::institution_name.eq(details.institution_name))
-    }
-
-    pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::delete(&self).execute(con)?;
-        Ok(())
-    }
-
-    pub fn update(&mut self, con: &mut MysqlConnection) -> Result<()> {
-        self.updated_at = chrono::Local::now().naive_local();
-        diesel::update(&*self).set(&*self).execute(con)?;
-        Ok(())
-    }
 
     pub fn update_balance(&mut self) -> Result<()> {
         let balance = self.source()?.balance()?;
@@ -139,6 +87,17 @@ impl Account {
             .bind(id)
             .bind(user_id)
             .fetch_one(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_by_user(
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Account>, anyhow::Error> {
+        sqlx::query_as::<_, Account>("SELECT * FROM accounts WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
@@ -190,10 +149,17 @@ impl Account {
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    pub async fn sqlx_delete(&self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(&self.id)
+            .execute(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
 }
 
-#[derive(Insertable, Default, Debug)]
-#[diesel(table_name = accounts)]
 pub struct NewAccount {
     pub name: String,
     pub number: Option<String>,
@@ -212,18 +178,6 @@ pub struct NewAccount {
 }
 
 impl NewAccount {
-    pub fn create(self, con: &mut MysqlConnection) -> Result<Account> {
-        use self::accounts::dsl::*;
-        match insert_into(accounts).values(self).execute(con) {
-            Ok(_) => {
-                let account_id: u32 = select(schema::last_insert_id()).first(con)?;
-                let account: Account = accounts.find(account_id).first(con)?;
-                Ok(account)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<Account, anyhow::Error> {
         let result = sqlx::query!("INSERT INTO accounts (name, number, account_type, nordigen_id, currency, product, cash_account_type, details, owner_name, status, icon, institution_name, config, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             self.name,
@@ -268,8 +222,7 @@ impl From<SourceAccountDetails> for NewAccount {
     }
 }
 
-#[derive(Deserialize, Apiv2Schema, AsChangeset, ts_rs::TS)]
-#[diesel(table_name = accounts)]
+#[derive(ts_rs::TS, Deserialize, Apiv2Schema)]
 #[ts(export)]
 pub struct UpdateAccount {
     pub id: Option<u32>,
@@ -287,19 +240,6 @@ pub struct UpdateAccount {
 }
 
 impl UpdateAccount {
-    pub fn update(self, con: &mut MysqlConnection) -> Result<Account> {
-        use self::accounts::dsl::*;
-        diesel::update(accounts)
-            .filter(id.eq(self.id.ok_or(anyhow::anyhow!("No id found"))?))
-            .set((&self, updated_at.eq(chrono::offset::Utc::now().naive_utc())))
-            .execute(con)
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        Account::all()
-            .filter(schema::accounts::id.eq(id))
-            .first(con)
-            .map_err(|e| anyhow::anyhow!(e))
-    }
 
     pub async fn sqlx_update(self, db: &sqlx::MySqlPool) -> Result<Account, anyhow::Error> {
         let result = sqlx::query("UPDATE accounts SET name = ?, number = ?, account_type = ?, nordigen_id = ?, currency = ?, product = ?, cash_account_type = ?, details = ?, owner_name = ?, status = ?, icon = ?, institution_name = ?, config = ?, user_id = ?, updated_at = ? WHERE id = ?")

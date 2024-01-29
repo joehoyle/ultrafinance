@@ -1,33 +1,18 @@
-use crate::schema::{self, *};
-
 use cli_table::Table;
 
-use diesel::mysql::Mysql;
-use diesel::*;
-use diesel::{Associations, Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::Serialize;
 
 use anyhow::Result;
 
-use crate::models::Trigger;
-use crate::models::User;
-
 #[derive(
     Table,
-    Identifiable,
-    Queryable,
-    Associations,
     Debug,
     ts_rs::TS,
     Serialize,
     Apiv2Schema,
-    Selectable,
 )]
 #[ts(export)]
-#[diesel(belongs_to(User))]
-#[diesel(belongs_to(Trigger))]
-#[diesel(table_name = trigger_log)]
 pub struct TriggerLog {
     #[table(title = "Log ID")]
     pub id: u32,
@@ -45,26 +30,7 @@ pub struct TriggerLog {
     pub updated_at: chrono::NaiveDateTime,
 }
 
-type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<TriggerLog, Mysql>>;
-type BoxedQuery<'a> = crate::schema::trigger_log::BoxedQuery<'a, Mysql, SqlType>;
-
 impl TriggerLog {
-    pub fn all() -> BoxedQuery<'static> {
-        schema::trigger_log::table
-            .select(Self::as_select())
-            .into_boxed()
-    }
-
-    pub fn by_user(user: &User) -> BoxedQuery<'static> {
-        Self::all().filter(schema::trigger_log::user_id.eq(user.id))
-    }
-
-    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::trigger_log::id.eq(id))
-            .filter(schema::trigger_log::user_id.eq(user_id))
-    }
-
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(Self, "SELECT * FROM trigger_log")
             .fetch_all(db)
@@ -78,10 +44,16 @@ impl TriggerLog {
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    pub async fn sqlx_by_user(user_id: u32, db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM trigger_log WHERE user_id = ?", user_id)
+            .fetch_all(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
 }
 
-#[derive(Insertable, Default, Debug)]
-#[diesel(table_name = trigger_log)]
+#[derive(Default, Debug)]
 #[derive(sqlx::FromRow)]
 pub struct NewTriggerLog {
     pub payload: String,
@@ -91,18 +63,6 @@ pub struct NewTriggerLog {
 }
 
 impl NewTriggerLog {
-    pub fn create(&self, con: &mut MysqlConnection) -> Result<TriggerLog> {
-        use self::trigger_log::dsl::*;
-        match insert_into(trigger_log).values(self).execute(con) {
-            Ok(_) => {
-                let trigger_log_id_id: u32 = select(schema::last_insert_id()).first(con)?;
-                let trigger_log_id: TriggerLog = trigger_log.find(trigger_log_id_id).first(con)?;
-                Ok(trigger_log_id)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<TriggerLog, anyhow::Error> {
         let result = sqlx::query!(
             "INSERT INTO trigger_log (payload, status, user_id, trigger_id) VALUES (?, ?, ?, ?)",

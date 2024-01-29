@@ -5,7 +5,6 @@ use paperclip::actix::{api_v2_operation, web::Json};
 use serde::{Serialize, Deserialize};
 
 use crate::models::{Function, NewFunction, UpdateFunction, User};
-use crate::schema;
 use crate::server::{AppState, Error};
 
 #[derive(Serialize, Apiv2Schema, ts_rs::TS)]
@@ -22,13 +21,9 @@ pub async fn get_functions_endpoint(
     user: User,
     state: web::Data<AppState>,
 ) -> Result<Json<Vec<FunctionWithParams>>, Error> {
-    let db = state.db.clone();
-    let user = user.clone();
+    let db = &state.sqlx_pool;
+    let functions = Function::sqlx_by_user(user.id, db).await?;
     let functions = block(move || -> Result<Vec<FunctionWithParams>, Error> {
-        let mut con = db.get()?;
-        use diesel::*;
-        let functions = Function::by_user(&user).load(&mut con)?;
-
         Ok(functions
             .into_iter()
             .map(|f| {
@@ -52,17 +47,10 @@ pub async fn get_function_endpoint(
     path: web::Path<u32>,
 ) -> Result<Json<FunctionWithParams>, Error> {
     let user = user.clone();
-    let db = state.db.clone();
+    let db = &state.sqlx_pool;
     let function_id: u32 = path.into_inner();
+    let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
     let function = block(move || -> Result<FunctionWithParams, Error> {
-        let mut con = db.get()?;
-        use diesel::*;
-        use schema::functions::dsl::*;
-        let function = Function::by_user(&user)
-            .filter(id.eq(function_id))
-            .first(&mut con)
-            .map_err(|e| -> Error { e.into() })?;
-
         Ok(FunctionWithParams {
             params: function.get_params().ok(),
             function: function,
@@ -87,21 +75,15 @@ pub async fn create_function_endpoint(
     state: web::Data<AppState>,
     data: web::Json<CreateFunction>,
 ) -> Result<Json<Function>, Error> {
-    let db = state.db.clone();
-    let function = block(move || -> Result<Function, Error> {
-        let mut con = db.get()?;
-        NewFunction {
-            name: data.name.clone(),
-            function_type: "user".into(),
-            source: data.source.clone(),
-            user_id: user.id,
-        }
-        .create(&mut con)
-        .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-    function.map(Json)
+    let db = &state.sqlx_pool;
+    let function = NewFunction {
+        name: data.name.clone(),
+        function_type: "user".into(),
+        source: data.source.clone(),
+        user_id: user.id,
+    }
+    .sqlx_create(db).await?;
+    Ok(Json(function))
 }
 
 #[api_v2_operation]
@@ -111,21 +93,14 @@ pub async fn update_function_endpoint(
     data: web::Json<UpdateFunction>,
     path: web::Path<u32>,
 ) -> Result<Json<Function>, Error> {
-    let db = state.db.clone();
+    let db = &state.sqlx_pool;
     let function_id: u32 = path.into_inner();
     let mut update_function = data.into_inner();
     update_function.id = Some(function_id);
-    let function = block(move || -> Result<Function, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        // Validate
-        Function::by_id(function_id, user.id).first(&mut con)?;
-        update_function.update(&mut con).map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    function.map(Json)
+    // Validate function.
+    Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
+    let function = update_function.sqlx_update(db).await?;
+    Ok(Json(function))
 }
 
 #[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
@@ -142,14 +117,11 @@ pub async fn test_function_endpoint(
     data: web::Json<TestFunction>,
     path: web::Path<u32>,
 ) -> Result<Json<String>, Error> {
-    let db = state.db.clone();
+    let db = &state.sqlx_pool;
     let function_id: u32 = path.into_inner();
+    let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
     let test_data = data.into_inner();
     let function = block(move || -> Result<String, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        // Validate
-        let function = Function::by_id(function_id, user.id).first(&mut con)?;
         let mut deno_runtime = crate::deno::FunctionRuntime::new(&function)?;
         dbg!(&test_data.payload);
         deno_runtime.run(&test_data.params, &test_data.payload).map_err(|e|e.into())
@@ -166,16 +138,9 @@ pub async fn delete_function_endpoint(
     state: web::Data<AppState>,
     path: web::Path<u32>,
 ) -> Result<Json<()>, Error> {
-    let db = state.db.clone();
+    let db = &state.sqlx_pool;
     let function_id: u32 = path.into_inner();
-    let function = block(move || -> Result<(), Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        let function = Function::by_id(function_id, user.id).first(&mut con)?;
-        function.delete(&mut con).map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    function.map(Json)
+    let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
+    function.sqlx_delete(db).await?;
+    Ok(Json(()))
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use actix_web::web::{self, block};
+use actix_web::web;
 use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web::Json};
 use serde::Deserialize;
@@ -8,8 +8,6 @@ use serde::Deserialize;
 use crate::models::{Function, NewTrigger, Trigger, TriggerFilter, TriggerLog, TriggerQueue, User};
 use crate::server::{AppState, Error};
 use crate::ultrafinance;
-
-use diesel::*;
 
 #[derive(Apiv2Schema)]
 #[allow(dead_code)]
@@ -22,18 +20,9 @@ pub async fn get_triggers_endpoint(
     user: User,
     state: web::Data<AppState>,
 ) -> Result<Json<Vec<Trigger>>, Error> {
-    let db = state.db.clone();
-    let triggers = block(move || -> Result<Vec<Trigger>, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        Trigger::by_user(user.id)
-            .load(&mut con)
-            .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    triggers.map(Json)
+    let db = state.sqlx_pool.clone();
+    let triggers = Trigger::sqlx_by_user(user.id, &db).await?;
+    Ok(Json(triggers))
 }
 
 #[api_v2_operation]
@@ -42,19 +31,10 @@ pub async fn get_trigger_endpoint(
     state: web::Data<AppState>,
     path: web::Path<u32>,
 ) -> Result<Json<Trigger>, Error> {
-    let db = state.db.clone();
+    let db = state.sqlx_pool.clone();
     let trigger_id: u32 = path.into_inner();
-    let trigger = block(move || -> Result<Trigger, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        Trigger::by_id(trigger_id, user.id)
-            .first(&mut con)
-            .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    trigger.map(Json)
+    let trigger = Trigger::sqlx_by_id_by_user(trigger_id, user.id, &db).await?;
+    Ok(Json(trigger))
 }
 
 #[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
@@ -72,25 +52,20 @@ pub async fn create_trigger_endpoint(
     state: web::Data<AppState>,
     data: web::Json<CreateTrigger>,
 ) -> Result<Json<Trigger>, Error> {
-    let db = state.db.clone();
-    let trigger = block(move || -> Result<Trigger, Error> {
-        let mut con = db.get()?;
-        // Validate the function id
-        Function::by_id(data.function_id, user.id).first(&mut con)?;
-        NewTrigger {
-            event: data.event.clone(),
-            name: data.name.clone(),
-            filter: TriggerFilter(vec![]), // todo
-            params: serde_json::to_string(&data.params)?,
-            user_id: user.id,
-            function_id: data.function_id,
-        }
-        .create(&mut con)
-        .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-    trigger.map(Json)
+    let db = state.sqlx_pool.clone();
+
+    let function = Function::sqlx_by_id_by_user(data.function_id, user.id, &db).await?;
+    let new_trigger = NewTrigger {
+        event: data.event.clone(),
+        name: data.name.clone(),
+        filter: TriggerFilter(vec![]), // todo
+        params: serde_json::to_string(&data.params)?,
+        user_id: user.id,
+        function_id: function.id,
+    };
+
+    let trigger = new_trigger.sqlx_create(&db).await?;
+    Ok(Json(trigger))
 }
 
 #[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
@@ -125,23 +100,14 @@ pub async fn update_trigger_endpoint(
     data: web::Json<UpdateTrigger>,
     path: web::Path<u32>,
 ) -> Result<Json<Trigger>, Error> {
-    let db = state.db.clone();
+    let db = state.sqlx_pool.clone();
     let trigger_id: u32 = path.into_inner();
-    let trigger = block(move || -> Result<Trigger, Error> {
-        let mut con = db.get()?;
-        let data = data.into_inner();
-        Trigger::by_id(trigger_id, user.id).first(&mut con)?;
-        let mut update: crate::models::UpdateTrigger = data.into();
-        update.id = Some(trigger_id);
-        update.update(&mut con)?;
-        Trigger::by_id(trigger_id, user.id)
-            .first(&mut con)
-            .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    trigger.map(Json)
+    // Validate
+    let _trigger = Trigger::sqlx_by_id_by_user(trigger_id, user.id, &db).await?;
+    let mut update: crate::models::UpdateTrigger = data.into_inner().into();
+    update.id = Some(trigger_id);
+    let trigger = update.sqlx_update(&db).await?;
+    Ok(Json(trigger))
 }
 
 #[derive(Deserialize)]
@@ -155,18 +121,11 @@ pub async fn get_trigger_queue_endpoint(
     user: User,
     state: web::Data<AppState>,
 ) -> Result<Json<Vec<TriggerQueue>>, Error> {
-    let db = state.db.clone();
-    let trigger_queue = block(move || -> Result<Vec<TriggerQueue>, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        TriggerQueue::by_user(&user)
-            .load(&mut con)
-            .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    trigger_queue.map(Json)
+    let db = state.sqlx_pool.clone();
+    TriggerQueue::sqlx_by_user(user.id, &db)
+        .await
+        .map(Json)
+        .map_err(|e| e.into())
 }
 
 #[api_v2_operation]
@@ -174,24 +133,16 @@ pub async fn process_trigger_queue_endpoint(
     user: User,
     state: web::Data<AppState>,
 ) -> Result<Json<HashMap<u32, Result<TriggerLog, Error>>>, Error> {
-    let db = state.db.clone();
+    let db = &state.sqlx_pool;
+    let queue = TriggerQueue::sqlx_by_user(user.id, &db).await?;
+    let trigger_log_map = ultrafinance::sqlx_process_trigger_queue(queue, db).await;
+    let mut trigger_log_map_response = HashMap::new();
+    for (trigger_queue_id, result) in trigger_log_map {
+        trigger_log_map_response
+            .insert(trigger_queue_id, result.map_err(|e| -> Error { e.into() }));
+    }
 
-    let logs = block(move || -> Result<HashMap<u32, Result<TriggerLog, Error>>, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        let queue = TriggerQueue::by_user(&user).load(&mut con).map_err(|e| -> Error { e.into() })?;
-        let trigger_log_map = ultrafinance::process_trigger_queue(&queue, db);
-        let mut trigger_log_map_response = HashMap::new();
-        for (trigger_queue_id, result) in trigger_log_map {
-            trigger_log_map_response.insert(trigger_queue_id, result.map_err(|e| -> Error { e.into() }));
-        }
-
-        Ok(trigger_log_map_response)
-    })
-    .await
-    .unwrap();
-
-    logs.map(Json)
+    Ok(Json(trigger_log_map_response))
 }
 
 #[api_v2_operation]
@@ -199,20 +150,10 @@ pub async fn get_trigger_log_endpoint(
     user: User,
     state: web::Data<AppState>,
 ) -> Result<Json<Vec<TriggerLog>>, Error> {
-    let db = state.db.clone();
-    let trigger_log = block(move || -> Result<Vec<TriggerLog>, Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        TriggerLog::by_user(&user)
-            .load(&mut con)
-            .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
-
-    trigger_log.map(Json)
+    let db = state.sqlx_pool.clone();
+    let trigger_log = TriggerLog::sqlx_by_user(user.id, &db).await;
+    trigger_log.map(Json).map_err(|e| e.into())
 }
-
 
 #[api_v2_operation]
 pub async fn delete_trigger_endpoint(
@@ -220,17 +161,10 @@ pub async fn delete_trigger_endpoint(
     state: web::Data<AppState>,
     path: web::Path<u32>,
 ) -> Result<Json<()>, Error> {
-    let db = state.db.clone();
+    let db = state.sqlx_pool.clone();
     let trigger_id: u32 = path.into_inner();
-    let trigger = block(move || -> Result<(), Error> {
-        use diesel::*;
-        let mut con = db.get()?;
-        let trigger = Trigger::by_id(trigger_id, user.id).first(&mut con)?;
-        trigger.delete(&mut con).map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
+    let trigger = Trigger::sqlx_by_id_by_user(trigger_id, user.id, &db).await?;
+    trigger.sqlx_delete(&db).await?;
 
-    trigger.map(Json)
+    Ok(Json(()))
 }
-

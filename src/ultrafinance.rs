@@ -1,81 +1,15 @@
 use crate::models::*;
-use crate::schema;
 use anyhow::anyhow;
 use chrono::Duration;
-use diesel::*;
 use sqlx::Row;
-
-pub type DbPool =
-    diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>;
-pub type DbConnection =
-    diesel::r2d2::PooledConnection<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>;
 
 use std::collections::HashMap;
 use std::env;
-use std::sync::mpsc::channel;
 
 pub fn is_dev() -> bool {
     env::var("IS_DEVELOPMENT")
         .map(|v| v.eq("1"))
         .unwrap_or(false)
-}
-pub fn import_transactions(
-    account: &Account,
-    con: &mut DbConnection,
-) -> anyhow::Result<Vec<Transaction>> {
-    use crate::schema::transactions::dsl::*;
-
-    let latest_transaction: Option<Transaction> = transactions
-        .filter(account_id.eq(account.id))
-        .order(booking_date.desc())
-        .limit(1)
-        .first(con)
-        .optional()
-        .map_err(anyhow::Error::msg)?;
-    // Get all transactions from 7 days before the last transaction to account for slow to confirm transaction.
-    let from_date = latest_transaction.map(|t| t.booking_date - Duration::days(7));
-
-    let other_transactions = account.source()?.transactions(&from_date, &None)?;
-
-    let mut new_transactions: Vec<transaction::NewTransaction> = vec![];
-    for transaction in other_transactions {
-        let exists: bool = diesel::dsl::select(diesel::dsl::exists(
-            schema::transactions::dsl::transactions
-                .filter(external_id.eq(&transaction.id))
-                .filter(account_id.eq(account.id)),
-        ))
-        .get_result(con)?;
-
-        if exists {
-            continue;
-        }
-
-        let mut new_transaction = NewTransaction::from(transaction);
-        new_transaction.account_id = account.id;
-        new_transaction.user_id = account.user_id;
-        new_transactions.push(new_transaction);
-    }
-
-    let inserted = diesel::insert_into(transactions)
-        .values(&new_transactions)
-        .execute(con)?;
-
-    // Hack to get all the transactions inserted
-    let inserted_transactions: Vec<Transaction> = transactions
-        .filter(account_id.eq(account.id))
-        .order(id.desc())
-        .limit(inserted as i64)
-        .get_results(con)
-        .map_err(anyhow::Error::msg)?;
-
-    // Enrich the transactions that were inserted
-    let inserted_transactions = enrich_transactions(inserted_transactions, con)?;
-
-    // Create the triggers
-    for transaction in &inserted_transactions {
-        create_transaction_trigger_queue(transaction, con)?;
-    }
-    Ok(inserted_transactions)
 }
 
 pub async fn sqlx_import_transactions(
@@ -95,6 +29,7 @@ pub async fn sqlx_import_transactions(
         .map(|t| t.booking_date - Duration::days(7))
         .ok();
 
+    // TOdo: this needs to be an async function
     let other_transactions = account.source()?.transactions(&from_date, &None)?;
 
     let mut new_transactions: Vec<transaction::NewTransaction> = vec![];
@@ -157,32 +92,6 @@ pub async fn sqlx_import_transactions(
     Ok(inserted_transactions)
 }
 
-pub fn create_transaction_trigger_queue(
-    transaction: &Transaction,
-    con: &mut DbConnection,
-) -> anyhow::Result<()> {
-    use schema::triggers::dsl::*;
-    let transaction_triggers: Vec<Trigger> = Trigger::by_user(transaction.user_id)
-        .filter(event.eq("transaction_created"))
-        .load(con)?;
-
-    let transaction_triggers = transaction_triggers
-        .into_iter()
-        .filter(|trigger| trigger.filter.matches(transaction))
-        .collect::<Vec<Trigger>>();
-
-    for transaction_trigger in &transaction_triggers {
-        NewTriggerQueue {
-            payload: serde_json::to_string(transaction)?,
-            user_id: transaction.user_id,
-            trigger_id: transaction_trigger.id,
-        }
-        .create(con)?;
-    }
-
-    Ok(())
-}
-
 pub async fn sqlx_create_transaction_trigger_queue(
     transaction: &Transaction,
     db: &sqlx::MySqlPool,
@@ -236,94 +145,48 @@ pub fn verify_password(hash: &str, password: &str) -> anyhow::Result<()> {
     }
 }
 
-pub fn sync_accounts(
+pub async fn sqlx_sync_accounts(
     accounts: &Vec<Account>,
-    db_pool: &diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>,
+    db: &sqlx::MySqlPool,
 ) -> HashMap<u32, anyhow::Result<Vec<Transaction>>> {
-    let thread_pool = threadpool::ThreadPool::new(8);
-    let (tx, rx) = channel::<(u32, anyhow::Result<Vec<Transaction>>)>();
+    let mut import_futures = Vec::new();
 
     for account in accounts {
-        let tx = tx.clone();
-        let db = db_pool.clone();
-        let account = account.clone();
-        #[allow(unused_must_use)]
-        thread_pool.execute(move || {
-            let mut con = db.get().unwrap();
-            let result = import_transactions(&account, &mut con);
-            tx.send((account.id, result));
-        });
+        let import_future = sqlx_import_transactions(&account, db);
+        import_futures.push(import_future);
     }
 
-    thread_pool.join();
+    let import_results = futures::future::join_all(import_futures).await;
 
     let mut result_map = HashMap::new();
 
-    for (account_id, result) in rx.iter().take(accounts.len()) {
-        result_map.insert(account_id, result);
+    for (account_id, result) in import_results.into_iter().enumerate() {
+        result_map.insert(accounts[account_id].id, result);
     }
 
     result_map
 }
 
-pub fn process_trigger_queue(
-    queue: &Vec<TriggerQueue>,
-    db_pool: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::mysql::MysqlConnection>>,
+pub async fn sqlx_process_trigger_queue(
+    queue: Vec<TriggerQueue>,
+    db: &sqlx::MySqlPool,
 ) -> HashMap<u32, anyhow::Result<TriggerLog>> {
-    let thread_pool = threadpool::ThreadPool::new(8);
-    let (tx, rx) = channel::<(u32, anyhow::Result<TriggerLog>)>();
+    let mut futures = Vec::new();
 
-    for q in queue {
-        let tx = tx.clone();
-        let db = db_pool.clone();
-        let q = q.clone();
-        #[allow(unused_must_use)]
-        thread_pool.execute(move || {
-            let mut con = db.get().unwrap();
-            let log = q.run(&mut con);
-            tx.send((q.id, log));
-        });
+    for q in &queue {
+        let future = q.clone().sqlx_run(db);
+        futures.push(future);
     }
 
-    thread_pool.join();
+    let results = futures::future::join_all(futures).await;
 
     let mut result_map = HashMap::new();
 
-    for (queue_id, log) in rx.iter().take(queue.len()) {
-        result_map.insert(queue_id, log);
+    for (queue_id, log) in results.into_iter().enumerate() {
+        result_map.insert(queue[queue_id].id, log);
     }
 
     result_map
-}
-
-fn enrich_transactions(
-    transactions: Vec<Transaction>,
-    con: &mut DbConnection,
-) -> anyhow::Result<Vec<Transaction>> {
-    let client = crate::ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
-    let enriched_transactions =
-        client.enrich_transactions(transactions.into_iter().map(|t| t.into()).collect())?;
-    let mut transactions: Vec<Transaction> = vec![];
-    for enriched_transaction in enriched_transactions {
-        match NewMerchant::try_from(&enriched_transaction) {
-            Ok(merchant) => match merchant.create_or_fetch(con) {
-                Ok(merchant) => {
-                    let t_id = enriched_transaction.transaction_id.parse::<u32>().unwrap();
-                    let mut transaction: Transaction = Transaction::by_id_only(t_id).first(con)?;
-                    transaction.merchant_id = Some(merchant.id);
-                    transaction.update(con)?;
-                    transactions.push(transaction);
-                }
-                Err(err) => {
-                    println!("Error creating merchant: {}", err);
-                    continue;
-                }
-            },
-            Err(err) => println!("Error getting merchant: {}", err),
-        }
-    }
-
-    Ok(transactions)
 }
 
 async fn sqlx_enrich_transactions(

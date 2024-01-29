@@ -16,7 +16,6 @@ pub mod endpoints;
 pub mod models;
 pub mod nordigen;
 pub mod ntropy;
-pub mod schema;
 pub mod server;
 pub mod ultrafinance;
 pub mod utils;

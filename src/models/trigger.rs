@@ -1,27 +1,12 @@
-use crate::schema::*;
-
 use cli_table::Table;
-use diesel::deserialize::FromSql;
-use diesel::mysql::{Mysql, MysqlValue};
-use diesel::serialize::{IsNull, Output, ToSql};
-use diesel::sql_types::Text;
-use diesel::*;
-use diesel::{Associations, Identifiable, MysqlConnection, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
-use std::error::Error;
 
 use anyhow::Result;
 
-use crate::models::Function;
 use crate::models::Transaction;
-use crate::models::User;
-use crate::schema;
-
-type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Trigger, Mysql>>;
-type BoxedQuery<'a> = crate::schema::triggers::BoxedQuery<'a, Mysql, SqlType>;
 
 #[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema)]
 #[ts(export)]
@@ -29,17 +14,11 @@ pub enum TriggerFilterPredicate {
     Account(Vec<u32>),
 }
 
-#[derive(
-    Deserialize, Serialize, Debug, FromSqlRow, ts_rs::TS, Apiv2Schema, AsExpression, Default,
-)]
-#[diesel(sql_type = Text)]
+#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default)]
 #[ts(export)]
 pub struct TriggerFilter(pub Vec<TriggerFilterPredicate>);
 
-#[derive(
-    Deserialize, Serialize, Debug, FromSqlRow, ts_rs::TS, Apiv2Schema, AsExpression, Default,
-)]
-#[diesel(sql_type = Text)]
+#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default)]
 #[ts(export)]
 pub struct TriggerParams(pub HashMap<String, String>);
 
@@ -71,50 +50,8 @@ impl From<String> for TriggerFilter {
     }
 }
 
-impl ToSql<Text, Mysql> for TriggerFilter {
-    fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Mysql>) -> serialize::Result {
-        serde_json::to_writer(out, self)
-            .map(|_| IsNull::No)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
-    }
-}
-
-impl FromSql<Text, Mysql> for TriggerFilter {
-    fn from_sql(bytes: MysqlValue<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        serde_json::from_slice(bytes.as_bytes())
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
-    }
-}
-
-impl ToSql<Text, Mysql> for TriggerParams {
-    fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Mysql>) -> serialize::Result {
-        serde_json::to_writer(out, self)
-            .map(|_| IsNull::No)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
-    }
-}
-
-impl FromSql<Text, Mysql> for TriggerParams {
-    fn from_sql(bytes: MysqlValue<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        serde_json::from_slice(bytes.as_bytes())
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)
-    }
-}
-
-#[derive(
-    Table,
-    Identifiable,
-    Queryable,
-    Associations,
-    Debug,
-    Serialize,
-    ts_rs::TS,
-    Apiv2Schema,
-    Selectable,
-)]
+#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema)]
 #[ts(export)]
-#[diesel(belongs_to(User))]
-#[diesel(belongs_to(Function))]
 #[derive(sqlx::FromRow)]
 pub struct Trigger {
     #[table(title = "Trigger ID")]
@@ -139,27 +76,6 @@ pub struct Trigger {
 }
 
 impl Trigger {
-    pub fn all() -> BoxedQuery<'static> {
-        schema::triggers::table
-            .select(Self::as_select())
-            .into_boxed()
-    }
-
-    pub fn by_user(user_id: u32) -> BoxedQuery<'static> {
-        Self::all().filter(schema::triggers::user_id.eq(user_id))
-    }
-
-    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::triggers::id.eq(id))
-            .filter(schema::triggers::user_id.eq(user_id))
-    }
-
-    pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::delete(&self).execute(con)?;
-        Ok(())
-    }
-
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(Self, "SELECT * FROM triggers")
             .fetch_all(db)
@@ -174,17 +90,58 @@ impl Trigger {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_for_user_for_event(user_id: u32, event: &str, db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
-        sqlx::query_as!(Self, "SELECT * FROM triggers WHERE user_id = ? AND event = ?", user_id, event)
+    pub async fn sqlx_by_user(
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM triggers WHERE user_id = ?", user_id)
             .fetch_all(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    pub async fn sqlx_by_id_by_user(
+        id: u32,
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Self, anyhow::Error> {
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM triggers WHERE id = ? AND user_id = ?",
+            id,
+            user_id
+        )
+        .fetch_one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+    pub async fn sqlx_for_user_for_event(
+        user_id: u32,
+        event: &str,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM triggers WHERE user_id = ? AND event = ?",
+            user_id,
+            event
+        )
+        .fetch_all(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_delete(self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
+        sqlx::query("DELETE FROM triggers WHERE id = ?")
+            .bind(self.id)
+            .execute(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
 }
 
-#[derive(Insertable, Default, Debug)]
-#[diesel(table_name = triggers)]
+#[derive(Default, Debug)]
 pub struct NewTrigger {
     pub event: String,
     pub name: String,
@@ -195,18 +152,6 @@ pub struct NewTrigger {
 }
 
 impl NewTrigger {
-    pub fn create(&self, con: &mut MysqlConnection) -> Result<Trigger> {
-        use self::triggers::dsl::*;
-        match insert_into(triggers).values(self).execute(con) {
-            Ok(_) => {
-                let trigger_id: u32 = select(schema::last_insert_id()).first(con)?;
-                let trigger: Trigger = triggers.find(trigger_id).first(con)?;
-                Ok(trigger)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<Trigger, anyhow::Error> {
         let result = sqlx::query!(
             "INSERT INTO triggers (event, name, filter, params, user_id, function_id) VALUES (?, ?, ?, ?, ?, ?)",
@@ -221,8 +166,7 @@ impl NewTrigger {
     }
 }
 
-#[derive(AsChangeset, Deserialize, Apiv2Schema, ts_rs::TS)]
-#[diesel(table_name = triggers)]
+#[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
 #[ts(export)]
 pub struct UpdateTrigger {
     pub id: Option<u32>,
@@ -234,13 +178,16 @@ pub struct UpdateTrigger {
 }
 
 impl UpdateTrigger {
-    pub fn update(self, con: &mut MysqlConnection) -> Result<()> {
-        use self::triggers::dsl::*;
-        diesel::update(triggers)
-            .filter(id.eq(self.id.ok_or(anyhow::anyhow!("No id found"))?))
-            .set((&self, updated_at.eq(chrono::offset::Utc::now().naive_utc())))
-            .execute(con)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(())
+    pub async fn sqlx_update(self, db: &sqlx::MySqlPool) -> Result<Trigger, anyhow::Error> {
+        let _ = sqlx::query("UPDATE triggers SET name = ?, params = ?, event = ?, filter = ?, function_id = ?, updated_at = ? WHERE id = ?")
+            .bind(&self.name)
+            .bind(&self.params)
+            .bind(&self.event)
+            .bind(serde_json::to_string(&self.filter).unwrap())
+            .bind(&self.function_id)
+            .bind(&self.id)
+            .execute(db)
+            .await.map_err(|e| anyhow::anyhow!(e))?;
+        Trigger::sqlx_by_id(self.id.unwrap(), db).await
     }
 }

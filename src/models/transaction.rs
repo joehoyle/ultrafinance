@@ -1,38 +1,22 @@
 use crate::accounts::SourceTransaction;
-use crate::schema::{*, self};
 use crate::utils::display_option;
 use cli_table::Table;
 
-use diesel::*;
-use diesel::mysql::Mysql;
-use diesel::{Associations, Identifiable, Queryable};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-use crate::models::Account;
-use crate::models::User;
-use crate::models::Merchant;
-
 #[derive(
     Table,
-    Identifiable,
-    Queryable,
-    Associations,
     Debug,
     Serialize,
     Deserialize,
     ts_rs::TS,
     Apiv2Schema,
-    Selectable,
-    AsChangeset,
 )]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
-#[diesel(belongs_to(User))]
-#[diesel(belongs_to(Account))]
-#[diesel(belongs_to(Merchant))]
 #[derive(sqlx::FromRow)]
 pub struct Transaction {
     #[table(title = "Transaction ID")]
@@ -77,58 +61,7 @@ pub struct Transaction {
     pub updated_at: chrono::NaiveDateTime,
 }
 
-type SqlType = diesel::dsl::SqlTypeOf<diesel::dsl::AsSelect<Transaction, Mysql>>;
-type BoxedQuery<'a> = crate::schema::transactions::BoxedQuery<'a, Mysql, SqlType>;
-
 impl Transaction {
-    pub fn all() -> BoxedQuery<'static> {
-        schema::transactions::table
-            .select(Self::as_select())
-            .into_boxed()
-    }
-
-    pub fn by_user(user: &User) -> BoxedQuery<'static> {
-        Self::all().filter(schema::transactions::user_id.eq(user.id))
-    }
-
-    pub fn by_id(id: u32, user_id: u32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::transactions::id.eq(id))
-            .filter(schema::transactions::user_id.eq(user_id))
-    }
-
-    // pub fn search(query: &str, user_id: i32) -> BoxedQuery<'static> {
-    //     schema::transactions::table
-    //         .inner_join(schema::merchants::table)
-    //         .into_boxed()
-    //         .select(Self::as_select())
-    //         .filter(schema::transactions::user_id.eq(user_id))
-    //         .filter(
-    //             schema::transactions::creditor_name
-    //                 .like(format!("%{}%", query))
-    //                 .or(schema::transactions::debtor_name.like(format!("%{}%", query)))
-    //                 .or(schema::transactions::creditor_name.like(format!("%{}%", query)))
-    //                 .or(schema::transactions::remittance_information.like(format!("%{}%", query)))
-    //                 .or(schema::merchants::name.like(format!("%{}%", query))),
-    //         )
-
-    // }
-
-    pub fn by_id_only(id: u32) -> BoxedQuery<'static> {
-        Self::all()
-            .filter(schema::transactions::id.eq(id))
-    }
-
-    pub fn update(&mut self, con: &mut MysqlConnection) -> Result<()> {
-        self.updated_at = chrono::Local::now().naive_local();
-        diesel::update(&*self).set(&*self).execute(con)?;
-        Ok(())
-    }
-
-    pub fn delete(self, con: &mut MysqlConnection) -> Result<()> {
-        diesel::delete(&self).execute(con)?;
-        Ok(())
-    }
 
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::QueryBuilder::new("SELECT * FROM transactions")
@@ -147,7 +80,34 @@ impl Transaction {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_by_account(account_id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
+    pub async fn sqlx_by_id_by_user(
+        id: u32,
+        user_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Self, anyhow::Error> {
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM transactions WHERE id = ? AND user_id = ?",
+            id,
+            user_id
+        )
+        .fetch_one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_delete(&self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
+        sqlx::query!("DELETE FROM transactions WHERE id = ?", &self.id)
+            .execute(db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+
+    pub async fn sqlx_by_account(
+        account_id: u32,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Self, anyhow::Error> {
         sqlx::QueryBuilder::new("SELECT * FROM transactions WHERE account_id = ?")
             .push_bind(account_id)
             .build_query_as::<Self>()
@@ -156,7 +116,32 @@ impl Transaction {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_without_merchant_liimt_100(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
+    pub async fn sqlx_by_user_by_search(
+        user_id: u32,
+        search: &str,
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Self>, anyhow::Error> {
+        sqlx::query_as::<_, Self>(
+            "
+            SELECT * FROM transactions
+            LEFT JOIN merchants ON transactions.merchant_id = merchants.id
+            WHERE user_id = ?
+            AND (creditor_name LIKE ? OR debtor_name LIKE ? OR remittance_information LIKE ? OR merchants.name LIKE ? OR merchants.labels LIKE ?)",
+        )
+        .bind(&user_id)
+        .bind(format!("%{}%", search))
+        .bind(format!("%{}%", search))
+        .bind(format!("%{}%", search))
+        .bind(format!("%{}%", search))
+        .bind(format!("%{}%", search))
+        .fetch_all(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn sqlx_without_merchant_liimt_100(
+        db: &sqlx::MySqlPool,
+    ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(Self, "SELECT * FROM transactions WHERE merchant_id = NULL ORDER BY booking_date DESC LIMIT 100")
             .fetch_all(db)
             .await
@@ -190,8 +175,6 @@ impl Transaction {
     }
 }
 
-#[derive(Insertable)]
-#[diesel(table_name = transactions)]
 pub struct NewTransaction {
     pub external_id: String,
     pub creditor_name: Option<String>,

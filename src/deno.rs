@@ -4,7 +4,7 @@ use deno_runtime::{deno_core::{v8, ResolutionKind, ModuleSpecifier, PollEventLoo
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use tempfile::tempfile;
-use std::{collections::HashMap, sync::Arc, fs::File, io::Read};
+use std::{collections::HashMap, sync::Arc, io::Read};
 
 pub struct FunctionRuntime {
     runtime: deno_runtime::worker::MainWorker,
