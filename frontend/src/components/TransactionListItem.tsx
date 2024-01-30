@@ -1,4 +1,3 @@
-import { useNavigate } from "react-router-dom";
 import { Account } from "../../../bindings/Account";
 import { TransactionWithMerchant } from "../../../bindings/TransactionWithMerchant";
 import currencySymbols from "../utils/currency-symbols";
@@ -6,7 +5,7 @@ import { router } from '../main';
 
 interface Props {
 	transaction: TransactionWithMerchant,
-	account: Account,
+	account?: Account,
 }
 export default function TransactionListItem({ transaction, account }: Props) {
 
@@ -41,7 +40,9 @@ export default function TransactionListItem({ transaction, account }: Props) {
 				</div>
 				<div className="text-gray-400 text-xs text-right">{ transaction.bookingDate }</div>
 			</div>
-			<div className="self-center w-20 text-xs">{ account.name }</div>
+			{ account &&
+				<div className="self-center w-20 text-xs">{ account.name }</div>
+			}
 		</div>
 	)
 }

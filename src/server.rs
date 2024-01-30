@@ -153,6 +153,7 @@ async fn index(_req: HttpRequest) -> actix_web::Result<NamedFile> {
     Ok(NamedFile::open(path)?)
 }
 
+
 pub async fn start() -> std::io::Result<()> {
     dotenv().ok();
     println!("Listening on http://0.0.0.0:3000");
@@ -180,7 +181,8 @@ pub async fn start() -> std::io::Result<()> {
                 .build();
 
         let cors = Cors::default()
-            .allowed_origin(env::var("SITE_URL").unwrap().as_str())
+            // .allowed_origin(env::var("SITE_URL").unwrap().as_str())
+            .allow_any_origin()
             .allow_any_header()
             .allow_any_method()
             .supports_credentials()

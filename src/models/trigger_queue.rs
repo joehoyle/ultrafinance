@@ -36,11 +36,11 @@ impl TriggerQueue {
         let function = Function::sqlx_by_id(trigger.function_id, db).await?;
         let user = User::sqlx_by_id(self.user_id, db).await?;
 
-        let mut deno_runtime = crate::deno::FunctionRuntime::new(&function)?;
+        let mut deno_runtime = crate::deno::FunctionRuntime::new(&function).await?;
         let result = deno_runtime.run(
             &serde_json::to_string::<TriggerParams>(&trigger.params)?,
             &self.payload,
-        );
+        ).await;
         let payload = match &result {
             Ok(p) => (p.clone(), "completed"),
             Err(e) => (e.to_string(), "failed"),

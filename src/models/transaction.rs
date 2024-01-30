@@ -56,17 +56,14 @@ pub struct Transaction {
 
 impl Transaction {
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
-        sqlx::QueryBuilder::new("SELECT * FROM transactions")
-            .build_query_as::<Self>()
+        sqlx::query_as!(Self, "SELECT * FROM transactions")
             .fetch_all(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn sqlx_by_id(id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
-        sqlx::QueryBuilder::new("SELECT * FROM transactions WHERE id = ?")
-            .push_bind(id)
-            .build_query_as::<Self>()
+        sqlx::query_as!(Self, "SELECT * FROM transactions WHERE id = ?", id)
             .fetch_one(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -100,12 +97,14 @@ impl Transaction {
         account_id: u32,
         db: &sqlx::MySqlPool,
     ) -> Result<Self, anyhow::Error> {
-        sqlx::QueryBuilder::new("SELECT * FROM transactions WHERE account_id = ?")
-            .push_bind(account_id)
-            .build_query_as::<Self>()
-            .fetch_one(db)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+        sqlx::query_as!(
+            Self,
+            "SELECT * FROM transactions WHERE account_id = ?",
+            account_id
+        )
+        .fetch_one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub async fn sqlx_by_user_by_search(
@@ -115,7 +114,7 @@ impl Transaction {
     ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as::<_, Self>(
             "
-            SELECT * FROM transactions
+            SELECT transactions.* FROM transactions
             LEFT JOIN merchants ON transactions.merchant_id = merchants.id
             WHERE user_id = ?
             AND (creditor_name LIKE ? OR debtor_name LIKE ? OR remittance_information LIKE ? OR merchants.name LIKE ? OR merchants.labels LIKE ?)",
@@ -142,7 +141,7 @@ impl Transaction {
 
     pub async fn sqlx_update(&mut self, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
         self.updated_at = chrono::Local::now().naive_local();
-        sqlx::query_as::<_, Self>("UPDATE transactions SET external_id = ?, creditor_name = ?, debtor_name = ?, remittance_information = ?, booking_date = ?, booking_datetime = ?, transaction_amount = ?, transaction_amount_currency = ?, proprietary_bank_transaction_code = ?, currency_exchange_rate = ?, currency_exchange_source_currency = ?, currency_exchange_target_currency = ?, merchant_id = ?, account_id = ?, user_id = ?, created_at = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE transactions SET external_id = ?, creditor_name = ?, debtor_name = ?, remittance_information = ?, booking_date = ?, booking_datetime = ?, transaction_amount = ?, transaction_amount_currency = ?, proprietary_bank_transaction_code = ?, currency_exchange_rate = ?, currency_exchange_source_currency = ?, currency_exchange_target_currency = ?, merchant_id = ?, account_id = ?, user_id = ?, created_at = ?, updated_at = ? WHERE id = ?")
             .bind(&self.external_id)
             .bind(&self.creditor_name)
             .bind(&self.debtor_name)
@@ -161,12 +160,13 @@ impl Transaction {
             .bind(&self.created_at)
             .bind(&self.updated_at)
             .bind(&self.id)
-            .fetch_one(db)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+            .execute(db)
+            .await?;
+        Self::sqlx_by_id(self.id, db).await
     }
 }
 
+#[derive(Debug)]
 pub struct NewTransaction {
     pub external_id: String,
     pub creditor_name: Option<String>,

@@ -26,8 +26,8 @@ pub struct Function {
 }
 
 impl Function {
-    pub fn get_params(&self) -> anyhow::Result<crate::deno::FunctionParams> {
-        let mut runtime = crate::deno::FunctionRuntime::new(self)?;
+    pub async fn get_params(&self) -> anyhow::Result<crate::deno::FunctionParams> {
+        let mut runtime = crate::deno::FunctionRuntime::new(self).await?;
         runtime.get_params()
     }
 

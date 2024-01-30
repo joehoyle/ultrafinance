@@ -120,7 +120,7 @@ impl Account {
 
     pub async fn sqlx_update(&mut self, db: &sqlx::MySqlPool) -> Result<Account, anyhow::Error> {
         self.updated_at = chrono::Local::now().naive_local();
-        sqlx::query_as::<_, Account>("UPDATE accounts SET name = ?, number = ?, account_type = ?, nordigen_id = ?, currency = ?, product = ?, cash_account_type = ?, details = ?, owner_name = ?, status = ?, icon = ?, institution_name = ?, config = ?, user_id = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE accounts SET name = ?, number = ?, account_type = ?, nordigen_id = ?, currency = ?, product = ?, cash_account_type = ?, details = ?, owner_name = ?, status = ?, icon = ?, institution_name = ?, config = ?, user_id = ?, updated_at = ? WHERE id = ?")
             .bind(&self.name)
             .bind(&self.number)
             .bind(&self.account_type)
@@ -137,9 +137,9 @@ impl Account {
             .bind(&self.user_id)
             .bind(&self.updated_at)
             .bind(&self.id)
-            .fetch_one(db)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+            .execute(db)
+            .await?;
+        Account::sqlx_by_id_only(self.id, db).await
     }
 
     pub async fn sqlx_delete(&self, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {

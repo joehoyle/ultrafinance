@@ -23,19 +23,17 @@ pub async fn get_functions_endpoint(
 ) -> Result<Json<Vec<FunctionWithParams>>, Error> {
     let db = &state.sqlx_pool;
     let functions = Function::sqlx_by_user(user.id, db).await?;
-    let functions = block(move || -> Result<Vec<FunctionWithParams>, Error> {
-        Ok(functions
-            .into_iter()
-            .map(|f| FunctionWithParams {
-                params: f.get_params().ok(),
-                function: f,
-            })
-            .collect::<Vec<FunctionWithParams>>())
-    })
-    .await
-    .unwrap();
 
-    functions.map(Json)
+    let mut functions_with_params = vec![];
+    for function in functions {
+        let params = function.get_params().await.ok();
+        functions_with_params.push(FunctionWithParams {
+            function,
+            params,
+        })
+    }
+
+    Ok(Json(functions_with_params))
 }
 
 #[api_v2_operation]
@@ -48,16 +46,10 @@ pub async fn get_function_endpoint(
     let db = &state.sqlx_pool;
     let function_id: u32 = path.into_inner();
     let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
-    let function = block(move || -> Result<FunctionWithParams, Error> {
-        Ok(FunctionWithParams {
-            params: function.get_params().ok(),
-            function: function,
-        })
-    })
-    .await
-    .unwrap();
-
-    function.map(Json)
+    Ok(Json(FunctionWithParams {
+        params: function.get_params().await.ok(),
+        function: function,
+    }))
 }
 
 #[derive(ts_rs::TS, Deserialize, Apiv2Schema)]
@@ -120,17 +112,12 @@ pub async fn test_function_endpoint(
     let function_id: u32 = path.into_inner();
     let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
     let test_data = data.into_inner();
-    let function = block(move || -> Result<String, Error> {
-        let mut deno_runtime = crate::deno::FunctionRuntime::new(&function)?;
-        dbg!(&test_data.payload);
-        deno_runtime
-            .run(&test_data.params, &test_data.payload)
-            .map_err(|e| e.into())
-    })
-    .await
-    .unwrap();
+    let mut deno_runtime = crate::deno::FunctionRuntime::new(&function).await?;
+    let function = deno_runtime
+        .run(&test_data.params, &test_data.payload)
+        .await?;
 
-    function.map(Json)
+    Ok(Json(function))
 }
 
 #[api_v2_operation]

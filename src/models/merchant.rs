@@ -43,9 +43,10 @@ pub struct Location {
     pub store_number: Option<f32>,
 }
 
-impl From<String> for Location {
-    fn from(s: String) -> Self {
-        serde_json::from_str(s.as_str()).unwrap()
+impl TryFrom<String> for Location {
+    type Error = anyhow::Error;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        serde_json::from_str(s.as_str()).map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -66,7 +67,7 @@ impl Merchant {
                     .into();
                 let sqlx_query_as_location_structured = row
                     .try_get_unchecked::<::std::option::Option<String>, _>(4usize)?
-                    .map(|a| a.into());
+                    .and_then(|a| a.try_into().ok());
                 let sqlx_query_as_labels = row
                     .try_get_unchecked::<::std::option::Option<String>, _>(5usize)?
                     .into();
@@ -122,7 +123,7 @@ impl Merchant {
                 .into();
             let sqlx_query_as_location_structured = row
                 .try_get_unchecked::<::std::option::Option<String>, _>(4usize)?
-                .map(|a| a.into());
+                .and_then(|a| a.try_into().ok());
             let sqlx_query_as_labels = row
                 .try_get_unchecked::<::std::option::Option<String>, _>(5usize)?
                 .into();
@@ -181,7 +182,7 @@ impl Merchant {
                 .into();
             let sqlx_query_as_location_structured = row
                 .try_get_unchecked::<::std::option::Option<String>, _>(4usize)?
-                .map(|a| a.into());
+                .and_then(|a| a.try_into().ok());
             let sqlx_query_as_labels = row
                 .try_get_unchecked::<::std::option::Option<String>, _>(5usize)?
                 .into();

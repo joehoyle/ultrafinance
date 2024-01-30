@@ -34,9 +34,7 @@ impl User {
     }
 
     pub async fn sqlx_by_id(id: u32, db: &sqlx::MySqlPool) -> Result<Self, anyhow::Error> {
-        sqlx::QueryBuilder::new("SELECT * FROM users WHERE id = ?")
-            .push_bind(id)
-            .build_query_as::<Self>()
+        sqlx::query_as!(Self, "SELECT * FROM users WHERE id = ?", id)
             .fetch_one(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))

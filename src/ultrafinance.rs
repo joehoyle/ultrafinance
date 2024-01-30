@@ -1,7 +1,9 @@
 use crate::models::*;
+use actix_web::web::block;
 use anyhow::anyhow;
 use chrono::Duration;
-use sqlx::Row;
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
 
 use std::collections::HashMap;
 use std::env;
@@ -23,26 +25,24 @@ pub async fn sqlx_import_transactions(
     )
     .fetch_one(db)
     .await;
-
     // Get all transactions from 7 days before the last transaction to account for slow to confirm transaction.
     let from_date = latest_transaction
         .map(|t| t.booking_date - Duration::days(7))
         .ok();
 
-    // TOdo: this needs to be an async function
-    let other_transactions = account.source()?.transactions(&from_date, &None)?;
+    let account_clone = account.clone();
+    // Todo: this needs to be an async function
+    let other_transactions = block(move ||
+        account_clone.source()?.transactions(&from_date, &None)
+    ).await.unwrap()?;
 
     let mut new_transactions: Vec<transaction::NewTransaction> = vec![];
     for transaction in other_transactions {
-        let exists = sqlx::query(
-            "SELECT EXISTS(SELECT 1 FROM transactions WHERE external_id = ? AND account_id = ?)",
-        )
-        .bind(&transaction.id)
-        .bind(&account.id)
+        let exists = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE external_id = ? AND account_id = ?)", &transaction.id, &account.id)
         .fetch_one(db)
         .await?;
-
-        if exists.is_empty() {
+        if exists > 0 {
             continue;
         }
 
@@ -50,6 +50,10 @@ pub async fn sqlx_import_transactions(
         new_transaction.account_id = account.id;
         new_transaction.user_id = account.user_id;
         new_transactions.push(new_transaction);
+    }
+
+    if new_transactions.is_empty() {
+        return Ok(vec![]);
     }
 
     let mut qb = sqlx::QueryBuilder::new("INSERT INTO transactions (external_id, creditor_name, debtor_name, remittance_information, booking_date, booking_datetime, transaction_amount, transaction_amount_currency, proprietary_bank_transaction_code, currency_exchange_rate, currency_exchange_source_currency, currency_exchange_target_currency, account_id, user_id)");
@@ -69,8 +73,8 @@ pub async fn sqlx_import_transactions(
         b.push_bind(t.account_id);
         b.push_bind(t.user_id);
     });
-
-    let insert = qb.build().execute(db).await?;
+    let query = qb.build();
+    let insert = query.execute(db).await?;
 
     // Hack to get all the transactions inserted
     let inserted_transactions: Vec<Transaction> = sqlx::query_as!(
@@ -84,7 +88,6 @@ pub async fn sqlx_import_transactions(
 
     // Enrich the transactions that were inserted
     let inserted_transactions = sqlx_enrich_transactions(inserted_transactions, db).await?;
-
     // Create the triggers
     for transaction in &inserted_transactions {
         sqlx_create_transaction_trigger_queue(transaction, db).await?;
@@ -97,7 +100,7 @@ pub async fn sqlx_create_transaction_trigger_queue(
     db: &sqlx::MySqlPool,
 ) -> anyhow::Result<()> {
     let transaction_triggers: Vec<Trigger> =
-        Trigger::sqlx_for_user_for_event(transaction.user_id, "event", db).await?;
+        Trigger::sqlx_for_user_for_event(transaction.user_id, "transaction_created", db).await?;
 
     let transaction_triggers = transaction_triggers
         .into_iter()
@@ -171,19 +174,11 @@ pub async fn sqlx_process_trigger_queue(
     queue: Vec<TriggerQueue>,
     db: &sqlx::MySqlPool,
 ) -> HashMap<u32, anyhow::Result<TriggerLog>> {
-    let mut futures = Vec::new();
-
-    for q in &queue {
-        let future = q.clone().sqlx_run(db);
-        futures.push(future);
-    }
-
-    let results = futures::future::join_all(futures).await;
-
     let mut result_map = HashMap::new();
-
-    for (queue_id, log) in results.into_iter().enumerate() {
-        result_map.insert(queue[queue_id].id, log);
+    for q in queue {
+        let id = q.id;
+        let result = q.sqlx_run(db).await;
+        result_map.insert(id, result);
     }
 
     result_map
