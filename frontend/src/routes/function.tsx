@@ -14,6 +14,7 @@ import FormDataToJson from '../utils/FormDataToJson';
 import ErrorMessage from '../components/ErrorMessage';
 import Textarea from '../components/forms/Textarea';
 import { TestFunction } from '../../../bindings/TestFunction';
+import { TestFunctionResult } from '../../../bindings/TestFunctionResult';
 
 type RouteParams = Params;
 
@@ -41,7 +42,7 @@ export default function FunctionSingle() {
 	const sourceRef = useRef<HTMLInputElement>(null);
 	const [isShowingTestRun, setIsShowingTestRun] = useState(false);
 	const [isRunningTest, setIsRunningTest] = useState(false);
-	const [testRunResult, setTestRunResult] = useState<string | Error>("");
+	const [testRunResult, setTestRunResult] = useState<TestFunctionResult | Error>("");
 	const [editorFullScreen, setEditorFullScreen] = useState(false);
 
 
@@ -153,7 +154,17 @@ export default function FunctionSingle() {
 								{testRunResult instanceof Error ? (
 									<ErrorMessage className="text-xs">{testRunResult.message}</ErrorMessage>
 								) : (
-									<span className="dark:text-gray-300 font-mono whitespace-pre break-all">{JSON.stringify(JSON.parse(testRunResult), null, 4 )}</span>
+									<>
+										<p className="text-gray-600">Result</p>
+										<span className="dark:text-gray-300 font-mono whitespace-pre break-all"><JsonValue value={ testRunResult.result } /></span>
+
+										<p className="text-gray-600">Console</p>
+										<span className="">
+											{ testRunResult.console.map( (line, i) => (
+												<span key={i} className="block dark:text-gray-300 font-mono whitespace-pre break-all"><JsonValue value={ line.msg } /></span>
+											))}
+										</span>
+									</>
 								) }
 							</div>}
 						</form>
@@ -165,4 +176,12 @@ export default function FunctionSingle() {
 			</Form>
 		</main>
 	</>
+}
+
+function JsonValue( {value } : { value: string } ) : string {
+	try {
+		return JSON.stringify( JSON.parse( value ), null, 4 );
+	} catch (e) {
+		return value;
+	}
 }

@@ -1,6 +1,5 @@
 import { Await, defer, Link, useLoaderData, useRevalidator, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
-import { useNavigate } from "react-router-dom";
 
 import { getAccounts, getTransactions, syncAccounts } from "../api";
 import React, { Suspense, useState } from "react";
@@ -9,7 +8,6 @@ import TransactionsList from "../components/TransactionsList";
 import { Account } from "../../../bindings/Account";
 import Button from "../components/Button";
 import { TransactionWithMerchant } from "../../../bindings/TransactionWithMerchant";
-import type { Params } from "react-router-dom";
 
 type Data = {
 	transactions: TransactionWithMerchant[],

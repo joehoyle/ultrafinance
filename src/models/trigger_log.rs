@@ -1,9 +1,23 @@
 use cli_table::Table;
 
 use paperclip::actix::Apiv2Schema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
+
+use crate::deno::StdioMsg;
+
+#[derive(Serialize, Apiv2Schema, ts_rs::TS, Debug, Deserialize)]
+pub struct Console(Vec<StdioMsg>);
+
+impl From<Option<String>> for Console {
+    fn from(s: Option<String>) -> Self {
+        match s {
+            Some(s) => serde_json::from_str(&s).unwrap_or_else(|_| Console(vec![])),
+            None => Console(vec![]),
+        }
+    }
+}
 
 #[derive(Table, Debug, ts_rs::TS, Serialize, Apiv2Schema)]
 #[ts(export)]
@@ -12,6 +26,8 @@ pub struct TriggerLog {
     pub id: u32,
     #[table(title = "Payload")]
     pub payload: String,
+    #[table(skip)]
+    pub console: Console,
     #[table(title = "Status")]
     pub status: String,
     #[table(title = "User ID")]
@@ -53,6 +69,7 @@ impl TriggerLog {
 #[derive(Default, Debug, sqlx::FromRow)]
 pub struct NewTriggerLog {
     pub payload: String,
+    pub console: Vec<StdioMsg>,
     pub status: String,
     pub user_id: u32,
     pub trigger_id: u32,
@@ -61,8 +78,9 @@ pub struct NewTriggerLog {
 impl NewTriggerLog {
     pub async fn sqlx_create(self, db: &sqlx::MySqlPool) -> Result<TriggerLog, anyhow::Error> {
         let result = sqlx::query!(
-            "INSERT INTO trigger_log (payload, status, user_id, trigger_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO trigger_log (payload, console, status, user_id, trigger_id) VALUES (?, ?, ?, ?, ?)",
             self.payload,
+            serde_json::json!(Console(self.console)).to_string(),
             self.status,
             self.user_id,
             self.trigger_id

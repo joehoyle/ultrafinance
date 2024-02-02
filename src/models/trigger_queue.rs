@@ -12,7 +12,7 @@ use anyhow::Result;
 use super::trigger_log::NewTriggerLog;
 use super::{TriggerLog, TriggerParams};
 
-#[derive(Table, ts_rs::TS, Serialize, Apiv2Schema, Clone)]
+#[derive(Table, ts_rs::TS, Serialize, Apiv2Schema, Clone, Debug)]
 #[ts(export)]
 #[derive(sqlx::FromRow)]
 pub struct TriggerQueue {
@@ -49,13 +49,17 @@ impl TriggerQueue {
         let log = NewTriggerLog {
             payload: payload.0,
             status: payload.1.to_owned(),
+            console: deno_runtime.get_output().await,
             user_id: user.id,
             trigger_id: trigger.id,
         }
         .sqlx_create(db)
         .await?;
 
-        self.sqlx_delete(db).await?;
+        if result.is_ok() {
+            self.sqlx_delete(db).await?;
+        }
+
         Ok(log)
     }
 

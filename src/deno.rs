@@ -1,15 +1,51 @@
 use crate::models::Function;
 use anyhow::anyhow;
-use deno_runtime::{deno_core::{v8, ResolutionKind, ModuleSpecifier, PollEventLoopOptions}, permissions::PermissionsContainer, deno_io::Stdio};
+use deno_runtime::deno_core::OpState;
+use deno_runtime::{
+    deno_core::{op2, v8, ModuleSpecifier, Op, PollEventLoopOptions, ResolutionKind},
+    permissions::PermissionsContainer,
+};
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-use tempfile::tempfile;
-use std::{collections::HashMap, sync::Arc, io::Read};
+use std::{collections::HashMap, sync::Arc};
 
 pub struct FunctionRuntime {
     runtime: deno_runtime::worker::MainWorker,
     main_module_id: usize,
-    stdio: Stdio,
+    stdio_rx: tokio::sync::mpsc::UnboundedReceiver<StdioMsg>,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS, Apiv2Schema, Deserialize)]
+#[ts(export)]
+pub struct StdioMsg {
+    pub msg: String,
+    pub is_err: bool,
+}
+
+deno_core::extension!(ultrafinance,
+  options = {
+      sender: tokio::sync::mpsc::UnboundedSender<StdioMsg>,
+  },
+  middleware = |op| match op.name {
+    "op_print" => <op_print as Op>::DECL,
+    _ => op,
+  },
+  state = |state, options| {
+      state.put(options.sender);
+  },
+);
+
+#[op2(fast)]
+pub fn op_print(
+    state: &mut OpState,
+    #[string] msg: &str,
+    is_err: bool,
+) -> Result<(), deno_core::error::AnyError> {
+    let sender = state.borrow_mut::<tokio::sync::mpsc::UnboundedSender<StdioMsg>>();
+    Ok(sender.send(StdioMsg {
+        msg: msg.to_owned(),
+        is_err,
+    })?)
 }
 
 impl FunctionRuntime {
@@ -24,21 +60,16 @@ impl FunctionRuntime {
                 include_str!("functions/lunchmoney.ts").to_owned(),
             );
         } else {
-            module_loader.files.insert(
-                main_file.to_owned(),
-                function.source.clone(),
-            );
+            module_loader
+                .files
+                .insert(main_file.to_owned(), function.source.clone());
         }
         let module_loader = std::rc::Rc::new(module_loader);
         let create_web_worker_cb = std::sync::Arc::new(|_| {
             todo!("Web workers are not supported in the example");
         });
 
-        let stdio = Stdio {
-            stdin: deno_runtime::deno_io::StdioPipe::File(tempfile()?),
-            stdout: deno_runtime::deno_io::StdioPipe::File(tempfile()?),
-            stderr: deno_runtime::deno_io::StdioPipe::File(tempfile()?),
-        };
+        let (stdio_tx, stdio_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let options = deno_runtime::worker::WorkerOptions {
             bootstrap: deno_runtime::BootstrapOptions {
@@ -62,7 +93,7 @@ impl FunctionRuntime {
                 unstable_features: vec![],
                 node_ipc_fd: None,
             },
-            extensions: vec![],
+            extensions: vec![ultrafinance::init_ops(stdio_tx.clone())],
             unsafely_ignore_certificate_errors: None,
             seed: None,
             source_map_getter: None,
@@ -80,7 +111,7 @@ impl FunctionRuntime {
                 deno_runtime::deno_broadcast_channel::InMemoryBroadcastChannel::default(),
             shared_array_buffer_store: None,
             compiled_wasm_module_store: None,
-            stdio: stdio.clone(),
+            stdio: Default::default(),
             startup_snapshot: None,
             create_params: None,
             root_cert_store_provider: None,
@@ -92,17 +123,19 @@ impl FunctionRuntime {
         };
 
         let js_path = std::path::Path::new(&main_file);
-        let main_module = ModuleSpecifier::parse(&format!("https://localhost/{}", &js_path.to_string_lossy()).as_str())?;
-        let permissions = deno_runtime::permissions::Permissions::allow_all();
+        let main_module = ModuleSpecifier::parse(
+            &format!("https://localhost/{}", &js_path.to_string_lossy()).as_str(),
+        )?;
+        let mut permissions = deno_runtime::permissions::Permissions::default();
+        permissions.net =
+            deno_runtime::permissions::Permissions::new_net(&Some(vec![]), &None, false)?;
 
         let mut worker = deno_runtime::worker::MainWorker::bootstrap_from_options(
             main_module.clone(),
-            PermissionsContainer::new( permissions),
+            PermissionsContainer::new(permissions),
             options,
         );
-        // let mut rt = tokio::runtime::Runtime::new().unwrap();
-        // let local = tokio::task::LocalSet::new();
-        // let handle = tokio::runtime::Handle::current();
+
         let result: anyhow::Result<i32> = {
             let module_id = worker.preload_main_module(&main_module).await?;
             worker.evaluate_module(module_id).await?;
@@ -113,7 +146,7 @@ impl FunctionRuntime {
         Ok(Self {
             runtime: worker,
             main_module_id: result as _,
-            stdio,
+            stdio_rx,
         })
     }
 
@@ -139,7 +172,7 @@ impl FunctionRuntime {
         }
     }
 
-    pub async fn run(&mut self, params: &String, payload: &String) -> anyhow::Result<String> {
+    pub async fn run(&mut self, params: &str, payload: &str) -> anyhow::Result<String> {
         // let mut rt = tokio::runtime::Runtime::new().unwrap();
         // let local = tokio::task::LocalSet::new();
         // let handle = tokio::runtime::Handle::current();
@@ -162,23 +195,30 @@ impl FunctionRuntime {
                     let recv = v8::undefined(scope).into();
 
                     // JSON decode params
-                    let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(
-                        scope, "JSON",
-                    ).ok_or(anyhow::anyhow!("JSON not found."))?;
+                    let json =
+                        deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON")
+                            .ok_or(anyhow::anyhow!("JSON not found."))?;
                     let json = v8::Global::new(scope, json);
 
-                    let parse = v8::String::new(scope, "parse").ok_or(anyhow!("Can't make string"))?.into();
-                    let parse = json.open(scope).get(scope, parse).ok_or(anyhow!("Can't get string"))?;
+                    let parse = v8::String::new(scope, "parse")
+                        .ok_or(anyhow!("Can't make string"))?
+                        .into();
+                    let parse = json
+                        .open(scope)
+                        .get(scope, parse)
+                        .ok_or(anyhow!("Can't get string"))?;
                     let parse: v8::Local<v8::Function> = parse.try_into()?;
 
-                    let arg = v8::String::new(scope, params.as_str()).ok_or(anyhow!("Can't make string"))?.into();
+                    let arg = v8::String::new(scope, params)
+                        .ok_or(anyhow!("Can't make string"))?
+                        .into();
                     let this = v8::undefined(scope).into();
                     let params = match parse.call(scope, this, &[arg]) {
                         Some(r) => Ok(r),
                         None => Err(anyhow::anyhow!("Error decoding params.")),
                     }?;
 
-                    let arg = v8::String::new(scope, payload.as_str()).unwrap().into();
+                    let arg = v8::String::new(scope, payload).unwrap().into();
                     let this = v8::undefined(scope).into();
                     let payload = match parse.call(scope, this, &[arg]) {
                         Some(r) => Ok(r),
@@ -186,7 +226,9 @@ impl FunctionRuntime {
                     }?;
 
                     let try_scope = &mut v8::TryCatch::new(scope);
-                    let value = function.call(try_scope, recv, &[params, payload]).ok_or(anyhow!("No globa promise found"))?;
+                    let value = function
+                        .call(try_scope, recv, &[params, payload])
+                        .ok_or(anyhow!("No globa promise found"))?;
                     if try_scope.has_caught() || try_scope.has_terminated() {
                         dbg!("caught terminated");
                         try_scope.rethrow();
@@ -200,12 +242,16 @@ impl FunctionRuntime {
             }
         }
         let promise = promise?;
-        self.runtime.js_runtime.run_event_loop(PollEventLoopOptions::default()).await?;
+        self.runtime
+            .js_runtime
+            .run_event_loop(PollEventLoopOptions::default())
+            .await?;
+
+        #[allow(deprecated)]
         let result = self.runtime.js_runtime.resolve_value(promise).await?;
 
         let scope = &mut self.runtime.js_runtime.handle_scope();
-        let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON")
-            .unwrap();
+        let json = deno_runtime::deno_core::JsRuntime::eval::<v8::Object>(scope, "JSON").unwrap();
         let json = v8::Global::new(scope, json);
 
         let stringify = v8::String::new(scope, "stringify").unwrap().into();
@@ -221,23 +267,12 @@ impl FunctionRuntime {
         Ok(result.to_rust_string_lossy(scope))
     }
 
-    pub fn stdout(&self) -> Option<String> {
-        let mut str = String::new();
-        match &self.stdio.stdout {
-            deno_runtime::deno_io::StdioPipe::File(file) => file.clone().read_to_string(&mut str).ok().map(|_| str),
-            _ => None,
+    pub async fn get_output(&mut self) -> Vec<StdioMsg> {
+        let mut output = Vec::new();
+        while let Ok(msg) = self.stdio_rx.try_recv() {
+            output.push(msg);
         }
-    }
-
-    pub fn stderr(&self) -> Option<String> {
-        let mut str = String::new();
-        match &self.stdio.stderr {
-            deno_runtime::deno_io::StdioPipe::File(file) => {
-                dbg!(&file);
-                file.clone().read_to_string(&mut str).ok().map(|_| str)
-            },
-            _ => None,
-        }
+        output
     }
 }
 
@@ -269,7 +304,15 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
         _referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<deno_runtime::deno_core::ModuleSpecifier, anyhow::Error> {
-        Ok(deno_runtime::deno_core::ModuleSpecifier::parse(_specifier)?)
+        let url = match _referrer {
+            "." => deno_runtime::deno_core::ModuleSpecifier::parse(_specifier)?,
+            _ => {
+                let referrer = deno_runtime::deno_core::ModuleSpecifier::parse(_referrer)?;
+                let referrer_path = referrer.join(_specifier)?;
+                referrer_path
+            }
+        };
+        Ok(url)
     }
 
     fn load(
@@ -287,19 +330,38 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
         // let media_type = MediaType::from(&path);
         async move {
             let module_specifier = module_specifier.clone();
-            let path = module_specifier
-                .to_file_path()
-                .map_err(|_| anyhow::anyhow!("Only file: URLs are supported."))?;
-            let module_file = module_specifier.path().rsplitn(2, '/').next();
-            let media_type = MediaType::from_path(&path);
 
-            let code = match module_file {
-                Some(filename) => files.get(filename),
-                None => None,
-            }
-            .ok_or(anyhow::anyhow!("File not found."))?;
+            let file_path = module_specifier.to_file_path();
+            let result: anyhow::Result<(MediaType, String)> = match file_path {
+                Ok(path) => {
+                    let module_file = module_specifier.path().rsplitn(2, '/').next();
+                    let media_type = MediaType::from_path(&path);
 
-            let (module_type, should_transpile) = match MediaType::from_path(&path) {
+                    let code = match module_file {
+                        Some(filename) => files.get(filename),
+                        None => None,
+                    }
+                    .ok_or(anyhow::anyhow!("File not found."))?;
+                    Ok((media_type, code.to_owned()))
+                }
+                Err(_) => {
+                    let code = reqwest::get(module_specifier.clone()).await?;
+                    let content_type = code
+                        .headers()
+                        .get("content-type")
+                        .ok_or(anyhow::anyhow!("No content type header found."))?;
+                    let media_type = MediaType::from_specifier_and_content_type(
+                        &module_specifier,
+                        content_type.to_str().ok(),
+                    );
+                    let code = code.text().await?;
+                    Ok((media_type, code))
+                }
+            };
+
+            let (media_type, code) = result?;
+
+            let (module_type, should_transpile) = match media_type {
                 MediaType::JavaScript | MediaType::Mjs | MediaType::Cjs => {
                     (ModuleType::JavaScript, false)
                 }
@@ -312,7 +374,7 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
                 | MediaType::Dcts
                 | MediaType::Tsx => (ModuleType::JavaScript, true),
                 MediaType::Json => (ModuleType::Json, false),
-                _ => anyhow::bail!("Unknown extension {:?}", path.extension()),
+                _ => anyhow::bail!("Unknown type {}", media_type),
             };
 
             let code = if should_transpile {
@@ -340,8 +402,6 @@ impl deno_runtime::deno_core::ModuleLoader for ModuleLoader {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
-
     use super::*;
     use chrono::NaiveDateTime;
 
@@ -357,13 +417,11 @@ mod tests {
             updated_at: NaiveDateTime::from_timestamp(0, 0),
         };
 
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let local = tokio::task::LocalSet::new();
-        local.block_on( &rt, async {
-
-            let mut runtime = FunctionRuntime::new(&function).await.unwrap();
-        } );
-        // dbg!(runtime.get_params());
+        local.block_on(&rt, async {
+            FunctionRuntime::new(&function).await.unwrap()
+        });
     }
 
     #[test]
@@ -378,10 +436,9 @@ mod tests {
             updated_at: NaiveDateTime::from_timestamp(0, 0),
         };
 
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let local = tokio::task::LocalSet::new();
-        local.block_on( &rt, async {
-
+        local.block_on(&rt, async {
             let mut runtime = FunctionRuntime::new(&function).await.unwrap();
             let params = serde_json::json!({
                 "apiKey": "123",
@@ -403,17 +460,55 @@ mod tests {
     }
 
     #[test]
-    fn run_source_function() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+    fn console_log() {
+        let function = Function {
+            id: 1,
+            name: "Test".into(),
+            function_type: "user".into(),
+            source: "
+            console.log(new Date());
+            console.log('Hello world');
+            console.log(true);
+            console.log(false);
+            console.log(1);
+            "
+            .into(),
+            user_id: 1,
+            created_at: NaiveDateTime::from_timestamp(0, 0),
+            updated_at: NaiveDateTime::from_timestamp(0, 0),
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let local = tokio::task::LocalSet::new();
-        local.block_on( &rt, async {
+        local.block_on(&rt, async {
+            let mut runtime = FunctionRuntime::new(&function).await.unwrap();
+            let transaction = serde_json::json!({
+                "id": 12345,
+                "bookingDate": chrono::Utc::now().to_rfc3339(),
+                "transactionAmount": "100",
+                "transactionAmountCurrency": "EUR",
+                "creditorName": "Joe Test",
+                "remittanceInformation": "Test transaction",
+            })
+            .to_string();
+            dbg!(&transaction);
+            dbg!(runtime.get_output().await);
+        });
+    }
+
+    #[test]
+    fn run_source_function() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async {
             let function = Function {
                 id: 1,
                 name: "Test".into(),
                 function_type: "source".into(),
                 source: "export default function () {
                     return 'ji';
-                }".into(),
+                }"
+                .into(),
                 user_id: 1,
                 created_at: NaiveDateTime::from_timestamp(0, 0),
                 updated_at: NaiveDateTime::from_timestamp(0, 0),
@@ -434,10 +529,36 @@ mod tests {
                 "remittanceInformation": "Test transaction",
             })
             .to_string();
-            let result = runtime.run(&params, &transaction).await.unwrap();
+            runtime.run(&params, &transaction).await.unwrap();
+        });
+    }
 
-            dbg!(runtime.stdout().unwrap());
-            dbg!(runtime.stderr().unwrap());
+    #[test]
+    fn external_dep() {
+        let function = Function {
+            id: 1,
+            name: "Test".into(),
+            function_type: "user".into(),
+            source: r#"
+            import { camelCase } from "https://deno.land/x/camelcase/mod.ts";
+            export default async function() {
+                console.log(camelCase)
+                return camelCase("hello world");
+            }
+            "#
+            .into(),
+            user_id: 1,
+            created_at: NaiveDateTime::from_timestamp(0, 0),
+            updated_at: NaiveDateTime::from_timestamp(0, 0),
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async {
+            let mut runtime = FunctionRuntime::new(&function).await.unwrap();
+            let result = runtime.run("{}", "{}").await.unwrap();
+            assert_eq!(r#""helloWorld""#, result);
+            dbg!(runtime.get_output().await);
         });
     }
 }

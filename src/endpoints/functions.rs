@@ -1,9 +1,10 @@
-use actix_web::web::{self, block};
+use actix_web::web;
 use anyhow::Result;
 use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web::Json};
 use serde::{Deserialize, Serialize};
 
+use crate::deno::StdioMsg;
 use crate::models::{Function, NewFunction, UpdateFunction, User};
 use crate::server::{AppState, Error};
 
@@ -101,23 +102,33 @@ pub struct TestFunction {
     pub payload: String,
 }
 
+#[derive(Serialize, Apiv2Schema, ts_rs::TS)]
+#[ts(export)]
+pub struct TestFunctionResult {
+    pub result: String,
+    pub console: Vec<StdioMsg>,
+}
+
 #[api_v2_operation]
 pub async fn test_function_endpoint(
     user: User,
     state: web::Data<AppState>,
     data: web::Json<TestFunction>,
     path: web::Path<u32>,
-) -> Result<Json<String>, Error> {
+) -> Result<Json<TestFunctionResult>, Error> {
     let db = &state.sqlx_pool;
     let function_id: u32 = path.into_inner();
     let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
     let test_data = data.into_inner();
     let mut deno_runtime = crate::deno::FunctionRuntime::new(&function).await?;
-    let function = deno_runtime
+    let result = deno_runtime
         .run(&test_data.params, &test_data.payload)
         .await?;
 
-    Ok(Json(function))
+    Ok(Json(TestFunctionResult {
+        result,
+        console: deno_runtime.get_output().await,
+    }))
 }
 
 #[api_v2_operation]

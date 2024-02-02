@@ -182,6 +182,10 @@ enum MerchantsCommand {
 enum TriggersQueueCommand {
     List,
     Process,
+    ProcessSingle {
+        #[arg(long)]
+        id: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -543,6 +547,18 @@ async fn main() -> anyhow::Result<()> {
                                 println!("Error in trigger queue {} {}", id, err.to_string())
                             }
                         }
+                    }
+                    Ok(())
+                }
+                TriggersQueueCommand::ProcessSingle { id: u32 } => {
+                    let queue = TriggerQueue::sqlx_by_id(*u32, &sqlx_pool).await?;
+                    dbg!(&queue);
+                    match queue.sqlx_run(&sqlx_pool).await {
+                        Ok(log) => {
+                            println!("Processed trigger queue {}", u32);
+                            dbg!(log);
+                        },
+                        Err(err) => println!("Error in trigger queue {} {}", u32, err.to_string()),
                     }
                     Ok(())
                 }

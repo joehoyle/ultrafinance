@@ -16,6 +16,7 @@ import { TriggerLog } from '../../bindings/TriggerLog';
 import { CreateSession } from '../../bindings/CreateSession';
 import { NewUser } from '../../bindings/NewUser';
 import { TestFunction } from '../../bindings/TestFunction';
+import { TestFunctionResult } from '../../bindings/TestFunctionResult';
 import { UpdateTrigger } from '../../bindings/UpdateTrigger';
 
 const baseUrl = `${import.meta.env.VITE_BACKEND_URL}/api/v1`;
@@ -102,8 +103,8 @@ export async function deleteFunction( functionId: number ): Promise<null> {
 	return await request( `/functions/${functionId}`, "DELETE" ) as null;
 }
 
-export async function testFunction( functionId: number, data: TestFunction ): Promise<string> {
-	return await request( `/functions/${functionId}/test`, "POST", data ) as string;
+export async function testFunction( functionId: number, data: TestFunction ): Promise<TestFunctionResult> {
+	return await request( `/functions/${functionId}/test`, "POST", data ) as TestFunctionResult;
 }
 
 export async function getTriggers(): Promise<Trigger[]> {

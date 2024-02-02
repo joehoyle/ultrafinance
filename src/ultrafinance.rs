@@ -2,11 +2,9 @@ use crate::models::*;
 use actix_web::web::block;
 use anyhow::anyhow;
 use chrono::Duration;
-use futures::stream::FuturesOrdered;
-use futures::StreamExt;
 
 use std::collections::HashMap;
-use std::env;
+use std::{env, thread};
 
 pub fn is_dev() -> bool {
     env::var("IS_DEVELOPMENT")
@@ -174,10 +172,27 @@ pub async fn sqlx_process_trigger_queue(
     queue: Vec<TriggerQueue>,
     db: &sqlx::MySqlPool,
 ) -> HashMap<u32, anyhow::Result<TriggerLog>> {
-    let mut result_map = HashMap::new();
+    let mut handles = Vec::new();
+
+    // Create a single Tokio runtime outside of the loop
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt_handle = rt.handle().clone();
+
     for q in queue {
-        let id = q.id;
-        let result = q.sqlx_run(db).await;
+        let db = db.clone();
+        let rt_handle = rt_handle.clone();
+        let handle = thread::spawn(move || {
+            let id = q.id;
+            // Use the handle to the runtime to block on the future
+            let result = rt_handle.block_on(q.sqlx_run(&db));
+            (id, result)
+        });
+        handles.push(handle);
+    }
+
+    let mut result_map = HashMap::new();
+    for handle in handles {
+        let (id, result) = handle.join().unwrap();
         result_map.insert(id, result);
     }
 
@@ -194,22 +209,25 @@ async fn sqlx_enrich_transactions(
         .await?;
     let mut transactions: Vec<Transaction> = vec![];
     for enriched_transaction in enriched_transactions {
+        let t_id = enriched_transaction.transaction_id.parse::<u32>().unwrap();
+        let mut transaction: Transaction = Transaction::sqlx_by_id(t_id, db).await?;
         match NewMerchant::try_from(&enriched_transaction) {
             Ok(merchant) => match merchant.sqlx_create_or_fetch(db).await {
                 Ok(merchant) => {
-                    let t_id = enriched_transaction.transaction_id.parse::<u32>().unwrap();
-                    let mut transaction: Transaction = Transaction::sqlx_by_id(t_id, db).await?;
                     transaction.merchant_id = Some(merchant.id);
                     transaction.sqlx_update(db).await?;
-                    transactions.push(transaction);
                 }
                 Err(err) => {
                     println!("Error creating merchant: {}", err);
                     continue;
                 }
             },
-            Err(err) => println!("Error getting merchant: {}", err),
+            Err(err) => {
+                println!("Error getting merchant: {}", err);
+            },
         }
+
+        transactions.push(transaction);
     }
 
     Ok(transactions)
