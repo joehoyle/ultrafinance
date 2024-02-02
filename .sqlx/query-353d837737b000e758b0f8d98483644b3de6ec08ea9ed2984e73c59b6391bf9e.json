@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO functions (name, function_type, source, user_id) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "353d837737b000e758b0f8d98483644b3de6ec08ea9ed2984e73c59b6391bf9e"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO nordigen_requisitions (nordigen_id, status, user_id) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9dec122ac3ef1524489596b938aec514ebb82bd489db87e4d19c760c5322a640"
+}

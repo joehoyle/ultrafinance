@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO accounts (name, number, account_type, nordigen_id, currency, product, cash_account_type, details, owner_name, status, icon, institution_name, config, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 14
+    },
+    "nullable": []
+  },
+  "hash": "d6afe95c406da4f01652b7d6ab822be27d4c12cb4e93910dea568c24c6b04264"
+}

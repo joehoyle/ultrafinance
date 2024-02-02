@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO triggers (event, name, filter, params, user_id, function_id) VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "9bc12087ed7556487756f4d1ba0c4680fc32a7314eaa3fc56dbc02b32d636523"
+}

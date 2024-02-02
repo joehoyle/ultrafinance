@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM trigger_queue WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "486577d18cff33e9e4a52ceaa95696a28db6c2816e04876cd152bd2e5746945c"
+}

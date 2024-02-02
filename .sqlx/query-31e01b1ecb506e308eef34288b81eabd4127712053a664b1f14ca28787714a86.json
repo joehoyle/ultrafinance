@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO trigger_log (payload, console, status, user_id, trigger_id) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "31e01b1ecb506e308eef34288b81eabd4127712053a664b1f14ca28787714a86"
+}

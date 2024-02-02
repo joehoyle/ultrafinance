@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE functions SET name = ?, source = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a93fcc43a8c3360636a952ce8a670182ee3b8acc6e734b091b57db09e540feb9"
+}

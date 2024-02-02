@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO merchants (name, logo_url, location, location_structured, labels, external_id, website) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "4e327c060a7ade0912da9a09b65eb41422d9dea5c8a680f827e6df5794e614eb"
+}

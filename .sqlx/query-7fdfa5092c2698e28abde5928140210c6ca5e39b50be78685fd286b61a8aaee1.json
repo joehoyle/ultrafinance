@@ -1,0 +1,25 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM transactions WHERE external_id = ? AND account_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "EXISTS(SELECT 1 FROM transactions WHERE external_id = ? AND account_id = ?)",
+        "type_info": {
+          "type": "LongLong",
+          "flags": "NOT_NULL | BINARY",
+          "char_set": 63,
+          "max_size": 1
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7fdfa5092c2698e28abde5928140210c6ca5e39b50be78685fd286b61a8aaee1"
+}

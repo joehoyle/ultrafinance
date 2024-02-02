@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO trigger_queue (payload, user_id, trigger_id) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "33b3cb840ed346be931265802999c0415d1ff8d4ac9910dadb5589158f31f768"
+}
