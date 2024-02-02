@@ -3,10 +3,9 @@
 /* tslint:disable */
 /* eslint-disable */
 export type Requisition = {
-    accounts: Array<string>;
-    id: string;
-    link: string;
-    redirect: string;
-    status: string;
+	accounts: Array<string>;
+	id: string;
+	link: string;
+	redirect: string;
+	status: string;
 };
-

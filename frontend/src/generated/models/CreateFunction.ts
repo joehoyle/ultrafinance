@@ -3,7 +3,6 @@
 /* tslint:disable */
 /* eslint-disable */
 export type CreateFunction = {
-    name: string;
-    source: string;
+	name: string;
+	source: string;
 };
-

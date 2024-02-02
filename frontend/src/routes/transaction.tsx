@@ -33,18 +33,18 @@ export default function TransactionSingle() {
 				<Await resolve={transaction}>
 					{(transaction: TransactionWithMerchant) => (
 						<>
-							{ transaction.merchant &&
+							{transaction.merchant &&
 								<div className="rounded bg-purple-50 p-4 mb-4 flex flex-row justify-between">
 									<div>
-										{ transaction.merchant.logo_url &&
-											<img className="rounded w-16 h-16 " src={ transaction.merchant.logo_url } />
+										{transaction.merchant.logo_url &&
+											<img className="rounded w-16 h-16 " src={transaction.merchant.logo_url} />
 										}
-										<h3 className="font-bold text-lg">{ transaction.merchant.name }</h3>
+										<h3 className="font-bold text-lg">{transaction.merchant.name}</h3>
 									</div>
 									<div>
-										{ [ transaction.merchant.location_structured?.city, transaction.merchant.location_structured?.country ].filter(Boolean).join(', ') }
-										{ transaction.merchant.location_structured?.latitude && transaction.merchant.location_structured?.longitude &&
-											<img width="150" className="rounded border border-purple-300" src={`https://api.mapbox.com/styles/v1/mapbox/light-v11/static/pin-s+555555(${ transaction.merchant.location_structured?.longitude },${ transaction.merchant.location_structured?.latitude })/${ transaction.merchant.location_structured?.longitude },${ transaction.merchant.location_structured?.latitude },11,0/300x200@2x?access_token=pk.eyJ1Ijoiam9laG95bGUiLCJhIjoiRzlMLUFQYyJ9.5EEMigt2JStBzNobiPo_9g`} />
+										{[transaction.merchant.location_structured?.city, transaction.merchant.location_structured?.country].filter(Boolean).join(', ')}
+										{transaction.merchant.location_structured?.latitude && transaction.merchant.location_structured?.longitude &&
+											<img width="150" className="rounded border border-purple-300" src={`https://api.mapbox.com/styles/v1/mapbox/light-v11/static/pin-s+555555(${transaction.merchant.location_structured?.longitude},${transaction.merchant.location_structured?.latitude})/${transaction.merchant.location_structured?.longitude},${transaction.merchant.location_structured?.latitude},11,0/300x200@2x?access_token=pk.eyJ1Ijoiam9laG95bGUiLCJhIjoiRzlMLUFQYyJ9.5EEMigt2JStBzNobiPo_9g`} />
 										}
 									</div>
 								</div>

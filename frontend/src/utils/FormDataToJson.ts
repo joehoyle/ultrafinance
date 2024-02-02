@@ -33,7 +33,6 @@ function update(data, keys, value) {
 	return data;
 }
 
-
 export default function FormDataToJson<T>(formData: FormData): T {
 	return Array.from(formData.entries()).reduce((data, [field, value]) => {
 		let [_, prefix, keys] = field.match(/^([^\[]+)((?:\[[^\]]*\])*)/);

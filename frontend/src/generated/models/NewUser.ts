@@ -3,8 +3,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export type NewUser = {
-    email: string;
-    name: string;
-    password: string;
+	email: string;
+	name: string;
+	password: string;
 };
-

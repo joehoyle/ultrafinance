@@ -3,11 +3,10 @@
 /* tslint:disable */
 /* eslint-disable */
 export type TriggerQueue = {
-    created_at: string;
-    id: number;
-    payload: string;
-    trigger_id: number;
-    updated_at: string;
-    user_id: number;
+	created_at: string;
+	id: number;
+	payload: string;
+	trigger_id: number;
+	updated_at: string;
+	user_id: number;
 };
-

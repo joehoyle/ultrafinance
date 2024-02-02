@@ -31,8 +31,8 @@ export default function Triggers() {
 		</PageHeader>
 		<main className="flex-grow p-10">
 			<Suspense fallback={<LoadingList />}>
-				<Await resolve={ triggers }>
-					{ triggers => <TriggersList triggers={triggers} /> }
+				<Await resolve={triggers}>
+					{triggers => <TriggersList triggers={triggers} />}
 				</Await>
 			</Suspense>
 		</main>

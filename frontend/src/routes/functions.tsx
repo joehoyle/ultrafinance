@@ -31,8 +31,8 @@ export default function Functions() {
 		</PageHeader>
 		<main className="flex-grow p-10">
 			<Suspense fallback={<LoadingList />}>
-				<Await resolve={ functions }>
-					{ functions => <FunctionsList functions={functions} /> }
+				<Await resolve={functions}>
+					{functions => <FunctionsList functions={functions} />}
 				</Await>
 			</Suspense>
 		</main>

@@ -11,9 +11,9 @@ export async function action({ request }: { request: Request }) {
 	const data = FormDataToJson<CreateTrigger>(formData);
 	const trigger = await createTrigger({
 		...data,
-		function_id: Number( data.function_id),
+		function_id: Number(data.function_id),
 	});
-	return redirect(`/triggers/${ trigger.id }`);
+	return redirect(`/triggers/${trigger.id}`);
 }
 
 export async function loader() {
@@ -28,7 +28,7 @@ export default function TriggerNew() {
 		<PageHeader><Link to="/accounts">Functions</Link> &rarr; New</PageHeader>
 		<main className="flex-grow px-10 py-4">
 			<Form className="flex flex-col" method="post" action="/triggers/new">
-				<TriggerBuilder functions={ functions } />
+				<TriggerBuilder functions={functions} />
 				<div className="flex space-x-2 mt-4">
 					<Button>Create Trigger</Button>
 				</div>

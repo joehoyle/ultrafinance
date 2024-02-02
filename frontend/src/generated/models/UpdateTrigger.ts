@@ -3,9 +3,8 @@
 /* tslint:disable */
 /* eslint-disable */
 export type UpdateTrigger = {
-    event?: string;
-    function_id?: number;
-    name?: string;
-    params?: Record<string, string>;
+	event?: string;
+	function_id?: number;
+	name?: string;
+	params?: Record<string, string>;
 };
-

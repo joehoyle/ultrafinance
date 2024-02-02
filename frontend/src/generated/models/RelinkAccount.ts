@@ -3,6 +3,5 @@
 /* tslint:disable */
 /* eslint-disable */
 export type RelinkAccount = {
-    requisition_id: string;
+	requisition_id: string;
 };
-

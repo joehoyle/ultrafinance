@@ -3,8 +3,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export type UpdateFunction = {
-    id?: number;
-    name?: string;
-    source?: string;
+	id?: number;
+	name?: string;
+	source?: string;
 };
-

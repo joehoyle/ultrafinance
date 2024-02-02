@@ -31,13 +31,13 @@ export default function Homepage() {
 
 				<div className="flex space-x-4 items-center font-semibold text-white">
 					<Suspense>
-						<Await resolve={ user } errorElement={
+						<Await resolve={user} errorElement={
 							<>
 								<Link className="p-2" to="/login">Log In</Link>
 								<Link className="p-2 px-4 bg-white/20 rounded-lg" to="/signup">Sign Up</Link>
 							</>
 						}>
-							{ _ => <Link to="/accounts">Dashboard</Link>}
+							{_ => <Link to="/accounts">Dashboard</Link>}
 						</Await>
 					</Suspense>
 				</div>
@@ -58,7 +58,7 @@ export default function Homepage() {
 			<h4 className="text-lg font-semibold text-purple-600">Routing for your financial data</h4>
 			<h3 className="mt-2 text-3xl font-bold tracking-tight text-gray-900">Connect accounts and import transactions</h3>
 			<p className="mx-auto my-14 max-w-prose text-xl text-gray-500">Connect to over 2,000 financial institutions, bank accounts and credit cards to import your data. Your data is always encrypted in transite, at-rest and stored in the EU.</p>
-			<img src={`${ import.meta.env.BASE_URL }screenshots/accounts.png`} />
+			<img src={`${import.meta.env.BASE_URL}screenshots/accounts.png`} />
 		</div>
 		<div className="p-8 text-center max-w-6xl mx-auto">
 			<h4 className="text-lg font-semibold text-purple-600">Automations ready to go</h4>
@@ -99,9 +99,9 @@ export default function Homepage() {
 						<div className="-mt-6">
 							<div>
 								<span className="inline-flex items-center justify-center rounded-md bg-gradient-to-r from-purple-500 to-purple-600 p-3 shadow-lg text-white">
-								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-									<path strokeLinecap="round" strokeLinejoin="round" d="M12.75 3.03v.568c0 .334.148.65.405.864l1.068.89c.442.369.535 1.01.216 1.49l-.51.766a2.25 2.25 0 01-1.161.886l-.143.048a1.107 1.107 0 00-.57 1.664c.369.555.169 1.307-.427 1.605L9 13.125l.423 1.059a.956.956 0 01-1.652.928l-.679-.906a1.125 1.125 0 00-1.906.172L4.5 15.75l-.612.153M12.75 3.031a9 9 0 00-8.862 12.872M12.75 3.031a9 9 0 016.69 14.036m0 0l-.177-.529A2.25 2.25 0 0017.128 15H16.5l-.324-.324a1.453 1.453 0 00-2.328.377l-.036.073a1.586 1.586 0 01-.982.816l-.99.282c-.55.157-.894.702-.8 1.267l.073.438c.08.474.49.821.97.821.846 0 1.598.542 1.865 1.345l.215.643m5.276-3.67a9.012 9.012 0 01-5.276 3.67m0 0a9 9 0 01-10.275-4.835M15.75 9c0 .896-.393 1.7-1.016 2.25" />
-								</svg>
+									<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+										<path strokeLinecap="round" strokeLinejoin="round" d="M12.75 3.03v.568c0 .334.148.65.405.864l1.068.89c.442.369.535 1.01.216 1.49l-.51.766a2.25 2.25 0 01-1.161.886l-.143.048a1.107 1.107 0 00-.57 1.664c.369.555.169 1.307-.427 1.605L9 13.125l.423 1.059a.956.956 0 01-1.652.928l-.679-.906a1.125 1.125 0 00-1.906.172L4.5 15.75l-.612.153M12.75 3.031a9 9 0 00-8.862 12.872M12.75 3.031a9 9 0 016.69 14.036m0 0l-.177-.529A2.25 2.25 0 0017.128 15H16.5l-.324-.324a1.453 1.453 0 00-2.328.377l-.036.073a1.586 1.586 0 01-.982.816l-.99.282c-.55.157-.894.702-.8 1.267l.073.438c.08.474.49.821.97.821.846 0 1.598.542 1.865 1.345l.215.643m5.276-3.67a9.012 9.012 0 01-5.276 3.67m0 0a9 9 0 01-10.275-4.835M15.75 9c0 .896-.393 1.7-1.016 2.25" />
+									</svg>
 
 								</span>
 							</div>
@@ -118,7 +118,7 @@ export default function Homepage() {
 				<h4 className="text-lg font-semibold text-purple-600">Get advanced</h4>
 				<h3 className="mt-2 text-3xl font-bold tracking-tight text-gray-900">Write your own with JavaScript / TypeScript</h3>
 				<p className="mx-auto my-14 max-w-prose text-xl text-gray-500">Use Ultrafinance <span className="px-2 py-1 rounded-lg bg-purple-100 text-purple-600">Cloud Functions</span> for ultimate flexibility and control. TypeScript functions run in a secure isolated sandbox (built on <a className="text-purple-600" href="https://deno.land/">Deno</a>) giving you the ultimate power: writing code.</p>
-				<img src={`${ import.meta.env.BASE_URL }screenshots/functions.png`} />
+				<img src={`${import.meta.env.BASE_URL}screenshots/functions.png`} />
 			</div>
 		</div>
 		<div className="p-8 text-center mt-8">

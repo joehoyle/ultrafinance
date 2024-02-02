@@ -18,7 +18,7 @@ export async function action() {
 	return syncAccounts();
 }
 
-export async function loader({request}: {request: Request}) {
+export async function loader({ request }: { request: Request }) {
 	const url = new URL(request.url);
 	return defer({
 		transactions: getTransactions(url.searchParams.get('search') || undefined),
@@ -28,10 +28,10 @@ export async function loader({request}: {request: Request}) {
 
 export default function Transactions() {
 	const { transactions, accounts } = useLoaderData() as Data;
-	const [ syncingTransactions, setSyncingTransactions ] = useState(false);
+	const [syncingTransactions, setSyncingTransactions] = useState(false);
 	const revalidator = useRevalidator();
 
-	const [ searchParams, setSearchParams ] = useSearchParams();
+	const [searchParams, setSearchParams] = useSearchParams();
 	async function onSyncTransactions(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {
 		e.preventDefault();
 		setSyncingTransactions(true);
@@ -56,8 +56,8 @@ export default function Transactions() {
 		<PageHeader>
 			<div className="flex space-x-4">
 				<div>Transactions</div>
-				<input className="rounded flex-1 border border-gray-200 p-2 h-8 text-xs outline-none" placeholder="Search..." onKeyUp={ onKeyUpSearchInput } />
-				<Button onClick={ onSyncTransactions } disabled={ syncingTransactions } varient="secondary" isLoading={ syncingTransactions }>Import Transactions</Button>
+				<input className="rounded flex-1 border border-gray-200 p-2 h-8 text-xs outline-none" placeholder="Search..." onKeyUp={onKeyUpSearchInput} />
+				<Button onClick={onSyncTransactions} disabled={syncingTransactions} varient="secondary" isLoading={syncingTransactions}>Import Transactions</Button>
 			</div>
 		</PageHeader>
 		<main className=" flex-grow p-10">

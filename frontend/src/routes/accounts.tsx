@@ -40,7 +40,7 @@ export default function Accounts() {
 								<AccountsList accounts={accounts} />
 							</div>
 						)
-					} }
+					}}
 				</Await>
 			</Suspense>
 		</main>

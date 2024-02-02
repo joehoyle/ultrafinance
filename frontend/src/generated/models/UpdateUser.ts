@@ -3,9 +3,8 @@
 /* tslint:disable */
 /* eslint-disable */
 export type UpdateUser = {
-    email?: string;
-    id?: number;
-    name?: string;
-    password?: string;
+	email?: string;
+	id?: number;
+	name?: string;
+	password?: string;
 };
-

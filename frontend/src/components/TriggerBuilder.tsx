@@ -9,11 +9,11 @@ interface Props {
 	trigger?: Trigger,
 }
 export default function TriggerBuilder(props: Props) {
-	const [selectedFunction, setSelectedFunction] = useState<Function | undefined>( props.functions.filter( f => f.id === props.trigger?.function_id )[0] );
+	const [selectedFunction, setSelectedFunction] = useState<Function | undefined>(props.functions.filter(f => f.id === props.trigger?.function_id)[0]);
 	return <>
 		<label>
 			<div className="text-xs text-gray-500 mb-2">Trigger Name</div>
-			<Input required defaultValue={ props.trigger?.name } name="name"  type="text" />
+			<Input required defaultValue={props.trigger?.name} name="name" type="text" />
 		</label>
 
 		<p className="my-4 bg-purple-100 rounded-lg p-4">When
@@ -31,7 +31,7 @@ export default function TriggerBuilder(props: Props) {
 				}}
 				name="function_id"
 				className="p-1 mx-2 border border-purple-400 rounded bg-purple-200 text-sm"
-				defaultValue={ props.trigger?.function_id }
+				defaultValue={props.trigger?.function_id}
 			>
 				<option value="">- Select Function -</option>
 				{props.functions.map(_function => (
@@ -42,9 +42,9 @@ export default function TriggerBuilder(props: Props) {
 
 		{selectedFunction && selectedFunction.params && Object.keys(selectedFunction.params).length > 0 &&
 			<>
-				<h4>{ selectedFunction.name } Configuration</h4>
+				<h4>{selectedFunction.name} Configuration</h4>
 				{Object.entries(selectedFunction.params).map(([paramId, param]) => (
-					<FunctionParamField key={ paramId } param={ param } id={ paramId } value={ props.trigger?.params[ paramId ] } />
+					<FunctionParamField key={paramId} param={param} id={paramId} value={props.trigger?.params[paramId]} />
 				))}
 			</>
 		}

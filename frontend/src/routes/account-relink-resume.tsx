@@ -38,7 +38,7 @@ export default function AccountRelinkResume() {
 						<p>Error relinking account!</p>
 					}
 				>
-					{ (account: Account) => <p>Relinked account {account.name }.</p> }
+					{(account: Account) => <p>Relinked account {account.name}.</p>}
 				</Await>
 			</Suspense>
 		</main>

@@ -3,7 +3,6 @@
 /* tslint:disable */
 /* eslint-disable */
 export type CreateRequisition = {
-    account_id?: number;
-    institution_id?: string;
+	account_id?: number;
+	institution_id?: string;
 };
-

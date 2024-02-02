@@ -63,7 +63,7 @@ export default function AccountSingle() {
 					<Link to="/accounts">Accounts</Link> &rarr; {account.name || '(untitled)'}
 				</div>
 				<div className="flex flex-row space-x-1">
-					<span className="text-purple-500">{ currencySymbols[ account.currency as keyof typeof currencySymbols ] }</span>
+					<span className="text-purple-500">{currencySymbols[account.currency as keyof typeof currencySymbols]}</span>
 					<span>{account.balance}</span>
 					<span className="text-gray-400">{account.currency}</span>
 				</div>
@@ -82,7 +82,7 @@ export default function AccountSingle() {
 					<Button onClick={onDeleteAccount} varient="danger">Delete Account</Button>
 				</div>
 
-				{ importingTransactionsError && <p className="text-red-500 p-2 bg-red-200 border-red-700 rounded mt-4">{importingTransactionsError.message}</p> }
+				{importingTransactionsError && <p className="text-red-500 p-2 bg-red-200 border-red-700 rounded mt-4">{importingTransactionsError.message}</p>}
 			</Form>
 
 

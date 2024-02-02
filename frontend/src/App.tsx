@@ -51,7 +51,7 @@ export async function loader() {
 		return {
 			user: await getMe(),
 		}
-	} catch ( e ) {
+	} catch (e) {
 		return redirect('/login');
 	}
 }
@@ -73,13 +73,13 @@ function App() {
 						{item.icon}
 						<span>{item.name}</span></NavLink>
 				})}
-				<NavLink to="/account" className={({ isActive }) => `mt-auto flex space-x-2 items-center rounded-lg p-2 ${ isActive && 'bg-purple-100/100' }`}>
+				<NavLink to="/account" className={({ isActive }) => `mt-auto flex space-x-2 items-center rounded-lg p-2 ${isActive && 'bg-purple-100/100'}`}>
 					<img className="w-8 h-8 rounded-full border-purple-400 border" src="https://en.gravatar.com/userimage/6103/8089514d8a2badb1b3073015e3bc8768.jpeg" />
 					<span className="text-sm flex flex-col flex-1">
-						<span>{ user.name }</span>
+						<span>{user.name}</span>
 						<span className="text-xs text-gray-500">Manage Account</span>
 					</span>
-					<button className="ml-auto text-purple-300 hover:text-purple-400" onClick={ onClickLogout }>
+					<button className="ml-auto text-purple-300 hover:text-purple-400" onClick={onClickLogout}>
 						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
 							<path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
 						</svg>

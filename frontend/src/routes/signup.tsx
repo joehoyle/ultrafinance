@@ -22,12 +22,12 @@ export default function Signup() {
 
 	return <div className="min-h-screen flex items-center">
 		<Form className="w-64 mx-auto flex flex-col space-y-4" method="post">
-			<Link to="/"><img src={`${ import.meta.env.BASE_URL }logo.svg`} width="80" className="mx-auto mb-4" /></Link>
-			{ error instanceof Error && <ErrorMessage className="w-full">
+			<Link to="/"><img src={`${import.meta.env.BASE_URL}logo.svg`} width="80" className="mx-auto mb-4" /></Link>
+			{error instanceof Error && <ErrorMessage className="w-full">
 				<p className="max-w-sm">
-					{ error.message }
+					{error.message}
 				</p>
-			</ErrorMessage> }
+			</ErrorMessage>}
 			<label className="text-xs text-gray-400 flex flex-col">
 				Name
 				<Input name="name" type="text" />

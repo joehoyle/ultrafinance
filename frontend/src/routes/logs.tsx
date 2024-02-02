@@ -28,7 +28,7 @@ export async function loader() {
 export default function Logs() {
 	const { triggerQueue, triggers, log } = useLoaderData() as Data;
 
-	const [ processingQueue, setProcessingQueue ] = useState(false);
+	const [processingQueue, setProcessingQueue] = useState(false);
 	const revalidator = useRevalidator();
 
 	async function onProcessQueue(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {
@@ -49,15 +49,15 @@ export default function Logs() {
 							<span>
 								Queued Jobs
 							</span>
-							<Button varient="secondary" className="ml-auto" onClick={ onProcessQueue } isLoading={ processingQueue } disabled={ processingQueue }>Process Queue</Button>
+							<Button varient="secondary" className="ml-auto" onClick={onProcessQueue} isLoading={processingQueue} disabled={processingQueue}>Process Queue</Button>
 						</h2>
-						<TriggerQueueList triggerQueue={ triggerQueue } triggers={ triggers } />
+						<TriggerQueueList triggerQueue={triggerQueue} triggers={triggers} />
 					</div>}
 				</Await>
 			</Suspense>
 			<Suspense fallback={<LoadingList number={15} />}>
-					<Await resolve={Promise.all([log, triggers])}>
-					{([log, triggers]) => <TriggerLogList log={ log } triggers={ triggers } />}
+				<Await resolve={Promise.all([log, triggers])}>
+					{([log, triggers]) => <TriggerLogList log={log} triggers={triggers} />}
 				</Await>
 			</Suspense>
 		</main>

@@ -48,12 +48,12 @@ export default function FunctionSingle() {
 
 	function onClickEditorFullScreen(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {
 		e.preventDefault();
-		setEditorFullScreen( ! editorFullScreen );
+		setEditorFullScreen(!editorFullScreen);
 	}
 
 	function onClickShowTestRun(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {
 		e.preventDefault();
-		setIsShowingTestRun( ! isShowingTestRun );
+		setIsShowingTestRun(!isShowingTestRun);
 	}
 
 	async function onTestRun(e: React.FormEvent<HTMLFormElement>) {
@@ -90,7 +90,7 @@ export default function FunctionSingle() {
 						<div className="text-xs text-gray-500 mb-2">Function Name</div>
 						<Input name="name" type="text" defaultValue={_function.name} />
 					</label>
-					<div className={`flex-1 py-2 bg-[#1e1e1e] ${ editorFullScreen ? 'fixed inset-0' : 'relative mt-4 max-w-[calc(100vw-330px)]' }`}>
+					<div className={`flex-1 py-2 bg-[#1e1e1e] ${editorFullScreen ? 'fixed inset-0' : 'relative mt-4 max-w-[calc(100vw-330px)]'}`}>
 						<Editor
 							height="70vh"
 							defaultLanguage="typescript"
@@ -105,7 +105,7 @@ export default function FunctionSingle() {
 							onMount={handleEditorDidMount}
 
 						/>
-						<button onClick={ onClickEditorFullScreen } className={`z-20 absolute top-4 ${ editorFullScreen && isShowingTestRun ? 'right-[330px]' : 'right-4' } w-8 h-8 p-1 rounded bg-white/10 text-gray-500 hover:bg-white/20`}>
+						<button onClick={onClickEditorFullScreen} className={`z-20 absolute top-4 ${editorFullScreen && isShowingTestRun ? 'right-[330px]' : 'right-4'} w-8 h-8 p-1 rounded bg-white/10 text-gray-500 hover:bg-white/20`}>
 							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
 								<path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
 							</svg>
@@ -114,11 +114,11 @@ export default function FunctionSingle() {
 					<input ref={sourceRef} type="hidden" name="source" defaultValue={_function.source} />
 					<div className="flex space-x-2 mt-4">
 						<Button>Update Function</Button>
-						<Button varient="secondary" onClick={onClickShowTestRun}>{ isShowingTestRun ? 'Close Test' : 'Test' }</Button>
+						<Button varient="secondary" onClick={onClickShowTestRun}>{isShowingTestRun ? 'Close Test' : 'Test'}</Button>
 					</div>
 				</Form>
 				{isShowingTestRun &&
-					<div className={`p-4 w-72 ${ editorFullScreen ? 'fixed z-10 top-0 right-0 bottom-0' :'absolute right-0 top-20 bottom-12' } bg-[#2e2e2e] flex flex-col dark`}>
+					<div className={`p-4 w-72 ${editorFullScreen ? 'fixed z-10 top-0 right-0 bottom-0' : 'absolute right-0 top-20 bottom-12'} bg-[#2e2e2e] flex flex-col dark`}>
 						<h4 className="text-gray-300">Test Run</h4>
 
 						<form className="flex flex-1 flex-col space-y-4 items-start max-h-[95%]" onSubmit={onTestRun}>
@@ -156,16 +156,16 @@ export default function FunctionSingle() {
 								) : (
 									<>
 										<p className="text-gray-600">Result</p>
-										<span className="dark:text-gray-300 font-mono whitespace-pre break-all"><JsonValue value={ testRunResult.result } /></span>
+										<span className="dark:text-gray-300 font-mono whitespace-pre break-all"><JsonValue value={testRunResult.result} /></span>
 
 										<p className="text-gray-600">Console</p>
 										<span className="">
-											{ testRunResult.console.map( (line, i) => (
-												<span key={i} className="block dark:text-gray-300 font-mono whitespace-pre break-all"><JsonValue value={ line.msg } /></span>
+											{testRunResult.console.map((line, i) => (
+												<span key={i} className="block dark:text-gray-300 font-mono whitespace-pre break-all"><JsonValue value={line.msg} /></span>
 											))}
 										</span>
 									</>
-								) }
+								)}
 							</div>}
 						</form>
 					</div>
@@ -178,9 +178,9 @@ export default function FunctionSingle() {
 	</>
 }
 
-function JsonValue( {value } : { value: string } ) : string {
+function JsonValue({ value }: { value: string }): string {
 	try {
-		return JSON.stringify( JSON.parse( value ), null, 4 );
+		return JSON.stringify(JSON.parse(value), null, 4);
 	} catch (e) {
 		return value;
 	}

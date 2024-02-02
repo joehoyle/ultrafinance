@@ -33,7 +33,7 @@ export default function AccountsNew() {
 		<main className="flex-grow p-10">
 			<div className="flex mb-4">
 				<h2 className="flex-1">Select your financial institution</h2>
-				<input type="text" onChange={ e => setSearch( e.target.value ) } placeholder="Search..." className="text-xs text-gray-600 border-gray-300 p-1 border rounded outline-none" />
+				<input type="text" onChange={e => setSearch(e.target.value)} placeholder="Search..." className="text-xs text-gray-600 border-gray-300 p-1 border rounded outline-none" />
 			</div>
 			<div className="relative">
 				{isCreatingRequisition && <div className="inset-0 absolute flex items-center justify-center z-10 bg-white/50">
@@ -53,12 +53,12 @@ export default function AccountsNew() {
 							}
 						>
 							{(institutions: Institution[]) => {
-								if ( search ) {
-									institutions = institutions.filter( i => i.name.toLocaleLowerCase().indexOf( search.toLocaleLowerCase() ) > -1 )
+								if (search) {
+									institutions = institutions.filter(i => i.name.toLocaleLowerCase().indexOf(search.toLocaleLowerCase()) > -1)
 								}
 								return <>
 									{institutions.map(institution => (
-										<li className="flex" key={ institution.id }>
+										<li className="flex" key={institution.id}>
 											<button onClick={() => onSelectInstitution(institution)} className="flex flex-1 space-x-3 py-2 bg-white/50 border-b border-b-slate-50 font-medium text-xs text-slate-600 items-center hover:text-purple-900">
 												<img loading="lazy" src={institution.logo} className="w-8 flex-0" />
 												<div className="flex-1 text-left flex flex-col">

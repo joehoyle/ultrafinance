@@ -3,7 +3,6 @@
 /* tslint:disable */
 /* eslint-disable */
 export type TestFunction = {
-    params: string;
-    payload: string;
+	params: string;
+	payload: string;
 };
-
