@@ -158,7 +158,6 @@ pub async fn sqlx_sync_accounts(
     }
 
     let import_results = futures::future::join_all(import_futures).await;
-
     let mut result_map = HashMap::new();
 
     for (account_id, result) in import_results.into_iter().enumerate() {
@@ -175,9 +174,7 @@ pub async fn sqlx_process_trigger_queue(
     let mut handles = Vec::new();
 
     // Create a single Tokio runtime outside of the loop
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let rt_handle = rt.handle().clone();
-
+    let rt_handle = tokio::runtime::Handle::current();
     for q in queue {
         let db = db.clone();
         let rt_handle = rt_handle.clone();
@@ -208,6 +205,7 @@ async fn sqlx_enrich_transactions(
         .async_enrich_transactions(transactions.into_iter().map(|t| t.into()).collect())
         .await?;
     let mut transactions: Vec<Transaction> = vec![];
+
     for enriched_transaction in enriched_transactions {
         let t_id = enriched_transaction.transaction_id.parse::<u32>().unwrap();
         let mut transaction: Transaction = Transaction::sqlx_by_id(t_id, db).await?;
@@ -231,4 +229,52 @@ async fn sqlx_enrich_transactions(
     }
 
     Ok(transactions)
+}
+
+mod tests {
+    use chrono::NaiveDateTime;
+    use crate::deno::FunctionRuntime;
+    use super::*;
+
+    #[test]
+    pub fn test_parallel() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async {
+            let mut handles = Vec::new();
+            let rt_handle = tokio::runtime::Handle::current();
+
+            let handle = thread::spawn(move || {
+                // Use the handle to the runtime to block on the future
+                let result = rt_handle.block_on(async {
+                    let function = Function {
+                        id: 1,
+                        name: "Test".into(),
+                        function_type: "source".into(),
+                        source: "export default async function () {
+                            return new Promise((resolve, reject) => {
+                                setTimeout(() => {
+                                    resolve('Hello');
+                                }, 1000);
+                            });
+                        }"
+                        .into(),
+                        user_id: 1,
+                        created_at: NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
+                        updated_at: NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
+                    };
+                    let mut function_runtime = FunctionRuntime::new(&function).await.unwrap();
+                    let r = function_runtime.run("{}", "{}").await;
+                    r
+                });
+                result
+            });
+            handles.push(handle);
+
+            for handle in handles {
+                let result = handle.join().unwrap().unwrap();
+                assert_eq!(result, r#""Hello""#.to_string())
+            }
+        });
+    }
 }

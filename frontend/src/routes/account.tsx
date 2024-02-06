@@ -9,6 +9,7 @@ import Input from "../components/forms/Input";
 import PageHeader from "../components/PageHeader";
 import TransactionsList from "../components/TransactionsList";
 import currencySymbols from "../utils/currency-symbols";
+import { TransactionWithMerchant } from "../../../bindings/TransactionWithMerchant";
 
 type RouteParams = Params;
 
@@ -27,7 +28,7 @@ export default function AccountSingle() {
 	const [isImportingTransaction, setIsImportingTransactions] = useState(false);
 	const [importingTransactionsError, setImportingTransactionsError] = useState<Error | undefined>(undefined);
 	const [isRelinkingAccount, setIsRelinkingAccount] = useState(false);
-	const [importedTransactions, setImportedTransactions] = useState<Transaction[] | undefined>(undefined);
+	const [importedTransactions, setImportedTransactions] = useState<TransactionWithMerchant[] | undefined>(undefined);
 
 	async function onImportTransactions(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {
 		e.preventDefault();
@@ -69,7 +70,7 @@ export default function AccountSingle() {
 				</div>
 			</div>
 		</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Form method="post" action={`/accounts/${account.id}`}>
 				<label>
 					<div className="text-xs text-gray-500 mb-2">Account Name</div>

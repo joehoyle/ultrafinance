@@ -27,7 +27,7 @@ export default function AccountsResume() {
 		<PageHeader>
 			<Link to="/accounts">Accounts</Link> &rarr; New Account
 		</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Suspense
 				fallback={<LoadingList number={6} />}
 			>

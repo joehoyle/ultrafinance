@@ -1,4 +1,4 @@
-import { ReactNode, useState } from "react";
+import { ButtonHTMLAttributes, DetailedHTMLProps, ReactNode, useState } from "react";
 
 const styles = {
 	primary: "bg-purple-100 text-purple-900 dark:bg-purple-300",
@@ -11,7 +11,8 @@ interface Props {
 	isLoading?: boolean,
 }
 
-export default function Button({ isLoading, children, varient = "primary", ...props }: Props & React.HTMLProps<HTMLButtonElement>) {
+export default function Button({ isLoading, children, varient = "primary", ...props }: Props & DetailedHTMLProps<ButtonHTMLAttributes<HTMLButtonElement>, HTMLButtonElement>
+) {
 	const [confirmed, setConfirmed] = useState(false);
 
 	function onClick(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {

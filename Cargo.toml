@@ -48,3 +48,4 @@ sqlx = { version = "0.7.2", features = [
 	"chrono",
 ], default-features = false }
 deno_core = "0.238.0"
+console-subscriber = "0.2.0"

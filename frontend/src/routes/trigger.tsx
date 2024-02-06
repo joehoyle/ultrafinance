@@ -37,7 +37,7 @@ export default function TriggerSingle() {
 
 	return <>
 		<PageHeader><Link to="/triggers">Triggers</Link> &rarr; {trigger.name}</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Form method="post">
 				<TriggerBuilder functions={functions} trigger={trigger} />
 				<div className="flex space-x-2 mt-4">

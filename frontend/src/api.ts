@@ -160,8 +160,8 @@ export async function syncAccounts(): Promise<Transaction[]> {
 	return (await request(`/accounts/sync`, 'POST')) as Transaction[];
 }
 
-export async function syncAccount(accountId: number): Promise<Transaction[]> {
-	return (await request(`/accounts/${accountId}/sync`, 'POST')) as Transaction[];
+export async function syncAccount(accountId: number): Promise<TransactionWithMerchant[]> {
+	return (await request(`/accounts/${accountId}/sync`, 'POST')) as TransactionWithMerchant[];
 }
 
 export async function createSession(details: CreateSession): Promise<User> {

@@ -291,7 +291,7 @@ impl Nordigen {
                 Some(&args),
             )?
             .text()?;
-        println!("{}", &transactions);
+
         let transactions: TransactionsResponse = serde_json::from_str(transactions.as_str())?;
         let transactions = transactions
             .transactions

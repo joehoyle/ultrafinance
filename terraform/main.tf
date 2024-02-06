@@ -24,6 +24,10 @@ variable "nordigen_secret_key" {
   type = string
 }
 
+variable "ntropy_api_key" {
+  type = string
+}
+
 provider "aws" {
   region  = "eu-central-1"
   profile = "sub_account"
@@ -174,6 +178,10 @@ resource "aws_ecs_task_definition" "web" {
           name  = "NORDIGEN_SECRET_KEY"
           value = var.nordigen_secret_key
         },
+        {
+          name = "NTROPY_API_KEY"
+          value = var.ntropy_api_key
+        }
       ],
       logConfiguration: {
         logDriver = "awslogs"
@@ -433,4 +441,8 @@ resource "aws_acm_certificate" "local" {
 
 output "deployed_revision" {
   value = var.ecr_image_revision
+}
+
+output "aws_cloudwatch_log_group_web" {
+  value = aws_cloudwatch_log_group.web.name
 }

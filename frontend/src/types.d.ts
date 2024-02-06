@@ -14,5 +14,16 @@ declare module 'react-router-dom' {
 	}
 
 	export declare function Await<T>(props: AwaitProps1<T>): JSX.Element;
-	export function defer<T extends object>(obj: T): { [K in keyof T]: Promise<Awaited<T[K]>> };
+	export type DeferFunction<T> = (data: T, init?: number | ResponseInit) => IDeferredData<T>;
+	export declare const defer: DeferFunction;
+
+	// Define an interface with mapped types
+	export type IDeferredData<T> = {
+		[K in keyof T]: T[K];
+	}
+
+}
+
+declare module 'react-router-dom' {
+
 }

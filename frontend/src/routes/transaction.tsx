@@ -28,7 +28,7 @@ export default function TransactionSingle() {
 
 	return <>
 		<PageHeader><Link to="/transactions">Transactions</Link> &rarr; {params.id}</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Suspense fallback={<div />}>
 				<Await resolve={transaction}>
 					{(transaction: TransactionWithMerchant) => (

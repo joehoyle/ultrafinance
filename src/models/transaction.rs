@@ -130,7 +130,7 @@ impl Transaction {
         .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn sqlx_without_merchant_liimt_100(
+    pub async fn sqlx_without_merchant_limit_100(
         db: &sqlx::MySqlPool,
     ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(Self, "SELECT * FROM transactions WHERE merchant_id = NULL ORDER BY booking_date DESC LIMIT 100")

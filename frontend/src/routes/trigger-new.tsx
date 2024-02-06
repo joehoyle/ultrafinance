@@ -26,7 +26,7 @@ export default function TriggerNew() {
 	const { functions } = useLoaderData() as Awaited<ReturnType<typeof loader>>;
 	return <>
 		<PageHeader><Link to="/accounts">Functions</Link> &rarr; New</PageHeader>
-		<main className="flex-grow px-10 py-4">
+		<main className="flex-grow p-4">
 			<Form className="flex flex-col" method="post" action="/triggers/new">
 				<TriggerBuilder functions={functions} />
 				<div className="flex space-x-2 mt-4">

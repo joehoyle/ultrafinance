@@ -218,6 +218,7 @@ enum ServerCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    console_subscriber::init();
     let cli = Cli::parse();
     dotenv().ok();
     let sqlx_pool = MySqlPool::connect(env::var("DATABASE_URL").unwrap().as_str()).await?;
@@ -601,7 +602,7 @@ async fn main() -> anyhow::Result<()> {
             }
             TransactionsCommand::AssignMerchants {} => {
                 let transactions_to_do =
-                    Transaction::sqlx_without_merchant_liimt_100(&sqlx_pool).await?;
+                    Transaction::sqlx_without_merchant_limit_100(&sqlx_pool).await?;
 
                 let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
                 // Call .into() on all transactions_to_do

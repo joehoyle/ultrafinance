@@ -1,13 +1,13 @@
 import { Suspense } from "react";
-import { Await, defer, Link, ScrollRestoration, useLoaderData } from "react-router-dom";
-import { User } from "../../../bindings/User";
+import { Await, Link, ScrollRestoration, useLoaderData } from "react-router-dom";
 import { getMe } from "../api";
 import Footer from "../components/Footer";
+import { defer } from "../utils/defer";
 
 export function loader() {
 	return defer({
 		user: getMe(),
-	})
+	});
 }
 
 export default function Homepage() {

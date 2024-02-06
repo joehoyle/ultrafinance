@@ -44,7 +44,7 @@ export default function TriggerBuilder(props: Props) {
 			<>
 				<h4>{selectedFunction.name} Configuration</h4>
 				{Object.entries(selectedFunction.params).map(([paramId, param]) => (
-					<FunctionParamField key={paramId} param={param} id={paramId} value={props.trigger?.params[paramId]} />
+					<FunctionParamField key={paramId} param={param} id={paramId} value={props.trigger?.params[paramId] || ""} />
 				))}
 			</>
 		}

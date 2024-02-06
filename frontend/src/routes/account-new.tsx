@@ -30,7 +30,7 @@ export default function AccountsNew() {
 		<PageHeader>
 			<Link to="/accounts">Accounts</Link> &rarr; New Account
 		</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<div className="flex mb-4">
 				<h2 className="flex-1">Select your financial institution</h2>
 				<input type="text" onChange={e => setSearch(e.target.value)} placeholder="Search..." className="text-xs text-gray-600 border-gray-300 p-1 border rounded outline-none" />

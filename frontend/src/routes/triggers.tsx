@@ -29,7 +29,7 @@ export default function Triggers() {
 					<span>Add Trigger</span></Link>
 			</div>
 		</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Suspense fallback={<LoadingList />}>
 				<Await resolve={triggers}>
 					{triggers => <TriggersList triggers={triggers} />}

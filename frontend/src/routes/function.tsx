@@ -42,7 +42,7 @@ export default function FunctionSingle() {
 	const sourceRef = useRef<HTMLInputElement>(null);
 	const [isShowingTestRun, setIsShowingTestRun] = useState(false);
 	const [isRunningTest, setIsRunningTest] = useState(false);
-	const [testRunResult, setTestRunResult] = useState<TestFunctionResult | Error>("");
+	const [testRunResult, setTestRunResult] = useState<TestFunctionResult | Error | undefined>();
 	const [editorFullScreen, setEditorFullScreen] = useState(false);
 
 
@@ -83,7 +83,7 @@ export default function FunctionSingle() {
 	}
 	return <>
 		<PageHeader><Link to="/accounts">Functions</Link> &rarr; {_function.name}</PageHeader>
-		<main className="flex-grow px-10 py-4">
+		<main className="flex-grow p-4">
 			<div className="flex relative">
 				<Form className="flex flex-col flex-1" method="post" action={`/functions/${_function.id}`} onSubmit={onSubmit}>
 					<label>

@@ -67,7 +67,7 @@ function App() {
 	}
 	return (
 		<div className="min-h-screen flex">
-			<nav aria-label="Sidebar" className="min-h-screen w-64 text-xs flex flex-col flex-shrink-0 border-r-gray-200 border-r p-4 text-slate-600 justify-items-stretch ">
+			<nav aria-label="Sidebar" className="min-h-screen w-64 text-xs flex flex-col flex-shrink-0 p-4 text-slate-600 justify-items-stretch ">
 				{menu.map((item, i) => {
 					return <NavLink to={item.url} key={i} className={({ isActive }) => `flex items-center space-x-3 p-2 rounded-lg ${isActive && 'bg-purple-100/100 font-bold text-purple-900'}`}>
 						{item.icon}

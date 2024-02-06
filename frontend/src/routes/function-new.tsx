@@ -1,5 +1,4 @@
 import { Form, Link, redirect, useLoaderData } from "react-router-dom";
-import { Function } from "../../../bindings/Function";
 import { createFunction } from "../api";
 import Button from "../components/Button";
 import PageHeader from "../components/PageHeader";
@@ -58,7 +57,7 @@ export default function FunctionNew() {
 	}
 	return <>
 		<PageHeader><Link to="/accounts">Functions</Link> &rarr; New</PageHeader>
-		<main className="flex-grow px-10 py-4">
+		<main className="flex-grow p-4">
 			<Form className="flex flex-col" method="post" action="/functions/new" onSubmit={onSubmit}>
 				<label>
 					<div className="text-xs text-gray-500 mb-2">Function Name</div>

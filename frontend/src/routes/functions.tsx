@@ -29,7 +29,7 @@ export default function Functions() {
 					<span>Add Function</span></Link>
 			</div>
 		</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Suspense fallback={<LoadingList />}>
 				<Await resolve={functions}>
 					{functions => <FunctionsList functions={functions} />}

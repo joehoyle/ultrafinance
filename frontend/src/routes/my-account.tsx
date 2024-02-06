@@ -18,7 +18,7 @@ export default function MyAccount() {
 
 	return <>
 		<PageHeader>My Account</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Form method="post" action="/account" className="flex flex-col space-y-2 items-start mb-4">
 				<label className="flex flex-col text-xs">
 					<span>Name</span>

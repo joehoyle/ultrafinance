@@ -60,13 +60,12 @@ export default function Transactions() {
 				<Button onClick={onSyncTransactions} disabled={syncingTransactions} varient="secondary" isLoading={syncingTransactions}>Import Transactions</Button>
 			</div>
 		</PageHeader>
-		<main className=" flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Suspense fallback={<LoadingList number={15} />}>
 				<Await resolve={Promise.all([transactions, accounts])}>
 					{([transactions, accounts]) => <TransactionsList accounts={accounts} transactions={transactions} />}
 				</Await>
 			</Suspense>
-
 		</main>
 	</>
 }

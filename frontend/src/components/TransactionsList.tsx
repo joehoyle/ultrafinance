@@ -1,5 +1,3 @@
-import { Transaction } from "../../../bindings/Transaction";
-import { useNavigate } from "react-router-dom";
 import { Account } from "../../../bindings/Account";
 import { TransactionWithMerchant } from "../../../bindings/TransactionWithMerchant";
 import TransactionListItem from "./TransactionListItem";

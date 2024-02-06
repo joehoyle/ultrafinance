@@ -30,7 +30,7 @@ export default function Accounts() {
 					<span>Add Account</span></Link>
 			</div>
 		</PageHeader>
-		<main className="flex-grow p-10">
+		<main className="flex-grow p-4">
 			<Suspense fallback={<LoadingList />}>
 				<Await resolve={accounts}>
 					{(accounts: Account[]) => {

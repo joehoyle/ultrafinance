@@ -41,7 +41,7 @@ export default function Logs() {
 
 	return <>
 		<PageHeader>Logs</PageHeader>
-		<main className=" flex-grow p-10">
+		<main className=" flex-grow p-4">
 			<Suspense>
 				<Await resolve={Promise.all([triggerQueue, triggers])}>
 					{([triggerQueue, triggers]) => <div className="mb-6">
