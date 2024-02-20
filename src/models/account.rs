@@ -47,14 +47,14 @@ pub struct Account {
 }
 
 impl Account {
-    pub fn update_balance(&mut self) -> Result<()> {
-        let balance = self.source()?.balance()?;
+    pub async fn update_balance(&mut self) -> Result<()> {
+        let balance = self.source()?.balance().await?;
 
         self.balance = balance.amount.parse::<f32>()?;
         Ok(())
     }
 
-    pub fn source(&self) -> Result<Box<dyn SourceAccount>> {
+    pub fn source(&self) -> Result<Box<impl SourceAccount>> {
         let config = match &self.config {
             Some(config) => config,
             None => return Err(anyhow::anyhow!("No config found")),

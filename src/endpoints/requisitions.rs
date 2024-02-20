@@ -10,14 +10,8 @@ use crate::{nordigen, sqlx_create_nordigen_requisition, Account};
 pub async fn get_requisitions_institutions_endpoint(
 ) -> Result<Json<Vec<nordigen::Institution>>, Error> {
     let mut nordigen = nordigen::Nordigen::new();
-    let institutions: anyhow::Result<Vec<nordigen::Institution>> =
-        actix_web::web::block(move || {
-            nordigen.populate_token()?;
-            let institutions = nordigen.get_institutions(&None)?;
-            Ok(institutions)
-        })
-        .await
-        .unwrap();
+    nordigen.populate_token().await?;
+    let institutions = nordigen.get_institutions(&None).await;
 
     match institutions {
         Ok(institutions) => Ok(Json(institutions)),
@@ -41,27 +35,23 @@ pub async fn create_requisition_endpoint(
     let db = state.sqlx_pool.clone();
 
     let requisition = if let Some(institution_id) = data.institution_id.clone() {
-        actix_web::web::block(move || {
-            nordigen.populate_token()?;
-            nordigen.create_requisition(
+        nordigen.populate_token().await?;
+        nordigen
+            .create_requisition(
                 &format!("{}{}", &state.url, "/accounts/resume"),
                 &institution_id,
             )
-        })
-        .await
-        .unwrap()
+            .await
     } else if let Some(account_id) = data.account_id {
         let account = Account::sqlx_by_id(account_id, user.id, &db).await?;
-        actix_web::web::block(move || {
-            nordigen.populate_token()?;
-            let nordigen_account = nordigen.get_account(&account.nordigen_id)?;
-            nordigen.create_requisition(
+        nordigen.populate_token().await?;
+        let nordigen_account = nordigen.get_account(&account.nordigen_id).await?;
+        nordigen
+            .create_requisition(
                 &format!("{}/accounts/{}/resume", &state.url, account_id),
                 &nordigen_account.institution_id,
             )
-        })
-        .await
-        .unwrap()
+            .await
     } else {
         Err(anyhow::anyhow!("No institution_id or account_id provided."))
     };

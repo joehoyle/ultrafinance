@@ -1,7 +1,9 @@
+use crate::accounts::SourceAccount;
 use crate::models::*;
-use actix_web::web::block;
 use anyhow::anyhow;
 use chrono::Duration;
+use log::info;
+use tokio::runtime::Runtime;
 
 use std::collections::HashMap;
 use std::{env, thread};
@@ -16,6 +18,7 @@ pub async fn sqlx_import_transactions(
     account: &Account,
     db: &sqlx::MySqlPool,
 ) -> anyhow::Result<Vec<Transaction>> {
+    info!("Importing transactions for account: {}", account.id);
     let latest_transaction = sqlx::query_as!(
         Transaction,
         "SELECT * FROM transactions WHERE account_id = ? ORDER BY booking_date DESC LIMIT 1",
@@ -28,11 +31,12 @@ pub async fn sqlx_import_transactions(
         .map(|t| t.booking_date - Duration::days(7))
         .ok();
 
+    info!("Date of latest transaction for account minus 1 week to account for pending: {:?}", from_date);
+
     let account_clone = account.clone();
-    // Todo: this needs to be an async function
-    let other_transactions = block(move ||
-        account_clone.source()?.transactions(&from_date, &None)
-    ).await.unwrap()?;
+    let other_transactions = account_clone.source()?.transactions(&from_date, &None).await?;
+
+    info!("Found {} transactions for account: {}", other_transactions.len(), account.id);
 
     let mut new_transactions: Vec<transaction::NewTransaction> = vec![];
     for transaction in other_transactions {
@@ -41,6 +45,7 @@ pub async fn sqlx_import_transactions(
         .fetch_one(db)
         .await?;
         if exists > 0 {
+            info!("Transaction {} already exists", transaction.id);
             continue;
         }
 
@@ -84,8 +89,14 @@ pub async fn sqlx_import_transactions(
     .fetch_all(db)
     .await?;
 
+    info!("Sucessfully imported {} transactions for account: {}", inserted_transactions.len(), account.id);
+
     // Enrich the transactions that were inserted
-    let inserted_transactions = sqlx_enrich_transactions(inserted_transactions, db).await?;
+    // let inserted_transactions = sqlx_enrich_transactions(inserted_transactions, db).await?;
+    // TODO: reenable when we have credits.
+
+    info!("Enriched {} transactions for account: {}", inserted_transactions.len(), account.id);
+
     // Create the triggers
     for transaction in &inserted_transactions {
         sqlx_create_transaction_trigger_queue(transaction, db).await?;
@@ -104,6 +115,8 @@ pub async fn sqlx_create_transaction_trigger_queue(
         .into_iter()
         .filter(|trigger| trigger.filter.matches(transaction))
         .collect::<Vec<Trigger>>();
+
+    info!("Adding {} triggers for transaction.", transaction_triggers.len());
 
     for transaction_trigger in &transaction_triggers {
         NewTriggerQueue {
@@ -147,17 +160,18 @@ pub fn verify_password(hash: &str, password: &str) -> anyhow::Result<()> {
 }
 
 pub async fn sqlx_sync_accounts(
-    accounts: &Vec<Account>,
+    accounts: &mut Vec<Account>,
     db: &sqlx::MySqlPool,
 ) -> HashMap<u32, anyhow::Result<Vec<Transaction>>> {
     let mut import_futures = Vec::new();
 
-    for account in accounts {
-        let import_future = sqlx_import_transactions(&account, db);
+    for account in accounts.iter() {
+        let import_future = sqlx_import_transactions(account, db);
         import_futures.push(import_future);
     }
 
     let import_results = futures::future::join_all(import_futures).await;
+
     let mut result_map = HashMap::new();
 
     for (account_id, result) in import_results.into_iter().enumerate() {
@@ -173,15 +187,19 @@ pub async fn sqlx_process_trigger_queue(
 ) -> HashMap<u32, anyhow::Result<TriggerLog>> {
     let mut handles = Vec::new();
 
-    // Create a single Tokio runtime outside of the loop
-    let rt_handle = tokio::runtime::Handle::current();
     for q in queue {
         let db = db.clone();
-        let rt_handle = rt_handle.clone();
         let handle = thread::spawn(move || {
+            let rt_handle = Runtime::new().unwrap();
             let id = q.id;
+            info!("Processing trigger queue: {}", id);
             // Use the handle to the runtime to block on the future
-            let result = rt_handle.block_on(q.sqlx_run(&db));
+            let result = rt_handle.block_on(async move {
+                let pool = db.options().clone().connect(env::var("DATABASE_URL").unwrap().as_str()).await.unwrap();
+                q.sqlx_run(&pool).await
+            });
+            dbg!(&result);
+            info!("Processed trigger queue: {}", id);
             (id, result)
         });
         handles.push(handle);

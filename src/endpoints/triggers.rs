@@ -135,6 +135,7 @@ pub async fn process_trigger_queue_endpoint(
 ) -> Result<Json<HashMap<u32, Result<TriggerLog, Error>>>, Error> {
     let db = &state.sqlx_pool;
     let queue = TriggerQueue::sqlx_by_user(user.id, &db).await?;
+
     let trigger_log_map = ultrafinance::sqlx_process_trigger_queue(queue, db).await;
     let mut trigger_log_map_response = HashMap::new();
     for (trigger_queue_id, result) in trigger_log_map {

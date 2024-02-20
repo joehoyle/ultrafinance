@@ -142,6 +142,8 @@ resource "aws_ecs_task_definition" "web" {
   }
 
   execution_role_arn = aws_iam_role.ecs.arn
+  task_role_arn = aws_iam_role.ecs_task_role.arn
+
   container_definitions = jsonencode([
     {
       name      = "web"
@@ -190,6 +192,9 @@ resource "aws_ecs_task_definition" "web" {
             "awslogs-region" = "eu-central-1"
             "awslogs-stream-prefix" = "container-"
         }
+      },
+      linuxParameters: {
+        initProcessEnabled = true
       }
     }
   ])
@@ -218,12 +223,48 @@ resource "aws_iam_role" "ecs" {
   })
 }
 
+resource "aws_iam_role" "ecs_task_role" {
+  name                = "ultrafinance-ecs-task-role"
+  assume_role_policy = jsonencode({
+    "Version" : "2012-10-17",
+    "Statement" : [
+      {
+        "Sid" : "",
+        "Effect" : "Allow",
+        "Principal" : {
+          "Service" : "ecs-tasks.amazonaws.com"
+        },
+        "Action" : "sts:AssumeRole"
+      }
+    ]
+  })
+  inline_policy {
+    name = "ECS-Exec"
+    policy = jsonencode({
+      "Version" : "2012-10-17",
+      "Statement" : [
+        {
+          "Effect" : "Allow",
+          "Action" : [
+            "ssmmessages:CreateControlChannel",
+            "ssmmessages:CreateDataChannel",
+            "ssmmessages:OpenControlChannel",
+            "ssmmessages:OpenDataChannel"
+          ],
+          "Resource" : "*"
+        }
+      ]
+    })
+  }
+}
+
 resource "aws_ecs_service" "web" {
   name            = "web"
   cluster         = aws_ecs_cluster.default.id
   task_definition = aws_ecs_task_definition.web.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+  enable_execute_command = true
   network_configuration {
     subnets = [aws_subnet.a.id, aws_subnet.b.id]
     assign_public_ip = true
@@ -391,6 +432,7 @@ resource "aws_cloudfront_distribution" "default" {
       https_port             = 443
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
+      origin_read_timeout    = 60
     }
   }
   default_cache_behavior {

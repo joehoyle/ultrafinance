@@ -323,7 +323,7 @@ namespace openai {
             this.apiKey = args.apiKey;
         }
         async chat( messages: Message[] ) : Promise<Message[]> {
-            let response = await fetch( 'hhttps://api.openai.com/v1/chat/completions', {
+            let response = await fetch( 'https://api.openai.com/v1/chat/completions', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

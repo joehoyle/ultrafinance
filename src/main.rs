@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 use cli_table::{print_stdout, WithTitle};
 use dotenvy::dotenv;
 use nordigen::Nordigen;
-use sqlx::MySqlPool;
-use std::env;
+use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
+use std::{env, time::Duration};
 
 use crate::accounts::{get_source_account, SourceAccount};
 
@@ -221,7 +221,12 @@ async fn main() -> anyhow::Result<()> {
     console_subscriber::init();
     let cli = Cli::parse();
     dotenv().ok();
-    let sqlx_pool = MySqlPool::connect(env::var("DATABASE_URL").unwrap().as_str()).await?;
+    env_logger::init();
+    let sqlx_pool = MySqlPoolOptions::new()
+        .max_connections(60)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(env::var("DATABASE_URL").unwrap().as_str()).await?;
+
     // You can check for the existence of subcommands, and if found use their
     // matches just as you would the top level cmd
     match &cli.command {
@@ -262,7 +267,7 @@ async fn main() -> anyhow::Result<()> {
                 let source_account =
                     get_source_account(type_, config).ok_or(anyhow::anyhow!("No source found"))?;
 
-                let mut new_account = NewAccount::from(source_account.details()?);
+                let mut new_account = NewAccount::from(source_account.details().await?);
                 new_account.user_id = *user_id;
                 new_account.config = Some(config.clone());
                 new_account.account_type = type_.clone();
@@ -279,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
             AccountsCommand::ListSourceTransactions { account_id, format } => {
                 let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
                 let source = account.source()?;
-                let transactions = source.transactions(&None, &None)?;
+                let transactions = source.transactions(&None, &None).await?;
                 match format {
                     ListFormat::Json => {
                         println!("{}", serde_json::to_string_pretty(&transactions)?);
@@ -292,10 +297,11 @@ async fn main() -> anyhow::Result<()> {
             }
             AccountsCommand::ListNordigenTransactions { account_id, format } => {
                 let mut client = Nordigen::new();
-                let _token = client.populate_token()?;
+                let _token = client.populate_token().await?;
                 let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
-                let transactions =
-                    client.get_account_transactions(&account.nordigen_id, &None, &None)?;
+                let transactions = client
+                    .get_account_transactions(&account.nordigen_id, &None, &None)
+                    .await?;
 
                 match format {
                     ListFormat::Json => {
@@ -310,10 +316,10 @@ async fn main() -> anyhow::Result<()> {
             }
             AccountsCommand::GetNordigenAccount { account_id } => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
+                client.populate_token().await?;
                 let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
-                let _nordigen_account = client.get_account(&account.nordigen_id)?;
-                let _account_details = client.get_account_details(&account.nordigen_id)?;
+                let _nordigen_account = client.get_account(&account.nordigen_id).await?;
+                let _account_details = client.get_account_details(&account.nordigen_id).await?;
                 Ok(())
             }
             AccountsCommand::RenewNordigenRequisition {
@@ -321,22 +327,24 @@ async fn main() -> anyhow::Result<()> {
                 requisition_id,
             } => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
+                client.populate_token().await?;
                 let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
 
-                let nordigen_account = client.get_account(&account.nordigen_id)?;
+                let nordigen_account = client.get_account(&account.nordigen_id).await?;
                 let requisition = match requisition_id {
-                    Some(requisition_id) => client.get_requisition(&requisition_id)?,
+                    Some(requisition_id) => client.get_requisition(&requisition_id).await?,
                     None => {
-                        let requisition = client.create_requisition(
-                            &"oob://".to_owned(),
-                            &nordigen_account.institution_id,
-                        )?;
+                        let requisition = client
+                            .create_requisition(
+                                &"oob://".to_owned(),
+                                &nordigen_account.institution_id,
+                            )
+                            .await?;
                         println!("Visit {} to complete setup", requisition.link);
                         let _input: String = dialoguer::Input::new()
                             .with_prompt("Press return when completed.")
                             .interact_text()?;
-                        client.get_requisition(&requisition.id)?
+                        client.get_requisition(&requisition.id).await?
                     }
                 };
 
@@ -347,8 +355,8 @@ async fn main() -> anyhow::Result<()> {
                 let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
 
                 for account_id in requisition.accounts {
-                    let nordigen_account = client.get_account(&account_id)?;
-                    let details = nordigen_account.details()?;
+                    let nordigen_account = client.get_account(&account_id).await?;
+                    let details = nordigen_account.details().await?;
                     dbg!(&details);
                     let select_account = Account::sqlx_by_source_account_details(
                         details,
@@ -373,14 +381,14 @@ async fn main() -> anyhow::Result<()> {
             }
             AccountsCommand::PopulateAccountsDetails => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
+                client.populate_token().await?;
                 let accounts = Account::sqlx_all(&sqlx_pool).await?;
                 for account in accounts {
                     let Ok(account_source) = account.source() else {
                         println!("Error getting account source");
                         continue;
                     };
-                    let Ok(source_account) = account_source.details() else {
+                    let Ok(source_account) = account_source.details().await else {
                         println!("Error getting account details");
                         continue;
                     };
@@ -392,16 +400,16 @@ async fn main() -> anyhow::Result<()> {
             }
             AccountsCommand::UpdateBalances {} => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
+                client.populate_token().await?;
                 let accounts = Account::sqlx_all(&sqlx_pool).await?;
                 for mut account in accounts {
-                    match account.update_balance() {
+                    match account.update_balance().await {
                         Ok(_) => {
                             println!(
                                 "Updated balance for account {} to {}",
                                 account.id, account.balance
                             );
-                            let _ = account.sqlx_update(&sqlx_pool);
+                            let _ = account.sqlx_update(&sqlx_pool).await;
                         }
                         Err(err) => {
                             println!("Error updating balance for account {}: {}", account.id, err)
@@ -442,8 +450,8 @@ async fn main() -> anyhow::Result<()> {
             }
             RequisitionsCommand::ListInstitutions { country } => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
-                let institutions = client.get_institutions(country)?;
+                client.populate_token().await?;
+                let institutions = client.get_institutions(country).await?;
                 print_stdout(institutions.with_title()).unwrap_or(());
                 Ok(())
             }
@@ -452,9 +460,10 @@ async fn main() -> anyhow::Result<()> {
                 user_id,
             } => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
-                let requisition =
-                    client.create_requisition(&"oob://".to_owned(), institution_id)?;
+                client.populate_token().await?;
+                let requisition = client
+                    .create_requisition(&"oob://".to_owned(), institution_id)
+                    .await?;
                 let user = User::sqlx_by_id(*user_id, &sqlx_pool).await?;
                 nordigen_requisition::sqlx_create_nordigen_requisition(
                     &requisition,
@@ -467,10 +476,10 @@ async fn main() -> anyhow::Result<()> {
             }
             RequisitionsCommand::Resume { requisition_id } => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
+                client.populate_token().await?;
                 let db_requisition =
                     NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
-                let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
+                let requisition = client.get_requisition(&db_requisition.nordigen_id).await?;
 
                 if &requisition.status != "LN" {
                     bail!("Requisition not yet completed.");
@@ -480,7 +489,8 @@ async fn main() -> anyhow::Result<()> {
 
                 for account_id in requisition.accounts {
                     let account_details =
-                        accounts::SourceAccount::details(&client.get_account(&account_id)?)?;
+                        accounts::SourceAccount::details(&client.get_account(&account_id).await?)
+                            .await?;
                     let mut account = NewAccount::from(account_details);
                     account.user_id = user.id;
                     let _account = account.sqlx_create(&sqlx_pool).await?;
@@ -491,10 +501,10 @@ async fn main() -> anyhow::Result<()> {
             }
             RequisitionsCommand::Get { requisition_id } => {
                 let mut client = Nordigen::new();
-                client.populate_token()?;
+                client.populate_token().await?;
                 let db_requisition =
                     NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
-                let requisition = client.get_requisition(&db_requisition.nordigen_id)?;
+                let requisition = client.get_requisition(&db_requisition.nordigen_id).await?;
 
                 dbg!(requisition);
 
@@ -558,7 +568,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(log) => {
                             println!("Processed trigger queue {}", u32);
                             dbg!(log);
-                        },
+                        }
                         Err(err) => println!("Error in trigger queue {} {}", u32, err.to_string()),
                     }
                     Ok(())

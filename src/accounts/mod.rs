@@ -52,16 +52,16 @@ pub struct SourceTransaction {
 }
 
 pub trait SourceAccount {
-    fn balance(&self) -> Result<Amount, anyhow::Error>;
+    fn balance(&self) -> impl std::future::Future<Output = Result<Amount, anyhow::Error>> + Send;
     fn transactions(
         &self,
         date_from: &Option<NaiveDate>,
         date_to: &Option<NaiveDate>,
-    ) -> Result<Vec<SourceTransaction>, anyhow::Error>;
-    fn details(&self) -> Result<SourceAccountDetails, anyhow::Error>;
+    ) -> impl std::future::Future<Output = Result<Vec<SourceTransaction>, anyhow::Error>> + Send;
+    fn details(&self) -> impl std::future::Future<Output = Result<SourceAccountDetails, anyhow::Error>> + Send;
 }
 
-pub fn get_source_account(type_: &str, config: &str) -> Option<Box<dyn SourceAccount>> {
+pub fn get_source_account(type_: &str, config: &str) -> Option<Box<impl SourceAccount>> {
     match type_ {
         "nordigen" => Some(Box::new(
             serde_json::from_str::<nordigen::Account>(config).unwrap(),

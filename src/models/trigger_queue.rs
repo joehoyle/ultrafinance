@@ -1,5 +1,6 @@
 use cli_table::Table;
 
+use log::info;
 use paperclip::actix::Apiv2Schema;
 use serde::Serialize;
 
@@ -32,19 +33,33 @@ pub struct TriggerQueue {
 
 impl TriggerQueue {
     pub async fn sqlx_run(self, db: &sqlx::MySqlPool) -> anyhow::Result<TriggerLog> {
+        //mWait 1 second timer
+        info!("waiting...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        info!("Running trigger queue: {}", self.id);
+        info!("{}",db.num_idle());
+        info!("Size: {}",db.size());
         let trigger = Trigger::sqlx_by_id(self.trigger_id, db).await?;
+        info!("{}",db.num_idle());
         let function = Function::sqlx_by_id(trigger.function_id, db).await?;
+        info!("{}",db.num_idle());
         let user = User::sqlx_by_id(self.user_id, db).await?;
 
+        info!("Creating trigger: {} in deno runtime", trigger.name);
         let mut deno_runtime = crate::deno::FunctionRuntime::new(&function).await?;
+        info!("Running trigger: {} in deno runtime", trigger.name);
         let result = deno_runtime.run(
             &serde_json::to_string::<TriggerParams>(&trigger.params)?,
             &self.payload,
         ).await;
+
         let payload = match &result {
             Ok(p) => (p.clone(), "completed"),
             Err(e) => (e.to_string(), "failed"),
         };
+
+        info!("Trigger {} completed with status: {}", trigger.name, payload.1);
 
         let log = NewTriggerLog {
             payload: payload.0,

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::models;
@@ -36,14 +37,21 @@ impl ApiClient {
     ) -> Result<Vec<TransactionOutput>> {
         let url = "https://api.ntropy.com/v2/transactions/sync";
 
-        let text = self
+        let response = self
             .async_client
             .post(url)
             .json(&transactions)
             .send()
-            .await?
-            .text()
             .await?;
+
+        if ! response.status().is_success() {
+            return Err(anyhow::anyhow!("Ntropy API returned an error: {}", response.text().await?));
+        }
+
+        let text = response.text().await?;
+
+
+        info!("Ntropy Response: {}", text);
         let jd = &mut serde_json::Deserializer::from_str(&text);
         let result: Result<Vec<TransactionOutput>> =
             serde_path_to_error::deserialize(jd).map_err(|e| e.into());

@@ -206,66 +206,82 @@ impl Nordigen {
         }
     }
 
-    pub fn get_institutions(&self, country: &Option<String>) -> anyhow::Result<Vec<Institution>> {
+    pub async fn get_institutions(
+        &self,
+        country: &Option<String>,
+    ) -> anyhow::Result<Vec<Institution>> {
         let mut args: HashMap<String, String> = HashMap::new();
         if country.is_some() {
             args.insert("country".into(), country.as_ref().unwrap().clone());
         }
-        let response = self.request(reqwest::Method::GET, "/institutions/", Some(&args))?;
+        let response = self
+            .request(reqwest::Method::GET, "/institutions/", Some(&args))
+            .await?;
         response
             .json::<Vec<Institution>>()
+            .await
             .map_err(anyhow::Error::msg)
     }
 
-    pub fn get_institution(&self, id: &String) -> anyhow::Result<Institution> {
-        let response = self.request(
-            reqwest::Method::GET,
-            format!("/institutions/{}", id).as_str(),
-            None,
-        )?;
-        response.json::<Institution>().map_err(anyhow::Error::msg)
+    pub async fn get_institution(&self, id: &String) -> anyhow::Result<Institution> {
+        let response = self
+            .request(
+                reqwest::Method::GET,
+                format!("/institutions/{}", id).as_str(),
+                None,
+            )
+            .await?;
+        response
+            .json::<Institution>()
+            .await
+            .map_err(anyhow::Error::msg)
     }
 
-    pub fn get_account(&self, id: &String) -> anyhow::Result<Account> {
+    pub async fn get_account(&self, id: &String) -> anyhow::Result<Account> {
         let json = self
             .request(
                 reqwest::Method::GET,
                 format!("/accounts/{}", id).as_str(),
                 None,
-            )?
-            .text()?;
+            )
+            .await?
+            .text()
+            .await?;
 
         let response = serde_json::from_str::<Account>(json.as_str())?;
         Ok(response)
     }
 
-    pub fn get_account_details(&self, id: &String) -> anyhow::Result<AccountDetails> {
+    pub async fn get_account_details(&self, id: &String) -> anyhow::Result<AccountDetails> {
         let json = self
             .request(
                 reqwest::Method::GET,
                 format!("/accounts/{}/details", id).as_str(),
                 None,
-            )?
-            .text()?;
-        dbg!(json.as_str());
+            )
+            .await?
+            .text()
+            .await?;
         let response = serde_json::from_str::<AccountResponse>(json.as_str())?;
         Ok(response.account)
     }
 
-    pub fn get_account_balances(&self, id: &String) -> anyhow::Result<Vec<Balance>> {
+    pub async fn get_account_balances(&self, id: &String) -> anyhow::Result<Vec<Balance>> {
         let json = self
             .request(
                 reqwest::Method::GET,
                 format!("/accounts/{}/balances", id).as_str(),
                 None,
-            )?
-            .text()?;
+            )
+            .await?
+            .text()
+            .await?;
 
         let response = serde_json::from_str::<BalancesResponse>(json.as_str())?;
         Ok(response.balances)
     }
 
-    pub fn get_account_transactions(
+    pub async fn get_account_transactions(
         &self,
         id: &String,
         date_from: &Option<NaiveDate>,
@@ -289,8 +305,10 @@ impl Nordigen {
                 reqwest::Method::GET,
                 format!("/accounts/{}/transactions/", id).as_str(),
                 Some(&args),
-            )?
-            .text()?;
+            )
+            .await?
+            .text()
+            .await?;
 
         let transactions: TransactionsResponse = serde_json::from_str(transactions.as_str())?;
         let transactions = transactions
@@ -325,7 +343,7 @@ impl Nordigen {
         Ok(transactions)
     }
 
-    pub fn create_requisition(
+    pub async fn create_requisition(
         &self,
         redirect: &String,
         institution_id: &String,
@@ -335,28 +353,32 @@ impl Nordigen {
         args.insert("institution_id".into(), institution_id.clone());
         // args.insert("account_selection".into(), "true".into());
 
-        self.request(reqwest::Method::POST, "/requisitions/", Some(&args))?
+        self.request(reqwest::Method::POST, "/requisitions/", Some(&args))
+            .await?
             .json::<Requisition>()
+            .await
             .map_err(anyhow::Error::msg)
     }
 
-    pub fn get_requisition(&self, id: &String) -> anyhow::Result<Requisition> {
+    pub async fn get_requisition(&self, id: &String) -> anyhow::Result<Requisition> {
         self.request(
             reqwest::Method::GET,
             format!("/requisitions/{}", id).as_str(),
             None,
-        )?
+        )
+        .await?
         .json::<Requisition>()
+        .await
         .map_err(anyhow::Error::msg)
     }
 
-    pub fn request(
+    pub async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
         args: Option<&HashMap<String, String>>,
-    ) -> anyhow::Result<reqwest::blocking::Response> {
-        let request = reqwest::blocking::Client::new();
+    ) -> anyhow::Result<reqwest::Response> {
+        let request = reqwest::Client::new();
         let mut request = match method {
             reqwest::Method::GET => {
                 let mut request = request.get(format!("{}{}", self.base_url, path));
@@ -381,12 +403,12 @@ impl Nordigen {
                 format!("Bearer {}", self.token.as_ref().unwrap().access.clone()),
             );
         }
-        match request.send() {
+        match request.send().await {
             Ok(r) => {
                 if r.status().is_success() {
                     return Ok(r);
                 }
-                let error = r.json::<ErrorResponse>()?;
+                let error = r.json::<ErrorResponse>().await?;
                 Err(anyhow::Error::msg(format!(
                     "{}. {} {}",
                     error.summary.unwrap_or("No summary".into()),
@@ -398,13 +420,15 @@ impl Nordigen {
         }
     }
 
-    pub fn populate_token(&mut self) -> anyhow::Result<AccessToken> {
+    pub async fn populate_token(&mut self) -> anyhow::Result<AccessToken> {
         let mut args: HashMap<String, String> = HashMap::new();
         args.insert("secret_id".into(), self.key.clone());
         args.insert("secret_key".into(), self.secret.clone());
 
-        let token = self.request(reqwest::Method::POST, "/token/new/", Some(&args))?;
-        let token = token.json::<AccessToken>()?;
+        let token = self
+            .request(reqwest::Method::POST, "/token/new/", Some(&args))
+            .await?;
+        let token = token.json::<AccessToken>().await?;
         self.token = Some(token.clone());
         Ok(token)
     }
@@ -438,12 +462,12 @@ impl From<Transaction> for SourceTransaction {
 }
 
 impl crate::accounts::SourceAccount for Account {
-    fn details(&self) -> Result<crate::accounts::SourceAccountDetails, anyhow::Error> {
+    async fn details(&self) -> Result<crate::accounts::SourceAccountDetails, anyhow::Error> {
         let mut client = Nordigen::new();
-        client.populate_token()?;
-        let account = client.get_account(&self.id)?;
-        let account_details = client.get_account_details(&self.id)?;
-        let institution = client.get_institution(&account.institution_id)?;
+        client.populate_token().await?;
+        let account = client.get_account(&self.id).await?;
+        let account_details = client.get_account_details(&self.id).await?;
+        let institution = client.get_institution(&account.institution_id).await?;
 
         let number = account_details
             .iban
@@ -463,25 +487,29 @@ impl crate::accounts::SourceAccount for Account {
         })
     }
 
-    fn balance(&self) -> Result<crate::accounts::Amount, anyhow::Error> {
+    async fn balance(&self) -> Result<crate::accounts::Amount, anyhow::Error> {
         let mut client = Nordigen::new();
-        client.populate_token().unwrap();
+        client.populate_token().await?;
         Ok(client
-            .get_account_balances(&self.id)?
+            .get_account_balances(&self.id)
+            .await?
             .first()
             .ok_or(anyhow!("Account not found"))?
             .balanceAmount
             .clone())
     }
 
-    fn transactions(
+    async fn transactions(
         &self,
         date_from: &Option<NaiveDate>,
         date_to: &Option<NaiveDate>,
     ) -> Result<Vec<SourceTransaction>, anyhow::Error> {
         let mut client = Nordigen::new();
-        client.populate_token().unwrap();
-        let transactions = client.get_account_transactions(&self.id, date_from, date_to)?;
+        client.populate_token().await?;
+
+        let transactions = client
+            .get_account_transactions(&self.id, date_from, date_to)
+            .await?;
         Ok(transactions.into_iter().map(|t| t.into()).collect())
     }
 }

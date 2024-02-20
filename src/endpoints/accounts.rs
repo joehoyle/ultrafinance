@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
-use actix_web::web::block;
 use anyhow::anyhow;
 use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web, web::Json};
 use serde::Deserialize;
 
-use crate::accounts::{SourceAccount, SourceAccountDetails};
+use crate::accounts::SourceAccount;
 use crate::models::{Account, NewAccount, Transaction, UpdateAccount, User};
 use crate::server::{AppState, Error};
 use crate::{nordigen, ultrafinance};
@@ -24,20 +23,14 @@ pub async fn create_accounts_endpoint(
     state: web::Data<AppState>,
     data: web::Json<CreateAccounts>,
 ) -> Result<Json<Vec<Account>>, Error> {
-    let accounts = block(
-        move || -> Result<Vec<(String, anyhow::Result<nordigen::Account>)>, anyhow::Error> {
-            let mut nordigen = nordigen::Nordigen::new();
-            nordigen.populate_token()?;
-            let requisition = nordigen.get_requisition(&data.requisition_id)?;
-            Ok(requisition
-                .accounts
-                .into_iter()
-                .map(|account_id| (account_id.clone(), nordigen.get_account(&account_id)))
-                .collect::<Vec<(String, anyhow::Result<nordigen::Account>)>>())
-        },
-    )
-    .await
-    .unwrap()?;
+    let mut nordigen = nordigen::Nordigen::new();
+    nordigen.populate_token().await?;
+    let requisition = nordigen.get_requisition(&data.requisition_id).await?;
+
+    let mut accounts = vec![];
+    for account_id in requisition.accounts {
+        accounts.push((account_id.clone(), nordigen.get_account(&account_id).await));
+    }
 
     let mut created_accounts: Vec<Account> = vec![];
     let db = state.sqlx_pool.clone();
@@ -49,14 +42,9 @@ pub async fn create_accounts_endpoint(
     for (_, account) in accounts {
         match account {
             Ok(account) => {
-                let new_account = block(move || -> Result<NewAccount, anyhow::Error> {
-                    let mut new_account = NewAccount::from(account.details()?);
-                    new_account.user_id = user.id;
-                    new_account.config = serde_json::to_string(&account).ok();
-                    Ok(new_account)
-                })
-                .await
-                .unwrap()?;
+                let mut new_account = NewAccount::from(account.details().await?);
+                new_account.user_id = user.id;
+                new_account.config = serde_json::to_string(&account).ok();
 
                 let account = new_account.sqlx_create(&db).await;
                 match account {
@@ -80,13 +68,7 @@ pub async fn sync_account_endpoint(
     let db = state.sqlx_pool.clone();
     let account_id: u32 = path.into_inner();
     let mut account = Account::sqlx_by_id(account_id, user.id, &db).await?;
-    let mut account = block(move || -> Result<Account, Error> {
-        account.update_balance()?;
-        Ok(account)
-    })
-    .await
-    .unwrap()?;
-
+    account.update_balance().await?;
     account.sqlx_update(&db).await?;
     let transactions = crate::ultrafinance::sqlx_import_transactions(&account, &db)
         .await
@@ -100,9 +82,9 @@ pub async fn sync_accounts_endpoint(
     state: web::Data<AppState>,
 ) -> Result<Json<HashMap<u32, Result<Vec<TransactionWithMerchant>, Error>>>, Error> {
     let db = &state.sqlx_pool;
-    let accounts = Account::sqlx_by_user(user.id, &db).await?;
+    let mut accounts = Account::sqlx_by_user(user.id, &db).await?;
 
-    let transactions_map = ultrafinance::sqlx_sync_accounts(&accounts, db).await;
+    let transactions_map = ultrafinance::sqlx_sync_accounts(&mut accounts, db).await;
     let mut transactions_map_response = HashMap::new();
     for (account_id, result) in transactions_map {
         // Call add_merchants on transactions_map's value
@@ -184,23 +166,16 @@ pub async fn relink_account_endpoint(
     let account_id: u32 = path.into_inner();
     let account = Account::sqlx_by_id(account_id, user.id, &state.sqlx_pool).await?;
     let db = &state.sqlx_pool;
-    let accounts = block(move || {
-        let mut nordigen = nordigen::Nordigen::new();
-        nordigen.populate_token()?;
-        let requisition = nordigen.get_requisition(&data.requisition_id)?;
-        let mut result: Vec<(nordigen::Account, SourceAccountDetails)> = vec![];
+    let mut accounts = vec![];
+    let mut nordigen = nordigen::Nordigen::new();
+    nordigen.populate_token().await?;
+    let requisition = nordigen.get_requisition(&data.requisition_id).await?;
 
-        for account_id in requisition.accounts {
-            let nordigen_account = nordigen.get_account(&account_id)?;
-            let details = nordigen_account.details()?;
-            result.push((nordigen_account, details));
-        }
-
-        Ok(result)
-    })
-    .await
-    .unwrap()
-    .map_err(|e| <anyhow::Error as Into<Error>>::into(e))?;
+    for account_id in requisition.accounts {
+        let nordigen_account = nordigen.get_account(&account_id).await?;
+        let details = nordigen_account.details().await?;
+        accounts.push((nordigen_account, details));
+    }
 
     let mut account_to_return = Err(anyhow!("No account found.").into());
 
