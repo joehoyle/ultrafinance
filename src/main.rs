@@ -13,6 +13,7 @@ pub use self::models::*;
 pub mod accounts;
 pub mod deno;
 pub mod endpoints;
+pub mod gpt_enricher;
 pub mod models;
 pub mod nordigen;
 pub mod ntropy;
@@ -218,7 +219,6 @@ enum ServerCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    console_subscriber::init();
     let cli = Cli::parse();
     dotenv().ok();
     env_logger::init();
@@ -602,44 +602,23 @@ async fn main() -> anyhow::Result<()> {
             }
             TransactionsCommand::Enrich { id } => {
                 let transaction = Transaction::sqlx_by_id(*id, &sqlx_pool).await?;
-                let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
+                let client = gpt_enricher::Client::new(env::var("OPENAI_API_KEY").unwrap());
+                dbg!(client.get_merchants(&vec![transaction]).await);
 
-                let enriched_transaction = client
-                    .async_enrich_transactions(vec![transaction.into()])
-                    .await?;
-                println!("Enriched transaction: {:?}", enriched_transaction);
+                // let enriched_transaction = client
+                //     .async_enrich_transactions(vec![transaction.into()])
+                //     .await?;
+                // println!("Enriched transaction: {:?}", enriched_transaction);
                 Ok(())
             }
             TransactionsCommand::AssignMerchants {} => {
                 let transactions_to_do =
                     Transaction::sqlx_without_merchant_limit_100(&sqlx_pool).await?;
-
-                let client = ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
-                // Call .into() on all transactions_to_do
-                let enriched_transactions = client
-                    .async_enrich_transactions(
-                        transactions_to_do.into_iter().map(|t| t.into()).collect(),
-                    )
-                    .await?;
-                for enriched_transaction in enriched_transactions {
-                    match NewMerchant::try_from(&enriched_transaction) {
-                        Ok(merchant) => match merchant.sqlx_create_or_fetch(&sqlx_pool).await {
-                            Ok(merchant) => {
-                                let t_id =
-                                    enriched_transaction.transaction_id.parse::<u32>().unwrap();
-                                let mut transaction =
-                                    Transaction::sqlx_by_id(t_id, &sqlx_pool).await?;
-                                transaction.merchant_id = Some(merchant.id);
-                                transaction.sqlx_update(&sqlx_pool).await?;
-                            }
-                            Err(err) => {
-                                println!("Error creating merchant: {}", err);
-                                continue;
-                            }
-                        },
-                        Err(err) => println!("Error getting merchant: {}", err),
-                    }
-                }
+                dbg!(&transactions_to_do);
+                // Only take the first 10 transactions, as enrichment can timeout
+                let transactions_to_do = transactions_to_do.into_iter().take(10).collect();
+                let enriched = ultrafinance::sqlx_enrich_transactions(transactions_to_do, &sqlx_pool).await?;
+                dbg!(enriched.len());
                 Ok(())
             }
         },
@@ -651,9 +630,10 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Server(command) => match command {
-            ServerCommand::Start => server::start()
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string())),
+            ServerCommand::Start => Ok(())
+                //server::start()
+                // .await
+                // .map_err(|e| anyhow::anyhow!(e.to_string())),
         },
     }
 }

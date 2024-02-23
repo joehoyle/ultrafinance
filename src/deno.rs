@@ -22,7 +22,7 @@ pub struct StdioMsg {
     pub is_err: bool,
 }
 
-deno_core::extension!(ultrafinance,
+deno_runtime::deno_core::extension!(ultrafinance,
   options = {
       sender: tokio::sync::mpsc::UnboundedSender<StdioMsg>,
   },

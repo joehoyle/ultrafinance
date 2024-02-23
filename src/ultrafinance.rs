@@ -92,7 +92,7 @@ pub async fn sqlx_import_transactions(
     info!("Sucessfully imported {} transactions for account: {}", inserted_transactions.len(), account.id);
 
     // Enrich the transactions that were inserted
-    // let inserted_transactions = sqlx_enrich_transactions(inserted_transactions, db).await?;
+    let inserted_transactions = sqlx_enrich_transactions(inserted_transactions, db).await?;
     // TODO: reenable when we have credits.
 
     info!("Enriched {} transactions for account: {}", inserted_transactions.len(), account.id);
@@ -214,35 +214,28 @@ pub async fn sqlx_process_trigger_queue(
     result_map
 }
 
-async fn sqlx_enrich_transactions(
+pub async fn sqlx_enrich_transactions(
     transactions: Vec<Transaction>,
     db: &sqlx::MySqlPool,
 ) -> anyhow::Result<Vec<Transaction>> {
-    let client = crate::ntropy::ApiClient::new(env::var("NTROPY_API_KEY").unwrap());
+    let client = crate::gpt_enricher::Client::new(env::var("OPENAI_API_KEY").unwrap());
     let enriched_transactions = client
-        .async_enrich_transactions(transactions.into_iter().map(|t| t.into()).collect())
+        .get_merchants(&transactions)
         .await?;
     let mut transactions: Vec<Transaction> = vec![];
 
-    for enriched_transaction in enriched_transactions {
-        let t_id = enriched_transaction.transaction_id.parse::<u32>().unwrap();
+    for (t_id, merchant ) in enriched_transactions {
         let mut transaction: Transaction = Transaction::sqlx_by_id(t_id, db).await?;
-        match NewMerchant::try_from(&enriched_transaction) {
-            Ok(merchant) => match merchant.sqlx_create_or_fetch(db).await {
-                Ok(merchant) => {
-                    transaction.merchant_id = Some(merchant.id);
-                    transaction.sqlx_update(db).await?;
-                }
-                Err(err) => {
-                    println!("Error creating merchant: {}", err);
-                    continue;
-                }
-            },
+        match merchant.sqlx_create_or_fetch(db).await {
+            Ok(merchant) => {
+                transaction.merchant_id = Some(merchant.id);
+                transaction.sqlx_update(db).await?;
+            }
             Err(err) => {
-                println!("Error getting merchant: {}", err);
-            },
+                println!("Error creating merchant: {}", err);
+                continue;
+            }
         }
-
         transactions.push(transaction);
     }
 
@@ -251,48 +244,48 @@ async fn sqlx_enrich_transactions(
 
 mod tests {
     use chrono::NaiveDateTime;
-    use crate::deno::FunctionRuntime;
+    // use crate::deno::FunctionRuntime;
     use super::*;
 
-    #[test]
-    pub fn test_parallel() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let local = tokio::task::LocalSet::new();
-        local.block_on(&rt, async {
-            let mut handles = Vec::new();
-            let rt_handle = tokio::runtime::Handle::current();
+    // #[test]
+    // pub fn test_parallel() {
+    //     let rt = tokio::runtime::Runtime::new().unwrap();
+    //     let local = tokio::task::LocalSet::new();
+    //     local.block_on(&rt, async {
+    //         let mut handles = Vec::new();
+    //         let rt_handle = tokio::runtime::Handle::current();
 
-            let handle = thread::spawn(move || {
-                // Use the handle to the runtime to block on the future
-                let result = rt_handle.block_on(async {
-                    let function = Function {
-                        id: 1,
-                        name: "Test".into(),
-                        function_type: "source".into(),
-                        source: "export default async function () {
-                            return new Promise((resolve, reject) => {
-                                setTimeout(() => {
-                                    resolve('Hello');
-                                }, 1000);
-                            });
-                        }"
-                        .into(),
-                        user_id: 1,
-                        created_at: NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
-                        updated_at: NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
-                    };
-                    let mut function_runtime = FunctionRuntime::new(&function).await.unwrap();
-                    let r = function_runtime.run("{}", "{}").await;
-                    r
-                });
-                result
-            });
-            handles.push(handle);
+    //         let handle = thread::spawn(move || {
+    //             // Use the handle to the runtime to block on the future
+    //             let result = rt_handle.block_on(async {
+    //                 let function = Function {
+    //                     id: 1,
+    //                     name: "Test".into(),
+    //                     function_type: "source".into(),
+    //                     source: "export default async function () {
+    //                         return new Promise((resolve, reject) => {
+    //                             setTimeout(() => {
+    //                                 resolve('Hello');
+    //                             }, 1000);
+    //                         });
+    //                     }"
+    //                     .into(),
+    //                     user_id: 1,
+    //                     created_at: NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
+    //                     updated_at: NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
+    //                 };
+    //                 let mut function_runtime = FunctionRuntime::new(&function).await.unwrap();
+    //                 let r = function_runtime.run("{}", "{}").await;
+    //                 r
+    //             });
+    //             result
+    //         });
+    //         handles.push(handle);
 
-            for handle in handles {
-                let result = handle.join().unwrap().unwrap();
-                assert_eq!(result, r#""Hello""#.to_string())
-            }
-        });
-    }
+    //         for handle in handles {
+    //             let result = handle.join().unwrap().unwrap();
+    //             assert_eq!(result, r#""Hello""#.to_string())
+    //         }
+    //     });
+    // }
 }

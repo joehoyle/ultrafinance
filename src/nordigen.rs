@@ -322,7 +322,8 @@ impl Nordigen {
                         Some(d) => d.format("%Y-%m-%d").to_string(),
                         None => "".into(),
                     };
-                    let hash_string = format!(
+
+                    let mut hash_string = format!(
                         "{}:{}:{}:{}",
                         date,
                         date,
@@ -332,6 +333,25 @@ impl Nordigen {
                             .unwrap_or(&"".into()),
                         "[object Object]"
                     );
+
+                    // If the transaction.bookingDate is after 2024-02-20 then include the amount in the hash
+                    if let Some(booking_date) = transaction.bookingDate {
+                        if booking_date > NaiveDate::from_ymd_opt(2024, 2, 20).unwrap() {
+                            hash_string = format!(
+                                "{}:{}:{}",
+                                date,
+                                transaction.transactionAmount.as_ref().unwrap_or(&Amount {
+                                    amount: "0".into(),
+                                    currency: "EUR".into()
+                                }),
+                                transaction
+                                    .remittanceInformationUnstructured
+                                    .as_ref()
+                                    .unwrap_or(&"".into()),
+                            );
+                        }
+                    }
+
                     hasher.update(hash_string);
                     let hash = hasher.finalize();
                     let hash = format!("{:x}", hash);
