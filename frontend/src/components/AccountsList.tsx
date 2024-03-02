@@ -18,9 +18,9 @@ export default function AccountsList({ accounts }: Props) {
 					</span>
 					<span className="flex-1"></span>
 					{!!account.balance &&
-						<span className="flex flex-col w-24">
+						<span className="flex flex-col text-right sm:text-left w-24">
 							<span className="text-xs text-gray-400">Balance</span>
-							<span className="">{account.balance} {account.currency}</span>
+							<span className="">{account.balance.toFixed(2)} {account.currency}</span>
 						</span>
 					}
 				</Link></li>

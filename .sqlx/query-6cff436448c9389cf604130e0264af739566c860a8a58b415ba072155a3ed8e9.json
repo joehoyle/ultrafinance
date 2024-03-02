@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT * FROM transactions WHERE merchant_id = NULL ORDER BY booking_date DESC LIMIT 100",
+  "query": "SELECT * FROM transactions WHERE merchant_id IS NULL ORDER BY booking_date DESC LIMIT 100",
   "describe": {
     "columns": [
       {
@@ -208,5 +208,5 @@
       false
     ]
   },
-  "hash": "ca6d332c86d6712a5933d19c745d8fc9717fc649bcf6f3f354753321ce94e4ea"
+  "hash": "6cff436448c9389cf604130e0264af739566c860a8a58b415ba072155a3ed8e9"
 }

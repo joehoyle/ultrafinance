@@ -50,13 +50,11 @@ export default function Transactions() {
 			setSearchParams({ search: value });
 		}, 300);
 	}
-	console.log('rerendering');
-	console.log(transactions)
 	return <>
 		<PageHeader>
 			<div className="flex space-x-4">
 				<div>Transactions</div>
-				<input className="rounded flex-1 border border-gray-200 p-2 h-8 text-xs outline-none" placeholder="Search..." onKeyUp={onKeyUpSearchInput} />
+				<input className="rounded hidden sm:block flex-1 border border-gray-200 p-2 h-8 text-xs outline-none" placeholder="Search..." onKeyUp={onKeyUpSearchInput} />
 				<Button onClick={onSyncTransactions} disabled={syncingTransactions} varient="secondary" isLoading={syncingTransactions}>Import Transactions</Button>
 			</div>
 		</PageHeader>

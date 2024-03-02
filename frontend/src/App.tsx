@@ -66,28 +66,33 @@ function App() {
 		navigate('/login');
 	}
 	return (
-		<div className="min-h-screen flex">
-			<nav aria-label="Sidebar" className="min-h-screen w-64 text-xs flex flex-col flex-shrink-0 p-4 text-slate-600 justify-items-stretch ">
+		<div className="min-h-screen flex sm:flex-row">
+			<nav aria-label="Sidebar" className="sm:min-h-screen fixed bottom-0 left-0 right-0 sm:static w-full sm:w-64 justify-between text-xs flex sm:flex-col flex-shrink-0 p-2 sm:p-4 text-slate-600 justify-items-stretch">
 				{menu.map((item, i) => {
-					return <NavLink to={item.url} key={i} className={({ isActive }) => `flex items-center space-x-3 p-2 rounded-lg ${isActive && 'bg-purple-100/100 font-bold text-purple-900'}`}>
-						{item.icon}
-						<span>{item.name}</span></NavLink>
+					return (
+						<NavLink to={item.url} key={i} className={({ isActive }) => `flex flex-1 sm:flex-none justify-center sm:justify-start items-center space-x-3 p-2 rounded-lg ${isActive && 'bg-purple-100/100 font-bold text-purple-900'}`}>
+							{item.icon}
+							<span className="hidden sm:block">{item.name}</span>
+						</NavLink>
+					)
 				})}
 				<NavLink to="/account" className={({ isActive }) => `mt-auto flex space-x-2 items-center rounded-lg p-2 ${isActive && 'bg-purple-100/100'}`}>
 					<img className="w-8 h-8 rounded-full border-purple-400 border" src="https://en.gravatar.com/userimage/6103/8089514d8a2badb1b3073015e3bc8768.jpeg" />
-					<span className="text-sm flex flex-col flex-1">
-						<span>{user.name}</span>
-						<span className="text-xs text-gray-500">Manage Account</span>
-					</span>
-					<button className="ml-auto text-purple-300 hover:text-purple-400" onClick={onClickLogout}>
-						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-							<path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
-						</svg>
-					</button>
+					<div className="hidden sm:flex flex-1">
+						<span className="text-sm flex flex-col flex-1">
+							<span>{user.name}</span>
+							<span className="text-xs text-gray-500">Manage Account</span>
+						</span>
+						<button className="ml-auto text-purple-300 hover:text-purple-400" onClick={onClickLogout}>
+							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+								<path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+							</svg>
+						</button>
+					</div>
 
 				</NavLink>
 			</nav>
-			<main className="flex-1 min-w-0 overflow-auto flex flex-col max-h-screen">
+			<main className="flex-1 min-w-0 max-w-full overflow-auto flex flex-col max-h-[calc(100vh-70px)] max-h-[calc(100svh-70px)] sm:max-h-screen">
 				<Outlet />
 			</main>
 		</div>

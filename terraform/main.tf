@@ -28,6 +28,10 @@ variable "ntropy_api_key" {
   type = string
 }
 
+variable "openai_api_key" {
+  type = string
+}
+
 provider "aws" {
   region  = "eu-central-1"
   profile = "sub_account"
@@ -183,6 +187,10 @@ resource "aws_ecs_task_definition" "web" {
         {
           name = "NTROPY_API_KEY"
           value = var.ntropy_api_key
+        },
+        {
+          name = "OPENAI_API_KEY"
+          value = var.openai_api_key
         }
       ],
       logConfiguration: {

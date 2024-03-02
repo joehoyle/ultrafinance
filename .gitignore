@@ -1,4 +1,5 @@
 target/
+analyzer/
 .env
 .build-cargo
 frontend/node_modules

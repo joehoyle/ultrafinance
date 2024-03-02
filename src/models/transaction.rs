@@ -110,6 +110,8 @@ impl Transaction {
     pub async fn sqlx_by_user_by_search(
         user_id: u32,
         search: &str,
+        per_page: u32,
+        page: u32,
         db: &sqlx::MySqlPool,
     ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as::<_, Self>(
@@ -117,7 +119,9 @@ impl Transaction {
             SELECT transactions.* FROM transactions
             LEFT JOIN merchants ON transactions.merchant_id = merchants.id
             WHERE user_id = ?
-            AND (creditor_name LIKE ? OR debtor_name LIKE ? OR remittance_information LIKE ? OR merchants.name LIKE ? OR merchants.labels LIKE ?)",
+            AND (creditor_name LIKE ? OR debtor_name LIKE ? OR remittance_information LIKE ? OR merchants.name LIKE ? OR merchants.labels LIKE ?)
+            ORDER BY booking_date DESC
+            LIMIT ?, ?",
         )
         .bind(&user_id)
         .bind(format!("%{}%", search))
@@ -125,6 +129,8 @@ impl Transaction {
         .bind(format!("%{}%", search))
         .bind(format!("%{}%", search))
         .bind(format!("%{}%", search))
+        .bind((page-1) * per_page)
+        .bind(per_page)
         .fetch_all(db)
         .await
         .map_err(|e| anyhow::anyhow!(e))

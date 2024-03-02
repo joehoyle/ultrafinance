@@ -1,5 +1,18 @@
 {
-	"rust-analyzer.linkedProjects": [
-		"./Cargo.toml"
-	]
-}
+	"rust-analyzer.server.extraEnv": {
+        "CARGO_TARGET_DIR": "analyzer"
+    },
+    "rust-analyzer.check.extraArgs": [
+        "--target-dir=analyzer"
+    ],
+    "rust-analyzer.checkOnSave.extraArgs": [
+        "--target-dir", "analyzer"
+      ],
+      "rust-analyzer.checkOnSave": true,
+      "search.exclude": {
+        "analyzer": true,
+      },
+      "rust-analyzer.procMacro.enable": false,
+      "rust-analyzer.cachePriming.enable": false,
+      "rust-analyzer.trace.server": "verbose"
+    }

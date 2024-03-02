@@ -612,13 +612,19 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             TransactionsCommand::AssignMerchants {} => {
-                let transactions_to_do =
-                    Transaction::sqlx_without_merchant_limit_100(&sqlx_pool).await?;
-                dbg!(&transactions_to_do);
-                // Only take the first 10 transactions, as enrichment can timeout
-                let transactions_to_do = transactions_to_do.into_iter().take(10).collect();
-                let enriched = ultrafinance::sqlx_enrich_transactions(transactions_to_do, &sqlx_pool).await?;
-                dbg!(enriched.len());
+                loop {
+                    let transactions_to_do =
+                        Transaction::sqlx_without_merchant_limit_100(&sqlx_pool).await?;
+                    dbg!(&transactions_to_do);
+                    if transactions_to_do.is_empty() {
+                        break;
+                    }
+                    // Only take the first 10 transactions, as enrichment can timeout
+                    let transactions_to_do = transactions_to_do.into_iter().take(10).collect();
+                    let enriched = ultrafinance::sqlx_enrich_transactions(transactions_to_do, &sqlx_pool).await?;
+                    dbg!(enriched.len());
+                }
+
                 Ok(())
             }
         },
@@ -630,10 +636,10 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Server(command) => match command {
-            ServerCommand::Start => Ok(())
-                //server::start()
-                // .await
-                // .map_err(|e| anyhow::anyhow!(e.to_string())),
+            ServerCommand::Start =>
+                server::start()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string())),
         },
     }
 }

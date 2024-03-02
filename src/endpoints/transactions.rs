@@ -18,8 +18,8 @@ pub struct TransactionWithMerchant {
 
 #[derive(Apiv2Schema, Deserialize)]
 pub struct PaginationArgs {
-    pub page: Option<u64>,
-    pub per_page: Option<u64>,
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
     pub search: Option<String>,
 }
 
@@ -33,6 +33,8 @@ pub async fn get_transactions_endpoint(
     let transactions = Transaction::sqlx_by_user_by_search(
         user.id,
         &query.search.as_ref().unwrap_or(&"".to_string()),
+        query.per_page.unwrap_or(1000),
+        query.page.unwrap_or(1),
         &db,
     )
     .await;

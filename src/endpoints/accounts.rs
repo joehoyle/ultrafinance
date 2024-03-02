@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::anyhow;
+use futures::stream::futures_unordered;
+use futures::StreamExt;
 use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web, web::Json};
 use serde::Deserialize;
@@ -82,7 +84,19 @@ pub async fn sync_accounts_endpoint(
     state: web::Data<AppState>,
 ) -> Result<Json<HashMap<u32, Result<Vec<TransactionWithMerchant>, Error>>>, Error> {
     let db = &state.sqlx_pool;
-    let mut accounts = Account::sqlx_by_user(user.id, &db).await?;
+    let accounts = Account::sqlx_by_user(user.id, &db).await?;
+
+    let futures = futures_unordered::FuturesUnordered::new();
+
+    for mut account in accounts {
+        futures.push(async {
+            let _ = account.update_balance().await;
+            let _ = account.sqlx_update(db).await;
+            account
+        });
+    }
+
+    let mut accounts = futures.collect::<Vec<_>>().await;
 
     let transactions_map = ultrafinance::sqlx_sync_accounts(&mut accounts, db).await;
     let mut transactions_map_response = HashMap::new();

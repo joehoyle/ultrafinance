@@ -185,7 +185,7 @@ export async function request(
 		},
 	};
 
-	if (method === 'POST') {
+	if ( method === 'POST' ) {
 		params.body = JSON.stringify(data);
 	} else {
 		url += '?' + new URLSearchParams(data).toString();

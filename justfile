@@ -19,3 +19,5 @@ ssh:
 		--container web \
 		--command "/bin/bash" \
 		--interactive
+watch:
+	cargo watch -x 'run server start' -i frontend

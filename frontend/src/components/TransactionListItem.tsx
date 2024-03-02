@@ -20,11 +20,11 @@ export default function TransactionListItem({ transaction, account }: Props) {
 					:
 					<div className="rounded-full w-8 h-8 bg-gray-100 self-center"></div>
 				}
-				<div className="flex flex-col">
+				<div className="flex flex-col max-w-28 sm:max-w-none text-sm sm:text-base">
 					{transaction.merchant &&
 						<div className="text-xs font-bold text-purple-800">{transaction.merchant.name}</div>
 					}
-					<div className="text-gray-500">{transaction.debtorName} {transaction.creditorName}</div>
+					<div className="text-gray-500 break-words">{transaction.debtorName} {transaction.creditorName}</div>
 				</div>
 			</div>
 			<div className="text-sm self-center">
