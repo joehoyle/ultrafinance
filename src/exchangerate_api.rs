@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{Utc};
 use serde::Deserialize;
 
 use crate::{exchange_rate::ExchangeRate, ultrafinance::Currency};

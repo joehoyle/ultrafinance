@@ -1,18 +1,13 @@
 use anyhow::anyhow;
 use cli_table::Table;
 
-use log::info;
 use paperclip::actix::Apiv2Schema;
 use serde::Serialize;
 
-use crate::models::Function;
-use crate::models::Trigger;
-use crate::models::User;
 
 use anyhow::Result;
 
-use super::trigger_log::NewTriggerLog;
-use super::{TriggerLog, TriggerParams};
+use super::{TriggerLog};
 
 #[derive(Table, ts_rs::TS, Serialize, Apiv2Schema, Clone, Debug)]
 #[ts(export)]

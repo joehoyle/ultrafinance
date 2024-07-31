@@ -6,19 +6,34 @@ use crate::{ultrafinance::TransactionDestination, FunctionParam, FunctionParams,
 
 #[derive(Serialize, Deserialize)]
 struct Config {
+    #[serde(rename = "apiKey")]
     api_key: String,
+    #[serde(rename = "accountId")]
     account_id: String,
+    #[serde(rename = "openaiApiKey")]
     openai_api_key: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct Category {
     name: String,
+    id: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Debug)]
+struct CategoriesResponse {
+    categories: Vec<Category>,
+}
+
+#[derive(Deserialize, Debug)]
+struct InsertTransactionResponse {
+    ids: Option<Vec<u32>>,
+    error: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Debug)]
 struct DraftTransaction {
-    asset_id: i32,
+    asset_id: u32,
     date: String,
     amount: String,
     currency: String,
@@ -26,6 +41,7 @@ struct DraftTransaction {
     notes: String,
     status: String,
     external_id: String,
+    category_id: Option<u32>,
 }
 
 pub async fn get_params() -> Result<FunctionParams, anyhow::Error> {
@@ -71,7 +87,7 @@ impl TransactionDestination for Lunchmoney {
     async fn transaction_created(&self, transaction: &Transaction) -> Result<(), anyhow::Error> {
         let client = Client::new();
 
-        let lm_categories: Vec<Category> = client
+        let lm_categories: CategoriesResponse = client
             .get("https://dev.lunchmoney.app/v1/categories")
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .send()
@@ -79,45 +95,64 @@ impl TransactionDestination for Lunchmoney {
             .json()
             .await?;
 
-        let categories: Vec<String> = lm_categories.iter().map(|cat| cat.name.clone()).collect();
+        dbg!(&lm_categories);
+
+        let categories: Vec<String> = lm_categories
+            .categories
+            .iter()
+            .map(|cat| cat.name.clone())
+            .collect();
         let chat_input = format!(
             "You are an assistant to categorize financial transactions. \
             You only respond with the exact category name and nothing else. The available categories are:\n\n{}",
             categories.join("\n")
         );
 
-        let chat_body = serde_json::json!({
-            "messages": [
-                { "role": "system", "text": chat_input },
-                { "role": "user", "text": serde_json::to_string(&transaction)? }
-            ],
-            "model": "gpt-4-turbo"
-        });
+        let openai_client = async_openai::Client::new();
+        let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+            .max_tokens(512u16)
+            .model("gpt-4o")
+            .messages([
+                async_openai::types::ChatCompletionRequestSystemMessageArgs::default()
+                    .content(chat_input)
+                    .build()?
+                    .into(),
+                async_openai::types::ChatCompletionRequestUserMessageArgs::default()
+                    .content(serde_json::to_string(&transaction)?)
+                    .build()?
+                    .into(),
+            ])
+            .build()?;
 
-        let chat_response: Vec<serde_json::Value> = client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.config.openai_api_key))
-            .json::<serde_json::Value>(&chat_body)
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?
-            .get("choices")
-            .and_then(|choices| choices.as_array().cloned())
-            .unwrap_or_default();
+        println!("{}", serde_json::to_string(&request).unwrap());
 
-        println!("{:?}", chat_response);
+        let response = openai_client.chat().create(request).await?;
+        let mut category_id = None;
 
+        if let Some(choice) = response.choices.first() {
+            let category_name = choice.message.content.as_ref().unwrap();
+            if let Some(category) = lm_categories.categories.iter().find(|category| &category.name == category_name) {
+                category_id = Some(category.id);
+            }
+        }
         let draft_transaction = DraftTransaction {
-            asset_id: self.config.account_id.parse::<i32>()?,
+            category_id,
+            asset_id: self.config.account_id.parse::<u32>()?,
             date: transaction.booking_date.to_string(),
             amount: transaction.transaction_amount.clone(),
-            currency: transaction.transaction_amount_currency.to_string(),
+            currency: transaction
+                .transaction_amount_currency
+                .to_string()
+                .to_lowercase(),
             payee: transaction
-                .creditor_name.clone()
+                .creditor_name
+                .clone()
                 .or(transaction.debtor_name.clone())
                 .unwrap_or_default(),
-            notes: transaction.remittance_information.clone().unwrap_or_default(),
+            notes: transaction
+                .remittance_information
+                .clone()
+                .unwrap_or_default(),
             status: String::from("cleared"),
             external_id: transaction.external_id.clone(),
         };
@@ -130,13 +165,23 @@ impl TransactionDestination for Lunchmoney {
             "skip_balance_update": false
         });
 
-        client
+        let inserted = client
             .post("https://dev.lunchmoney.app/v1/transactions")
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .json(&create_transactions_body)
             .send()
+            .await?
+            .text()
             .await?;
 
+        let inserted = serde_json::from_str::<InsertTransactionResponse>(&inserted)?;
+
+        if inserted.error.is_some() {
+            return Err(anyhow::anyhow!(
+                "Lunchmoney transactions failed to insert: {}",
+                inserted.error.unwrap().join(", ")
+            ));
+        }
         Ok(())
     }
 }

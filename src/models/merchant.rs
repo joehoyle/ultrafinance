@@ -196,7 +196,7 @@ impl NewMerchant {
             Some(external_id) => match Merchant::sqlx_by_external_id(external_id, db).await {
                 Ok(merchant) => Ok(merchant),
                 Err(_) => {
-                    match Merchant::sqlx_by_name_by_website(&self.name, &self.website.as_ref().unwrap(), db).await {
+                    match Merchant::sqlx_by_name_by_website(&self.name, &self.website.as_ref().unwrap_or(&"".to_string()), db).await {
                         Ok(merchant) => Ok(merchant),
                         Err(_) => {
                             self.sqlx_create(db).await

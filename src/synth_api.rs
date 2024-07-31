@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use futures::{future::join_all, stream, StreamExt};
 use serde::Deserialize;
 
-use crate::{
-    exchange_rate::ExchangeRate, ultrafinance::Currency, Location, NewMerchant, Transaction,
-};
+use crate::{Location, NewMerchant, Transaction};
 
 pub struct Client {
     reqwest: reqwest::Client,
@@ -69,8 +67,8 @@ impl From<Response> for NewMerchant {
             website: response.website,
             logo_url: response.icon,
             external_id: Some(response.merchant_id),
-            location: response.address.clone().map(|l|l.to_string()),
-            location_structured: response.address.map(|l|l.into()),
+            location: response.address.clone().map(|l| l.to_string()),
+            location_structured: response.address.map(|l| l.into()),
             labels: None,
         }
     }
@@ -88,16 +86,15 @@ impl Client {
         &self,
         transactions: &Vec<Transaction>,
     ) -> Result<HashMap<u32, NewMerchant>, anyhow::Error> {
-        // Process transactions in parrallel making an http request for either.
-        // The response will be a hashmap of transaction_id to NewMerchant.
-        let mut enriched = HashMap::new();
-        for transaction in transactions {
-            dbg!(transaction.transaction_amount_currency.used_by().first().unwrap_or(&"").to_string());
-            let url = format!("https://api.synthfinance.com/enrich?description",);
-            let response = self
-                .reqwest
-                .get(&url)
-                .query(&vec![(
+        let max_concurrent_requests = 10; // Limit the number of concurrent requests
+
+        let requests = stream::iter(transactions.iter().map(|transaction| {
+            let url = format!("https://api.synthfinance.com/enrich?description");
+            let reqwest_client = self.reqwest.clone();
+            let api_key = self.api_key.clone();
+            let transaction_id = transaction.id;
+            let query_params = vec![
+                (
                     "description",
                     format!(
                         "{} {} {}",
@@ -108,36 +105,58 @@ impl Client {
                             .clone()
                             .unwrap_or("".to_string())
                     ),
-                ), (
-                    "amount",
-                    transaction.transaction_amount.clone(),
                 ),
+                ("amount", transaction.transaction_amount.clone()),
                 (
                     "country",
-                    // Guess country from currency
-                    transaction.transaction_amount_currency.used_by().first().unwrap_or(&"").to_string()
-                )])
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .send()
-                .await;
-            match response {
-                Ok(response) => {
-                    // let text = response.text().await?;
-                    // dbg!(text);
-                    let response = response.json::<Response>().await?;
-                    let merchant = NewMerchant::from(response);
-                    enriched.insert(transaction.id, merchant);
-                }
-                Err(e) => {
-                    log::error!("Error fetching merchant: {}", e);
-                }
+                    transaction
+                        .transaction_amount_currency
+                        .used_by()
+                        .first()
+                        .unwrap_or(&"")
+                        .to_string(),
+                ),
+            ];
 
+            async move {
+                let response = reqwest_client
+                    .get(&url)
+                    .query(&query_params)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .send()
+                    .await;
+
+                match response {
+                    Ok(response) => {
+                        let response = response.json::<Response>().await;
+                        match response {
+                            Ok(response) => {
+                                let merchant = NewMerchant::from(response);
+                                Some((transaction_id, merchant))
+                            }
+                            Err(e) => {
+                                log::error!("Error parsing merchant response: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error fetching merchant: {}", e);
+                        None
+                    }
+                }
             }
-            // let json = response.json::<Response>().await?;
+        }))
+        .buffer_unordered(max_concurrent_requests);
 
-            // Process the response and return a hashmap of transaction_id to NewMerchant
+        let results = requests.collect::<Vec<_>>().await;
+        let mut enriched = HashMap::new();
+        for result in results {
+            if let Some((transaction_id, merchant)) = result {
+                enriched.insert(transaction_id, merchant);
+            }
         }
 
-        Ok(enriched)
+        Ok(enriched.into_iter().collect())
     }
 }

@@ -3,7 +3,6 @@ use crate::{models::*, synth_api};
 use anyhow::anyhow;
 use chrono::Duration;
 use log::info;
-use paperclip::actix::Apiv2Schema;
 use paperclip::v2::schema::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
@@ -287,9 +286,9 @@ pub async fn sqlx_enrich_transactions(
 }
 
 mod tests {
-    use chrono::NaiveDateTime;
+    
     // use crate::deno::FunctionRuntime;
-    use super::*;
+    
 
     // #[test]
     // pub fn test_parallel() {

@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use cli_table::{print_stdout, WithTitle};
 use dotenvy::dotenv;
 use nordigen::Nordigen;
-use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
+use sqlx::{mysql::MySqlPoolOptions};
 use ultrafinance::Currency;
 use std::{env, time::Duration};
 
@@ -605,7 +605,7 @@ async fn main() -> anyhow::Result<()> {
             TriggersCommand::Run { trigger_id, transaction_id } => {
                 let transaction = Transaction::sqlx_by_id(*transaction_id, &sqlx_pool).await?;
                 let trigger = Trigger::sqlx_by_id(*trigger_id, &sqlx_pool).await?;
-                trigger.sqlx_run(&transaction, &sqlx_pool);
+                dbg!(trigger.sqlx_run(&transaction, &sqlx_pool).await);
                 Ok(())
             }
         },
@@ -632,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
                 let merchant = synth_api::Client::new(env::var("SYNTH_API_KEY").unwrap())
                     .get_merchants(&vec![transaction])
                     .await?;
+                dbg!(&merchant);
                 Ok(())
             }
             TransactionsCommand::AssignMerchants {} => {

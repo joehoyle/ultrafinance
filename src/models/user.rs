@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-use crate::ultrafinance::{hash_api_key, hash_password, Currency};
+use crate::ultrafinance::{hash_api_key, hash_password};
 
 #[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone, sqlx::FromRow)]
 #[ts(export)]
