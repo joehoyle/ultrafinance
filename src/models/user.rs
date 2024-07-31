@@ -12,6 +12,7 @@ pub struct User {
     pub email: String,
     #[serde(skip_serializing)]
     #[table(skip)]
+    #[allow(dead_code)]
     pub(crate) password: String,
     // #[table(title = "Currency")]
     // pub primary_currency: Currency,

@@ -2,7 +2,7 @@ use anyhow::bail;
 use clap::{Parser, Subcommand};
 use cli_table::{print_stdout, WithTitle};
 use dotenvy::dotenv;
-use nordigen::Nordigen;
+use accounts::nordigen::{self, Nordigen};
 use sqlx::mysql::MySqlPoolOptions;
 use std::{env, time::Duration};
 use ultrafinance::Currency;
@@ -16,7 +16,6 @@ pub mod exchangerate_api;
 pub mod functions;
 pub mod gpt_enricher;
 pub mod models;
-pub mod nordigen;
 pub mod ntropy;
 pub mod synth_api;
 pub mod ultrafinance;
@@ -32,22 +31,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Users commands
     #[command(subcommand)]
     Users(UsersCommand),
-    /// Accounts commands
     #[command(subcommand)]
     Accounts(AccountsCommand),
-    /// Functions commands
     #[command(subcommand)]
     Functions(FunctionsCommand),
-    /// Requisitions commands
     #[command(subcommand)]
     Requisitions(RequisitionsCommand),
-    /// Transactions commands
     #[command(subcommand)]
     Transactions(TransactionsCommand),
-    /// Triggers commands
     #[command(subcommand)]
     Triggers(TriggersCommand),
     #[command(subcommand)]
@@ -133,7 +126,6 @@ enum FunctionsCommand {
 
 #[derive(Subcommand)]
 enum RequisitionsCommand {
-    List,
     ListInstitutions {
         #[arg(long)]
         country: Option<String>,
@@ -143,14 +135,6 @@ enum RequisitionsCommand {
         institution_id: String,
         #[arg(long)]
         user_id: u32,
-    },
-    Resume {
-        #[arg(long)]
-        requisition_id: u32,
-    },
-    Get {
-        #[arg(long)]
-        requisition_id: u32,
     },
 }
 
@@ -496,11 +480,6 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Requisitions(command) => match command {
-            RequisitionsCommand::List => {
-                let my_requisitions = NordigenRequisition::sqlx_all(&sqlx_pool).await?;
-                print_stdout(my_requisitions.with_title()).unwrap_or(());
-                Ok(())
-            }
             RequisitionsCommand::ListInstitutions { country } => {
                 let mut client = Nordigen::new();
                 client.populate_token().await?;
@@ -518,27 +497,11 @@ async fn main() -> anyhow::Result<()> {
                     .create_requisition(&"oob://".to_owned(), institution_id)
                     .await?;
                 let user = User::sqlx_by_id(*user_id, &sqlx_pool).await?;
-                nordigen_requisition::sqlx_create_nordigen_requisition(
-                    &requisition,
-                    &user,
-                    &sqlx_pool,
-                )
-                .await?;
-                println!("Visit {} to complete setup. Once complete, run requisitions resume --requisition-id <id>", requisition.link );
-                Ok(())
-            }
-            RequisitionsCommand::Resume { requisition_id } => {
-                let mut client = Nordigen::new();
-                client.populate_token().await?;
-                let db_requisition =
-                    NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
-                let requisition = client.get_requisition(&db_requisition.nordigen_id).await?;
+                let requisition = client.get_requisition(&requisition.id).await?;
 
                 if &requisition.status != "LN" {
                     bail!("Requisition not yet completed.");
                 }
-
-                let user = User::sqlx_by_id(db_requisition.user_id, &sqlx_pool).await?;
 
                 for account_id in requisition.accounts {
                     let account_details =
@@ -549,17 +512,6 @@ async fn main() -> anyhow::Result<()> {
                     let _account = account.sqlx_create(&sqlx_pool).await?;
                     println!("Account {} added.", &account_id);
                 }
-
-                Ok(())
-            }
-            RequisitionsCommand::Get { requisition_id } => {
-                let mut client = Nordigen::new();
-                client.populate_token().await?;
-                let db_requisition =
-                    NordigenRequisition::sqlx_by_id(*requisition_id, &sqlx_pool).await?;
-                let requisition = client.get_requisition(&db_requisition.nordigen_id).await?;
-
-                dbg!(requisition);
 
                 Ok(())
             }

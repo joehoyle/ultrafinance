@@ -1,9 +1,11 @@
 use std::fmt::Display;
 
-use crate::{nordigen, utils::display_option};
+use crate::{utils::display_option};
 use chrono::NaiveDate;
 use cli_table::Table;
 use serde::{Deserialize, Serialize};
+
+pub mod nordigen;
 
 #[derive(Deserialize, Debug, Serialize, Clone)]
 pub struct Amount {
