@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use futures::{future::join_all, stream, StreamExt};
+use futures::{stream, StreamExt};
 use serde::Deserialize;
 
 use crate::{Location, NewMerchant, Transaction};
