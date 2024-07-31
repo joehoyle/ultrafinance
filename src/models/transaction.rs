@@ -96,13 +96,13 @@ impl Transaction {
     pub async fn sqlx_by_account(
         account_id: u32,
         db: &sqlx::MySqlPool,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Vec<Self>, anyhow::Error> {
         sqlx::query_as!(
             Self,
             "SELECT * FROM transactions WHERE account_id = ?",
             account_id
         )
-        .fetch_one(db)
+        .fetch_all(db)
         .await
         .map_err(|e| anyhow::anyhow!(e))
     }

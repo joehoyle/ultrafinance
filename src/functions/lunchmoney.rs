@@ -95,8 +95,6 @@ impl TransactionDestination for Lunchmoney {
             .json()
             .await?;
 
-        dbg!(&lm_categories);
-
         let categories: Vec<String> = lm_categories
             .categories
             .iter()
@@ -123,8 +121,6 @@ impl TransactionDestination for Lunchmoney {
                     .into(),
             ])
             .build()?;
-
-        println!("{}", serde_json::to_string(&request).unwrap());
 
         let response = openai_client.chat().create(request).await?;
         let mut category_id = None;

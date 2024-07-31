@@ -3,9 +3,9 @@ use clap::{Parser, Subcommand};
 use cli_table::{print_stdout, WithTitle};
 use dotenvy::dotenv;
 use nordigen::Nordigen;
-use sqlx::{mysql::MySqlPoolOptions};
-use ultrafinance::Currency;
+use sqlx::mysql::MySqlPoolOptions;
 use std::{env, time::Duration};
+use ultrafinance::Currency;
 
 use crate::accounts::{get_source_account, SourceAccount};
 
@@ -14,16 +14,16 @@ pub use self::models::*;
 pub mod accounts;
 // pub mod deno;
 pub mod endpoints;
+pub mod exchangerate_api;
+pub mod functions;
 pub mod gpt_enricher;
 pub mod models;
 pub mod nordigen;
 pub mod ntropy;
 pub mod server;
+pub mod synth_api;
 pub mod ultrafinance;
 pub mod utils;
-pub mod exchangerate_api;
-pub mod synth_api;
-pub mod functions;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -182,8 +182,8 @@ enum TriggersCommand {
         #[arg(long)]
         trigger_id: u32,
         #[arg(long)]
-        transaction_id: u32,
-    }
+        transaction_id: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -246,7 +246,8 @@ async fn main() -> anyhow::Result<()> {
     let sqlx_pool = MySqlPoolOptions::new()
         .max_connections(60)
         .acquire_timeout(Duration::from_secs(5))
-        .connect(env::var("DATABASE_URL").unwrap().as_str()).await?;
+        .connect(env::var("DATABASE_URL").unwrap().as_str())
+        .await?;
 
     // You can check for the existence of subcommands, and if found use their
     // matches just as you would the top level cmd
@@ -602,10 +603,41 @@ async fn main() -> anyhow::Result<()> {
                     Ok(())
                 }
             },
-            TriggersCommand::Run { trigger_id, transaction_id } => {
-                let transaction = Transaction::sqlx_by_id(*transaction_id, &sqlx_pool).await?;
+            TriggersCommand::Run {
+                trigger_id,
+                transaction_id,
+            } => {
                 let trigger = Trigger::sqlx_by_id(*trigger_id, &sqlx_pool).await?;
-                dbg!(trigger.sqlx_run(&transaction, &sqlx_pool).await);
+                let transactions = match transaction_id {
+                    Some(transaction_id) => {
+                        vec![Transaction::sqlx_by_id(*transaction_id, &sqlx_pool).await?]
+                    }
+                    None => {
+                        let mut transactions = vec![];
+                        for filter in trigger.filter.0.iter() {
+                            match filter {
+                                TriggerFilterPredicate::Account(account_ids) => {
+                                    let account =
+                                        Account::sqlx_by_id_only(account_ids[0], &sqlx_pool)
+                                            .await?;
+                                    transactions = sqlx::query_as!(Transaction, "SELECT * FROM transactions WHERE account_id = ? ORDER BY booking_date DESC LIMIT 50", account.id).fetch_all(&sqlx_pool)
+                                    .await?;
+                                }
+                            }
+                        }
+                        transactions
+                    }
+                };
+
+                let futures: Vec<_> = transactions.into_iter().map(|transaction| {
+                    let sqlx_pool = sqlx_pool.clone();
+                    let trigger_ref = &trigger;
+                    async move {
+                        trigger_ref.sqlx_run(&transaction, &sqlx_pool).await
+                    }
+                }).collect();
+
+                dbg!(futures::future::join_all(futures).await);
                 Ok(())
             }
         },
@@ -645,7 +677,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     // Only take the first 10 transactions, as enrichment can timeout
                     let transactions_to_do = transactions_to_do.into_iter().take(10).collect();
-                    let enriched = ultrafinance::sqlx_enrich_transactions(transactions_to_do, &sqlx_pool).await?;
+                    let enriched =
+                        ultrafinance::sqlx_enrich_transactions(transactions_to_do, &sqlx_pool)
+                            .await?;
                     dbg!(enriched.len());
                 }
 
@@ -661,20 +695,17 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::ExchangeRates(command) => match command {
             ExchangeRatesCommand::Update { code } => {
-                let exchange_rate = exchangerate_api::Client::new(env::var("EXCHANGERATE_API_KEY").unwrap())
-                    .get_exchange_rate(&Currency::try_from(code.clone())?)
-                    .await?;
+                let exchange_rate =
+                    exchangerate_api::Client::new(env::var("EXCHANGERATE_API_KEY").unwrap())
+                        .get_exchange_rate(&Currency::try_from(code.clone())?)
+                        .await?;
                 exchange_rate.create_or_update(&sqlx_pool).await?;
                 Ok(())
             }
-            ExchangeRatesCommand::List => {
-                Ok(())
-            }
-
-        }
+            ExchangeRatesCommand::List => Ok(()),
+        },
         Commands::Server(command) => match command {
-            ServerCommand::Start =>
-                server::start()
+            ServerCommand::Start => server::start()
                 .await
                 .map_err(|e| anyhow::anyhow!(e.to_string())),
         },
