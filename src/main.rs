@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use cli_table::{print_stdout, WithTitle};
 use dotenvy::dotenv;
 use accounts::nordigen::{self, Nordigen};
-use sqlx::mysql::MySqlPoolOptions;
+use sqlx::{mysql::MySqlPoolOptions, query_as};
 use std::{env, time::Duration};
 use ultrafinance::Currency;
 
@@ -175,7 +175,14 @@ enum TriggersLogCommand {
 
 #[derive(Subcommand)]
 enum TransactionsCommand {
-    List,
+    List {
+        #[arg(long)]
+        account_id: Option<u32>,
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
     Import {
         #[arg(long)]
         account_id: Option<u32>,
@@ -593,8 +600,10 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Transactions(command) => match command {
-            TransactionsCommand::List => {
-                let my_transactions = Transaction::sqlx_all(&sqlx_pool).await?;
+            TransactionsCommand::List { account_id, search, limit } => {
+                let my_transactions = query_as!(Transaction, "SELECT * FROM transactions ORDER BY booking_date DESC LIMIT ?", limit)
+                    .fetch_all(&sqlx_pool)
+                    .await?;
                 print_stdout(my_transactions.with_title()).unwrap_or(());
                 Ok(())
             }

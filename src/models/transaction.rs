@@ -22,22 +22,20 @@ pub struct Transaction {
     pub remittance_information: Option<String>,
     #[table(title = "Booking Date")]
     pub booking_date: chrono::NaiveDate,
+    #[table(skip)]
     #[table(title = "Booking Datetime", display_fn = "display_option")]
     pub booking_datetime: Option<chrono::NaiveDateTime>,
     #[table(title = "Amount")]
     pub transaction_amount: String,
     #[table(title = "Currency")]
     pub transaction_amount_currency: Currency,
-    #[table(
-        title = "Proprietary Bank Transaction Code",
-        display_fn = "display_option"
-    )]
+    #[table(skip)]
     pub proprietary_bank_transaction_code: Option<String>,
-    #[table(title = "Exchange Rate", display_fn = "display_option")]
+    #[table(skip)]
     pub currency_exchange_rate: Option<String>,
-    #[table(title = "Exchange Source Currency", display_fn = "display_option")]
+    #[table(skip)]
     pub currency_exchange_source_currency: Option<String>,
-    #[table(title = "Exchange Target Currency", display_fn = "display_option")]
+    #[table(skip)]
     pub currency_exchange_target_currency: Option<String>,
     #[table(skip)]
     pub merchant_id: Option<u32>,
@@ -48,7 +46,7 @@ pub struct Transaction {
     pub user_id: u32,
     #[table(title = "Date Created")]
     pub created_at: chrono::NaiveDateTime,
-    #[table(title = "Updated At")]
+    #[table(skip)]
     pub updated_at: chrono::NaiveDateTime,
 }
 
