@@ -145,6 +145,13 @@ impl Trigger {
     pub async fn sqlx_run(&self, transaction: &Transaction, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
         let function = Function::sqlx_by_id(self.function_id, db).await?;
         let destination = function.get_destination(serde_json::to_string(&self.params).unwrap().as_str())?;
+          // let log = NewTriggerLog {
+        //     payload: payload.0,
+        //     status: payload.1.to_owned(),
+        //     console: deno_runtime.get_output().await,
+        //     user_id: user.id,
+        //     trigger_id: trigger.id,
+        // }
         destination.transaction_created(transaction).await
     }
 }

@@ -1,17 +1,17 @@
 use crate::accounts::SourceAccount;
 use crate::{models::*, synth_api};
 use anyhow::anyhow;
+use async_trait::async_trait;
 use chrono::Duration;
 use log::info;
 use paperclip::v2::schema::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
-use ts_rs::TS;
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::{env, thread};
+use tokio::runtime::Runtime;
+use ts_rs::TS;
 
 pub fn is_dev() -> bool {
     env::var("IS_DEVELOPMENT")
@@ -125,12 +125,12 @@ pub async fn sqlx_import_transactions(
 
     // Create the triggers
     for transaction in &inserted_transactions {
-        sqlx_create_transaction_trigger_queue(transaction, db).await?;
+        run_triggers_for_transaction(transaction, db).await?;
     }
     Ok(inserted_transactions)
 }
 
-pub async fn sqlx_create_transaction_trigger_queue(
+pub async fn run_triggers_for_transaction(
     transaction: &Transaction,
     db: &sqlx::MySqlPool,
 ) -> anyhow::Result<()> {
@@ -147,16 +147,15 @@ pub async fn sqlx_create_transaction_trigger_queue(
         transaction_triggers.len()
     );
 
-    for transaction_trigger in &transaction_triggers {
-        NewTriggerQueue {
-            payload: serde_json::to_string(transaction)?,
-            user_id: transaction.user_id,
-            trigger_id: transaction_trigger.id,
-        }
-        .sqlx_create(db)
-        .await?;
-    }
+    use futures::stream::{self, StreamExt};
 
+    stream::iter(&transaction_triggers)
+        .for_each_concurrent(None, |trigger| async move {
+            if let Err(e) = trigger.sqlx_run(transaction, db).await {
+                eprintln!("Failed to run trigger: {:?}", e);
+            }
+        })
+        .await;
     Ok(())
 }
 
@@ -210,44 +209,6 @@ pub async fn sqlx_sync_accounts(
     result_map
 }
 
-pub async fn sqlx_process_trigger_queue(
-    queue: Vec<TriggerQueue>,
-    db: &sqlx::MySqlPool,
-) -> HashMap<u32, anyhow::Result<TriggerLog>> {
-    let mut handles = Vec::new();
-
-    for q in queue {
-        let db = db.clone();
-        let handle = thread::spawn(move || {
-            let rt_handle = Runtime::new().unwrap();
-            let id = q.id;
-            info!("Processing trigger queue: {}", id);
-            // Use the handle to the runtime to block on the future
-            let result = rt_handle.block_on(async move {
-                let pool = db
-                    .options()
-                    .clone()
-                    .connect(env::var("DATABASE_URL").unwrap().as_str())
-                    .await
-                    .unwrap();
-                q.sqlx_run(&pool).await
-            });
-            dbg!(&result);
-            info!("Processed trigger queue: {}", id);
-            (id, result)
-        });
-        handles.push(handle);
-    }
-
-    let mut result_map = HashMap::new();
-    for handle in handles {
-        let (id, result) = handle.join().unwrap();
-        result_map.insert(id, result);
-    }
-
-    result_map
-}
-
 pub async fn sqlx_enrich_transactions(
     transactions: Vec<Transaction>,
     db: &sqlx::MySqlPool,
@@ -286,9 +247,8 @@ pub async fn sqlx_enrich_transactions(
 }
 
 mod tests {
-    
+
     // use crate::deno::FunctionRuntime;
-    
 
     // #[test]
     // pub fn test_parallel() {
@@ -415,7 +375,6 @@ impl Currency {
         self.0.used_by().iter().map(|c| c.name()).collect()
     }
 }
-
 
 #[async_trait]
 pub trait TransactionDestination {

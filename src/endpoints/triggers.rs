@@ -5,9 +5,8 @@ use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web::Json};
 use serde::Deserialize;
 
-use crate::models::{Function, NewTrigger, Trigger, TriggerFilter, TriggerLog, TriggerQueue, User};
+use crate::models::{Function, NewTrigger, Trigger, TriggerFilter, TriggerLog, User};
 use crate::server::{AppState, Error};
-use crate::ultrafinance;
 
 #[derive(Apiv2Schema)]
 #[allow(dead_code)]
@@ -114,36 +113,6 @@ pub async fn update_trigger_endpoint(
 #[allow(dead_code)]
 struct GetTriggerQueue {
     trigger_id: Option<u32>,
-}
-
-#[api_v2_operation]
-pub async fn get_trigger_queue_endpoint(
-    user: User,
-    state: web::Data<AppState>,
-) -> Result<Json<Vec<TriggerQueue>>, Error> {
-    let db = state.sqlx_pool.clone();
-    TriggerQueue::sqlx_by_user(user.id, &db)
-        .await
-        .map(Json)
-        .map_err(|e| e.into())
-}
-
-#[api_v2_operation]
-pub async fn process_trigger_queue_endpoint(
-    user: User,
-    state: web::Data<AppState>,
-) -> Result<Json<HashMap<u32, Result<TriggerLog, Error>>>, Error> {
-    let db = &state.sqlx_pool;
-    let queue = TriggerQueue::sqlx_by_user(user.id, &db).await?;
-
-    let trigger_log_map = ultrafinance::sqlx_process_trigger_queue(queue, db).await;
-    let mut trigger_log_map_response = HashMap::new();
-    for (trigger_queue_id, result) in trigger_log_map {
-        trigger_log_map_response
-            .insert(trigger_queue_id, result.map_err(|e| -> Error { e.into() }));
-    }
-
-    Ok(Json(trigger_log_map_response))
 }
 
 #[api_v2_operation]

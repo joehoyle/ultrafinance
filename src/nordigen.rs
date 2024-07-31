@@ -452,6 +452,7 @@ impl Nordigen {
         self.token = Some(token.clone());
         Ok(token)
     }
+
 }
 
 impl From<Transaction> for SourceTransaction {
@@ -481,7 +482,17 @@ impl From<Transaction> for SourceTransaction {
     }
 }
 
+impl Account {
+    pub async fn validate(&self) -> Result<(), anyhow::Error> {
+        let mut client = Nordigen::new();
+        client.populate_token().await?;
+        dbg!(&client.get_account_details(&self.id).await?);
+        Ok(())
+    }
+}
+
 impl crate::accounts::SourceAccount for Account {
+
     async fn details(&self) -> Result<crate::accounts::SourceAccountDetails, anyhow::Error> {
         let mut client = Nordigen::new();
         client.populate_token().await?;

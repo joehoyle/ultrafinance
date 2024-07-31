@@ -295,15 +295,6 @@ pub async fn start() -> std::io::Result<()> {
                             .route(web::post().to(endpoints::triggers::create_trigger_endpoint)),
                     )
                     .service(
-                        web::resource("/triggers/queue")
-                            .route(web::get().to(endpoints::triggers::get_trigger_queue_endpoint)),
-                    )
-                    .service(
-                        web::resource("/triggers/queue/process").route(
-                            web::post().to(endpoints::triggers::process_trigger_queue_endpoint),
-                        ),
-                    )
-                    .service(
                         web::resource("/triggers/log")
                             .route(web::get().to(endpoints::triggers::get_trigger_log_endpoint)),
                     )

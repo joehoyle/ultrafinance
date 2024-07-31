@@ -119,6 +119,12 @@ enum AccountsCommand {
         #[arg(long)]
         config: String,
     },
+    RelinkNordigenAccount {
+        #[arg(long)]
+        account_id: Option<u32>,
+        #[arg(long)]
+        requisition_id: Option<String>,
+    }
 }
 
 #[derive(Subcommand)]
@@ -175,8 +181,6 @@ enum TriggersCommand {
         function_id: u32,
     },
     #[command(subcommand)]
-    Queue(TriggersQueueCommand),
-    #[command(subcommand)]
     Log(TriggersLogCommand),
     Run {
         #[arg(long)]
@@ -192,16 +196,6 @@ enum MerchantsCommand {
 }
 
 #[derive(Subcommand)]
-enum TriggersQueueCommand {
-    List,
-    Process,
-    ProcessSingle {
-        #[arg(long)]
-        id: u32,
-    },
-}
-
-#[derive(Subcommand)]
 enum TriggersLogCommand {
     List,
 }
@@ -211,7 +205,7 @@ enum TransactionsCommand {
     List,
     Import {
         #[arg(long)]
-        account_id: u32,
+        account_id: Option<u32>,
     },
     CreateTrigger {
         #[arg(long)]
@@ -439,7 +433,68 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Ok(())
-            }
+            },
+            AccountsCommand::RelinkNordigenAccount { account_id, requisition_id } => {
+                let account_id: u32 = account_id.unwrap();
+                let account = Account::sqlx_by_id_only(account_id, &sqlx_pool).await?;
+                let nordigen = serde_json::from_str::<nordigen::Account>(&account.config.unwrap())?;
+
+                if nordigen.validate().await.is_ok() {
+                    println!("Account {} is already linked.", account_id);
+                    return Ok(());
+                }
+                let mut client = nordigen::Nordigen::new();
+                client.populate_token().await?;
+
+                let nordigen_account = client.get_account(&account.nordigen_id).await?;
+
+                let requisition = match requisition_id {
+                    Some(requisition_id) => {
+                        client.get_requisition(&requisition_id).await?
+                    }
+                    None => {
+                        let requisition = client
+                        .create_requisition(
+                            &"oob://".to_owned(),
+                            &nordigen_account.institution_id,
+                        )
+                        .await?;
+
+                      println!("Visit {} to complete setup", requisition.link);
+                         let _input: String = dialoguer::Input::new()
+                            .with_prompt("Press return when completed.")
+                            .interact_text()?;
+                        client.get_requisition(&requisition.id).await?
+                    }
+                };
+
+                if &requisition.status != "LN" {
+                    bail!("Requisition not yet completed.");
+                }
+
+                for account_id in requisition.accounts {
+                    let nordigen_account = client.get_account(&account_id).await?;
+                    let details = nordigen_account.details().await?;
+                    let select_account = Account::sqlx_by_source_account_details(
+                        details,
+                        account.user_id,
+                        &sqlx_pool,
+                    )
+                    .await;
+
+                    let mut account = match select_account {
+                        Ok(a) => a,
+                        Err(e) => {
+                            println!("Error getting account {}: {}, skipping.", account_id, e);
+                            continue;
+                        }
+                    };
+                    account.config = serde_json::to_string(&nordigen_account).ok();
+                    account.sqlx_update(&sqlx_pool).await?;
+                    println!("Account {} updated.", &account_id);
+                }
+                Ok(())
+            },
         },
         Commands::Functions(command) => match command {
             FunctionsCommand::List => {
@@ -563,39 +618,6 @@ async fn main() -> anyhow::Result<()> {
                 dbg!(trigger);
                 Ok(())
             }
-            TriggersCommand::Queue(command) => match command {
-                TriggersQueueCommand::List => {
-                    let queue = TriggerQueue::sqlx_all(&sqlx_pool).await?;
-                    print_stdout(queue.with_title()).unwrap_or(());
-                    Ok(())
-                }
-                TriggersQueueCommand::Process => {
-                    let queue = TriggerQueue::sqlx_all(&sqlx_pool).await?;
-
-                    for q in queue {
-                        let id = q.id;
-                        match q.sqlx_run(&sqlx_pool).await {
-                            Ok(_) => println!("Processed trigger queue {}", id),
-                            Err(err) => {
-                                println!("Error in trigger queue {} {}", id, err.to_string())
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-                TriggersQueueCommand::ProcessSingle { id: u32 } => {
-                    let queue = TriggerQueue::sqlx_by_id(*u32, &sqlx_pool).await?;
-                    dbg!(&queue);
-                    match queue.sqlx_run(&sqlx_pool).await {
-                        Ok(log) => {
-                            println!("Processed trigger queue {}", u32);
-                            dbg!(log);
-                        }
-                        Err(err) => println!("Error in trigger queue {} {}", u32, err.to_string()),
-                    }
-                    Ok(())
-                }
-            },
             TriggersCommand::Log(command) => match command {
                 TriggersLogCommand::List => {
                     let log = TriggerLog::sqlx_all(&sqlx_pool).await?;
@@ -629,13 +651,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                let futures: Vec<_> = transactions.into_iter().map(|transaction| {
-                    let sqlx_pool = sqlx_pool.clone();
-                    let trigger_ref = &trigger;
-                    async move {
-                        trigger_ref.sqlx_run(&transaction, &sqlx_pool).await
-                    }
-                }).collect();
+                let futures: Vec<_> = transactions
+                    .into_iter()
+                    .map(|transaction| {
+                        let sqlx_pool = sqlx_pool.clone();
+                        let trigger_ref = &trigger;
+                        async move { trigger_ref.sqlx_run(&transaction, &sqlx_pool).await }
+                    })
+                    .collect();
 
                 dbg!(futures::future::join_all(futures).await);
                 Ok(())
@@ -648,16 +671,31 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             TransactionsCommand::Import { account_id } => {
-                let account = Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?;
+                let accounts = match account_id {
+                    Some(account_id) => {
+                        vec![Account::sqlx_by_id_only(*account_id, &sqlx_pool).await?]
+                    }
+                    None => Account::sqlx_all(&sqlx_pool).await?,
+                };
 
-                let imported_transactions =
-                    ultrafinance::sqlx_import_transactions(&account, &sqlx_pool).await?;
-                println!("imported {} transactions.", imported_transactions.len());
+                for account in accounts {
+                    let imported_transactions =
+                        ultrafinance::sqlx_import_transactions(&account, &sqlx_pool).await;
+                    match imported_transactions {
+                        Ok(imported_transactions) => {
+                            println!("imported {} transactions for account {}.", imported_transactions.len(), account.id);
+                        }
+                        Err(e) => {
+                            println!("Error importing transactions for accont {}: {}", account.id, e);
+                        }
+                    }
+                }
+
                 Ok(())
             }
             TransactionsCommand::CreateTrigger { id } => {
                 let transaction = Transaction::sqlx_by_id(*id, &sqlx_pool).await?;
-                ultrafinance::sqlx_create_transaction_trigger_queue(&transaction, &sqlx_pool).await
+                ultrafinance::run_triggers_for_transaction(&transaction, &sqlx_pool).await
             }
             TransactionsCommand::Enrich { id } => {
                 let transaction = Transaction::sqlx_by_id(*id, &sqlx_pool).await?;

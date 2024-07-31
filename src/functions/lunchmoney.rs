@@ -11,7 +11,7 @@ struct Config {
     #[serde(rename = "accountId")]
     account_id: String,
     #[serde(rename = "openaiApiKey")]
-    openai_api_key: String,
+    openai_api_key: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -27,6 +27,7 @@ struct CategoriesResponse {
 
 #[derive(Deserialize, Debug)]
 struct InsertTransactionResponse {
+    #[allow(dead_code)]
     ids: Option<Vec<u32>>,
     error: Option<Vec<String>>,
 }
@@ -106,31 +107,34 @@ impl TransactionDestination for Lunchmoney {
             categories.join("\n")
         );
 
-        let openai_client = async_openai::Client::new();
-        let request = async_openai::types::CreateChatCompletionRequestArgs::default()
-            .max_tokens(512u16)
-            .model("gpt-4o")
-            .messages([
-                async_openai::types::ChatCompletionRequestSystemMessageArgs::default()
-                    .content(chat_input)
-                    .build()?
-                    .into(),
-                async_openai::types::ChatCompletionRequestUserMessageArgs::default()
-                    .content(serde_json::to_string(&transaction)?)
-                    .build()?
-                    .into(),
-            ])
-            .build()?;
-
-        let response = openai_client.chat().create(request).await?;
         let mut category_id = None;
 
-        if let Some(choice) = response.choices.first() {
-            let category_name = choice.message.content.as_ref().unwrap();
-            if let Some(category) = lm_categories.categories.iter().find(|category| &category.name == category_name) {
-                category_id = Some(category.id);
+        if let Some(_openai_api_key) = &self.config.openai_api_key {
+            let openai_client = async_openai::Client::new();
+            let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+                .max_tokens(512u16)
+                .model("gpt-4o")
+                .messages([
+                    async_openai::types::ChatCompletionRequestSystemMessageArgs::default()
+                        .content(chat_input)
+                        .build()?
+                        .into(),
+                    async_openai::types::ChatCompletionRequestUserMessageArgs::default()
+                        .content(serde_json::to_string(&transaction)?)
+                        .build()?
+                        .into(),
+                ])
+                .build()?;
+            let response = openai_client.chat().create(request).await?;
+
+            if let Some(choice) = response.choices.first() {
+                let category_name = choice.message.content.as_ref().unwrap();
+                if let Some(category) = lm_categories.categories.iter().find(|category| &category.name == category_name) {
+                    category_id = Some(category.id);
+                }
             }
         }
+
         let draft_transaction = DraftTransaction {
             category_id,
             asset_id: self.config.account_id.parse::<u32>()?,
