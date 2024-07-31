@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use sqlx::{mysql::MySqlRow, FromRow, MySql, Row};
 
 use crate::ultrafinance::Currency;
 
-#[derive(Serialize, Deserialize, Clone, Apiv2Schema, ts_rs::TS)]
-#[ts(export)]
+#[derive(Serialize, Deserialize, Clone)]
+
 pub struct ExchangeRate {
     pub base_code: Currency,
     pub conversion_rates: HashMap<Currency, f64>,

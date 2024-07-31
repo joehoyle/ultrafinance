@@ -5,13 +5,12 @@ use crate::{
 use anyhow::anyhow;
 use chrono::{naive::NaiveDate, DateTime, Utc};
 use cli_table::Table;
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, env};
 
-#[derive(Deserialize, Table, Serialize, ts_rs::TS, Apiv2Schema)]
-#[ts(export)]
+#[derive(Deserialize, Table, Serialize)]
+
 pub struct Institution {
     pub id: String,
     pub name: String,
@@ -27,8 +26,8 @@ pub struct Institution {
     pub logo: String,
 }
 
-#[derive(Deserialize, Table, Debug, Serialize, Clone, ts_rs::TS, Apiv2Schema)]
-#[ts(export)]
+#[derive(Deserialize, Table, Debug, Serialize, Clone)]
+
 pub struct Requisition {
     pub id: String,
     pub status: String,

@@ -1,14 +1,8 @@
 use cli_table::Table;
-
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-
 use anyhow::Result;
 
-use crate::ultrafinance::{hash_api_key, hash_password};
-
-#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone, sqlx::FromRow)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize, Clone, sqlx::FromRow)]
 pub struct User {
     #[table(title = "User ID")]
     pub id: u32,
@@ -50,12 +44,11 @@ impl User {
     }
 }
 
-#[derive(Default, Debug, Apiv2Schema, Deserialize, ts_rs::TS)]
-#[ts(export)]
+#[derive(Default, Debug, Deserialize)]
+
 pub struct NewUser {
     pub name: String,
     pub email: String,
-    pub password: String,
 }
 
 impl NewUser {
@@ -63,15 +56,14 @@ impl NewUser {
         let result = sqlx::query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)")
             .bind(self.name)
             .bind(self.email)
-            .bind(hash_password(&self.password)?)
             .execute(db)
             .await?;
         User::sqlx_by_id(result.last_insert_id() as u32, db).await
     }
 }
 
-#[derive(Deserialize, Apiv2Schema, ts_rs::TS, Debug)]
-#[ts(export)]
+#[derive(Deserialize, Debug)]
+
 pub struct UpdateUser {
     pub id: Option<u32>,
     pub name: Option<String>,
@@ -94,18 +86,4 @@ impl UpdateUser {
             .map_err(|e| anyhow::anyhow!(e))?;
         User::sqlx_by_id(self.id.unwrap(), db).await
     }
-}
-
-pub async fn create_api_key(user: &User, con: &sqlx::MySqlPool) -> Result<String, anyhow::Error> {
-    use uuid::Uuid;
-    let raw_api_key = Uuid::new_v4().to_string();
-    let ph = hash_api_key(raw_api_key.as_str());
-
-    sqlx::query("INSERT INTO user_api_keys (user_id, api_key) VALUES (?, ?)")
-        .bind(user.id)
-        .bind(ph)
-        .execute(con)
-        .await?;
-
-    Ok(raw_api_key)
 }

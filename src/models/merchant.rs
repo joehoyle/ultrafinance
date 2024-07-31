@@ -1,11 +1,9 @@
 use crate::utils::display_option;
 use cli_table::Table;
-
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize, Clone)]
+
 pub struct Merchant {
     #[table(title = "Merchant ID")]
     pub id: u32,
@@ -27,8 +25,8 @@ pub struct Merchant {
     pub created_at: chrono::NaiveDateTime,
 }
 
-#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default, Clone)]
-#[ts(export)]
+#[derive(Deserialize, Serialize, Debug, Default, Clone)]
+
 pub struct Location {
     pub address: Option<String>,
     pub city: Option<String>,

@@ -1,5 +1,4 @@
 use cli_table::Table;
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
@@ -10,18 +9,18 @@ use crate::models::Transaction;
 
 use super::Function;
 
-#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema)]
-#[ts(export)]
+#[derive(Deserialize, Serialize, Debug)]
+
 pub enum TriggerFilterPredicate {
     Account(Vec<u32>),
 }
 
-#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default)]
-#[ts(export)]
+#[derive(Deserialize, Serialize, Debug, Default)]
+
 pub struct TriggerFilter(pub Vec<TriggerFilterPredicate>);
 
-#[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema, Default)]
-#[ts(export)]
+#[derive(Deserialize, Serialize, Debug, Default)]
+
 pub struct TriggerParams(pub HashMap<String, String>);
 
 impl From<String> for TriggerParams {
@@ -52,8 +51,8 @@ impl From<String> for TriggerFilter {
     }
 }
 
-#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize)]
+
 #[derive(sqlx::FromRow)]
 pub struct Trigger {
     #[table(title = "Trigger ID")]
@@ -181,8 +180,8 @@ impl NewTrigger {
     }
 }
 
-#[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
-#[ts(export)]
+#[derive(Deserialize)]
+
 pub struct UpdateTrigger {
     pub id: Option<u32>,
     pub name: Option<String>,

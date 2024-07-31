@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use crate::models::User;
 
-#[derive(Table, Debug, Serialize, ts_rs::TS)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize)]
+
 #[derive(sqlx::FromRow)]
 pub struct NordigenRequisition {
     #[table(title = "Requisition ID")]

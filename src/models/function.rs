@@ -1,15 +1,10 @@
 use std::collections::HashMap;
-
 use cli_table::Table;
-
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-
 use anyhow::Result;
-
 use crate::ultrafinance::TransactionDestination;
 
-#[derive(Table, Serialize, Apiv2Schema, ts_rs::TS, sqlx::FromRow)]
+#[derive(Table, Serialize, sqlx::FromRow)]
 pub struct Function {
     #[table(title = "Account ID")]
     pub id: u32,
@@ -29,7 +24,7 @@ pub struct Function {
     pub updated_at: chrono::NaiveDateTime,
 }
 
-#[derive(Deserialize, Debug, Serialize, Apiv2Schema, ts_rs::TS)]
+#[derive(Deserialize, Debug, Serialize)]
 #[allow(dead_code)]
 pub struct FunctionParam {
     pub name: String,
@@ -128,8 +123,8 @@ impl NewFunction {
     }
 }
 
-#[derive(Deserialize, Apiv2Schema, ts_rs::TS)]
-#[ts(export)]
+#[derive(Deserialize)]
+
 pub struct UpdateFunction {
     pub id: Option<u32>,
     pub name: Option<String>,

@@ -1,14 +1,12 @@
 use crate::{accounts::SourceTransaction, ultrafinance::Currency};
 use crate::utils::display_option;
 use cli_table::Table;
-
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-#[derive(Table, Debug, Serialize, Deserialize, ts_rs::TS, Apiv2Schema)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize, Deserialize)]
+
 #[serde(rename_all = "camelCase")]
 #[derive(sqlx::FromRow)]
 pub struct Transaction {

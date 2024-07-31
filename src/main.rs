@@ -12,15 +12,12 @@ use crate::accounts::{get_source_account, SourceAccount};
 pub use self::models::*;
 
 pub mod accounts;
-// pub mod deno;
-pub mod endpoints;
 pub mod exchangerate_api;
 pub mod functions;
 pub mod gpt_enricher;
 pub mod models;
 pub mod nordigen;
 pub mod ntropy;
-pub mod server;
 pub mod synth_api;
 pub mod ultrafinance;
 pub mod utils;
@@ -57,8 +54,6 @@ enum Commands {
     Merchants(MerchantsCommand),
     #[command(subcommand)]
     ExchangeRates(ExchangeRatesCommand),
-    #[command(subcommand)]
-    Server(ServerCommand),
 }
 
 #[derive(Subcommand)]
@@ -71,11 +66,7 @@ enum UsersCommand {
         email: String,
         #[arg(long)]
         password: String,
-    },
-    CreateApiKey {
-        #[arg(long)]
-        user_id: u32,
-    },
+    }
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -219,11 +210,6 @@ enum TransactionsCommand {
 }
 
 #[derive(Subcommand)]
-enum ServerCommand {
-    Start,
-}
-
-#[derive(Subcommand)]
 enum ExchangeRatesCommand {
     Update {
         #[arg(long)]
@@ -260,17 +246,10 @@ async fn main() -> anyhow::Result<()> {
                 let user = NewUser {
                     name: name.clone(),
                     email: email.clone(),
-                    password: password.clone(),
                 }
                 .sqlx_create(&sqlx_pool)
                 .await?;
                 dbg!(user);
-                Ok(())
-            }
-            UsersCommand::CreateApiKey { user_id } => {
-                let user: User = User::sqlx_by_id(*user_id, &sqlx_pool).await?;
-                let api_key = user::create_api_key(&user, &sqlx_pool).await?;
-                println!("Added API key: {}", api_key);
                 Ok(())
             }
         },
@@ -741,11 +720,6 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             ExchangeRatesCommand::List => Ok(()),
-        },
-        Commands::Server(command) => match command {
-            ServerCommand::Start => server::start()
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string())),
         },
     }
 }

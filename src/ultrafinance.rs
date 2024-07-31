@@ -4,14 +4,12 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::Duration;
 use log::info;
-use paperclip::v2::schema::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::{env, thread};
 use tokio::runtime::Runtime;
-use ts_rs::TS;
 
 pub fn is_dev() -> bool {
     env::var("IS_DEVELOPMENT")
@@ -159,34 +157,6 @@ pub async fn run_triggers_for_transaction(
     Ok(())
 }
 
-pub fn hash_api_key(api_key: &str) -> String {
-    let salt = env::var("API_KEY_SALT").unwrap();
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    let api_key = format!("{}:{}", salt, api_key);
-    hasher.update(api_key);
-    let hash = hasher.finalize();
-    let hash = format!("{:x}", hash);
-
-    hash
-}
-
-pub fn hash_password(password: &str) -> anyhow::Result<String> {
-    use rand::Rng;
-    let salt: [u8; 32] = rand::thread_rng().gen();
-    let config = argon2::Config::default();
-    argon2::hash_encoded(password.as_bytes(), &salt, &config).map_err(|e| anyhow::anyhow!(e))
-}
-
-pub fn verify_password(hash: &str, password: &str) -> anyhow::Result<()> {
-    let verified =
-        argon2::verify_encoded(hash, password.as_bytes()).map_err(|e| anyhow::anyhow!(e))?;
-    match verified {
-        true => Ok(()),
-        false => Err(anyhow!("Password incorrect.")),
-    }
-}
-
 pub async fn sqlx_sync_accounts(
     accounts: &mut Vec<Account>,
     db: &sqlx::MySqlPool,
@@ -314,7 +284,11 @@ impl From<Currency> for String {
     }
 }
 
-impl Apiv2Schema for Currency {}
+impl Hash for Currency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.code().hash(state);
+    }
+}
 
 impl<'r> sqlx::Decode<'r, sqlx::MySql> for Currency {
     fn decode(
@@ -341,26 +315,6 @@ impl<'a> sqlx::Encode<'a, sqlx::MySql> for Currency {
 impl sqlx::Type<sqlx::MySql> for Currency {
     fn type_info() -> <sqlx::MySql as sqlx::Database>::TypeInfo {
         <String as sqlx::Type<sqlx::MySql>>::type_info()
-    }
-}
-
-impl TS for Currency {
-    fn name() -> String {
-        "string".to_string()
-    }
-
-    fn dependencies() -> Vec<ts_rs::Dependency> {
-        vec![]
-    }
-
-    fn transparent() -> bool {
-        false
-    }
-}
-
-impl Hash for Currency {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.code().hash(state);
     }
 }
 

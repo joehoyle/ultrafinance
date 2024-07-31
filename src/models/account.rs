@@ -3,12 +3,10 @@ use crate::ultrafinance::Currency;
 use crate::utils::display_option;
 use anyhow::Result;
 use cli_table::Table;
-
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize, Clone)]
+
 #[derive(sqlx::FromRow)]
 pub struct Account {
     #[table(title = "Account ID")]
@@ -22,7 +20,6 @@ pub struct Account {
     pub product: Option<String>,
     #[table(title = "Cash Account Type", display_fn = "display_option")]
     pub cash_account_type: Option<String>,
-    #[ts(inline)]
     pub status: String,
     pub details: String,
     pub balance: f32,
@@ -216,8 +213,8 @@ impl From<SourceAccountDetails> for NewAccount {
     }
 }
 
-#[derive(ts_rs::TS, Deserialize, Apiv2Schema)]
-#[ts(export)]
+#[derive(Deserialize)]
+
 pub struct UpdateAccount {
     pub id: Option<u32>,
     pub number: Option<String>,

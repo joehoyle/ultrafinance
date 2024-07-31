@@ -1,11 +1,8 @@
 use cli_table::Table;
-
-use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
-
 use anyhow::Result;
 
-#[derive(Serialize, Apiv2Schema, ts_rs::TS, Debug, Deserialize)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct Console(Vec<String>);
 
 impl From<Option<String>> for Console {
@@ -17,8 +14,8 @@ impl From<Option<String>> for Console {
     }
 }
 
-#[derive(Table, Debug, ts_rs::TS, Serialize, Apiv2Schema)]
-#[ts(export)]
+#[derive(Table, Debug, Serialize)]
+
 pub struct TriggerLog {
     #[table(title = "Log ID")]
     pub id: u32,
