@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Link, NavLink, Outlet, redirect, useLoaderData, useNavigate } from 'react-router-dom';
 import { User } from '../../bindings/User';
-import { deleteSession, getMe } from './api';
+import { deleteSession, getExhangesRates, getMe } from './api';
 
 const menu = [
 	{
@@ -50,6 +50,7 @@ export async function loader() {
 	try {
 		return {
 			user: await getMe(),
+			exchangeRates: await getExhangesRates(),
 		}
 	} catch (e) {
 		return redirect('/login');

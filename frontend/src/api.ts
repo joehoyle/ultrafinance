@@ -5,6 +5,7 @@ import { UpdateFunction } from '../../bindings/UpdateFunction';
 import { CreateFunction } from '../../bindings/CreateFunction';
 import type { Institution } from '../../bindings/Institution';
 import type { Requisition } from '../../bindings/Requisition';
+import type { ExchangeRate } from '../../bindings/ExchangeRate';
 import { TransactionWithMerchant } from '../../bindings/TransactionWithMerchant';
 import { Transaction } from '../../bindings/Transaction';
 import { Trigger } from '../../bindings/Trigger';
@@ -170,6 +171,10 @@ export async function createSession(details: CreateSession): Promise<User> {
 
 export async function deleteSession(): Promise<null> {
 	return (await request(`/users/session`, 'DELETE')) as null;
+}
+
+export async function getExhangesRates() : Promise<ExchangeRate> {
+	return (await request(`/exchange-rate`, 'GET')) as ExchangeRate;
 }
 
 export async function request(

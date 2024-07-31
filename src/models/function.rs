@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+
 use cli_table::Table;
 
 use paperclip::actix::Apiv2Schema;
 use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
+
+use crate::ultrafinance::TransactionDestination;
 
 #[derive(Table, Serialize, Apiv2Schema, ts_rs::TS, sqlx::FromRow)]
 pub struct Function {
@@ -25,10 +29,28 @@ pub struct Function {
     pub updated_at: chrono::NaiveDateTime,
 }
 
+#[derive(Deserialize, Debug, Serialize, Apiv2Schema, ts_rs::TS)]
+#[allow(dead_code)]
+pub struct FunctionParam {
+    pub name: String,
+    pub r#type: String,
+}
+
+pub type FunctionParams = HashMap<String, FunctionParam>;
+
 impl Function {
-    pub async fn get_params(&self) -> anyhow::Result<crate::deno::FunctionParams> {
-        let mut runtime = crate::deno::FunctionRuntime::new(self).await?;
-        runtime.get_params()
+    pub fn get_destination(&self, config: &str) -> Result<Box<dyn TransactionDestination + Send>, anyhow::Error> {
+        match self.function_type.as_str() {
+            "lunchmoney" => Ok(Box::new(crate::functions::lunchmoney::Lunchmoney::new(config)?) as Box<dyn TransactionDestination + Send>),
+            _ => Err(anyhow::anyhow!("No destination found for function type {}", self.function_type)),
+        }
+    }
+
+    pub async fn get_params(&self) -> anyhow::Result<FunctionParams> {
+        match self.function_type.as_str() {
+            "lunchmoney" => crate::functions::lunchmoney::get_params().await,
+            _ => Err(anyhow::anyhow!("No destination found for function type {}", self.function_type)),
+        }
     }
 
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {

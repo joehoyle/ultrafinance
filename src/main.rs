@@ -4,6 +4,7 @@ use cli_table::{print_stdout, WithTitle};
 use dotenvy::dotenv;
 use nordigen::Nordigen;
 use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
+use ultrafinance::Currency;
 use std::{env, time::Duration};
 
 use crate::accounts::{get_source_account, SourceAccount};
@@ -11,7 +12,7 @@ use crate::accounts::{get_source_account, SourceAccount};
 pub use self::models::*;
 
 pub mod accounts;
-pub mod deno;
+// pub mod deno;
 pub mod endpoints;
 pub mod gpt_enricher;
 pub mod models;
@@ -20,6 +21,9 @@ pub mod ntropy;
 pub mod server;
 pub mod ultrafinance;
 pub mod utils;
+pub mod exchangerate_api;
+pub mod synth_api;
+pub mod functions;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -51,6 +55,8 @@ enum Commands {
     Triggers(TriggersCommand),
     #[command(subcommand)]
     Merchants(MerchantsCommand),
+    #[command(subcommand)]
+    ExchangeRates(ExchangeRatesCommand),
     #[command(subcommand)]
     Server(ServerCommand),
 }
@@ -172,6 +178,12 @@ enum TriggersCommand {
     Queue(TriggersQueueCommand),
     #[command(subcommand)]
     Log(TriggersLogCommand),
+    Run {
+        #[arg(long)]
+        trigger_id: u32,
+        #[arg(long)]
+        transaction_id: u32,
+    }
 }
 
 #[derive(Subcommand)]
@@ -215,6 +227,15 @@ enum TransactionsCommand {
 #[derive(Subcommand)]
 enum ServerCommand {
     Start,
+}
+
+#[derive(Subcommand)]
+enum ExchangeRatesCommand {
+    Update {
+        #[arg(long)]
+        code: String,
+    },
+    List,
 }
 
 #[tokio::main]
@@ -581,6 +602,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(())
                 }
             },
+            TriggersCommand::Run { trigger_id, transaction_id } => {
+                let transaction = Transaction::sqlx_by_id(*transaction_id, &sqlx_pool).await?;
+                let trigger = Trigger::sqlx_by_id(*trigger_id, &sqlx_pool).await?;
+                trigger.sqlx_run(&transaction, &sqlx_pool);
+                Ok(())
+            }
         },
         Commands::Transactions(command) => match command {
             TransactionsCommand::List => {
@@ -602,13 +629,9 @@ async fn main() -> anyhow::Result<()> {
             }
             TransactionsCommand::Enrich { id } => {
                 let transaction = Transaction::sqlx_by_id(*id, &sqlx_pool).await?;
-                let client = gpt_enricher::Client::new(env::var("OPENAI_API_KEY").unwrap());
-                dbg!(client.get_merchants(&vec![transaction]).await);
-
-                // let enriched_transaction = client
-                //     .async_enrich_transactions(vec![transaction.into()])
-                //     .await?;
-                // println!("Enriched transaction: {:?}", enriched_transaction);
+                let merchant = synth_api::Client::new(env::var("SYNTH_API_KEY").unwrap())
+                    .get_merchants(&vec![transaction])
+                    .await?;
                 Ok(())
             }
             TransactionsCommand::AssignMerchants {} => {
@@ -635,6 +658,19 @@ async fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Commands::ExchangeRates(command) => match command {
+            ExchangeRatesCommand::Update { code } => {
+                let exchange_rate = exchangerate_api::Client::new(env::var("EXCHANGERATE_API_KEY").unwrap())
+                    .get_exchange_rate(&Currency::try_from(code.clone())?)
+                    .await?;
+                exchange_rate.create_or_update(&sqlx_pool).await?;
+                Ok(())
+            }
+            ExchangeRatesCommand::List => {
+                Ok(())
+            }
+
+        }
         Commands::Server(command) => match command {
             ServerCommand::Start =>
                 server::start()

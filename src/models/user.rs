@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-use crate::ultrafinance::{hash_api_key, hash_password};
+use crate::ultrafinance::{hash_api_key, hash_password, Currency};
 
 #[derive(Table, Debug, Serialize, ts_rs::TS, Apiv2Schema, Clone, sqlx::FromRow)]
 #[ts(export)]
@@ -17,7 +17,10 @@ pub struct User {
     #[table(title = "Email")]
     pub email: String,
     #[serde(skip_serializing)]
+    #[table(skip)]
     pub(crate) password: String,
+    // #[table(title = "Currency")]
+    // pub primary_currency: Currency,
     #[table(title = "Date Created")]
     pub created_at: chrono::NaiveDateTime,
     #[table(title = "Updated At")]
@@ -26,8 +29,7 @@ pub struct User {
 
 impl User {
     pub async fn sqlx_all(db: &sqlx::MySqlPool) -> Result<Vec<Self>, anyhow::Error> {
-        sqlx::QueryBuilder::new("SELECT * FROM users")
-            .build_query_as::<Self>()
+        sqlx::query_as!(Self, "SELECT * FROM users")
             .fetch_all(db)
             .await
             .map_err(|e| anyhow::anyhow!(e))
@@ -75,14 +77,17 @@ pub struct UpdateUser {
     pub name: Option<String>,
     pub email: Option<String>,
     pub password: Option<String>,
+    // pub primary_currency: Option<Currency>,
 }
 
 impl UpdateUser {
     pub async fn sqlx_update(self, db: &sqlx::MySqlPool) -> Result<User, anyhow::Error> {
+        //let _ = sqlx::query("UPDATE users SET name = ?, email = ?, password = ?, primary_currency = ? WHERE id = ?")
         let _ = sqlx::query("UPDATE users SET name = ?, email = ?, password = ? WHERE id = ?")
             .bind(&self.name)
             .bind(&self.email)
             .bind(&self.password)
+            // .bind(&self.primary_currency)
             .bind(&self.id)
             .execute(db)
             .await

@@ -157,7 +157,7 @@ impl From<Transaction> for TransactionInput {
                 "incoming".to_string()
             },
             amount: amount.abs(),
-            iso_currency_code: transaction.transaction_amount_currency,
+            iso_currency_code: transaction.transaction_amount_currency.to_string(),
             date: transaction.booking_date,
             transaction_id: transaction.id.to_string(),
             country: None,

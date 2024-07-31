@@ -2,11 +2,11 @@ use crate::{NewMerchant, Transaction};
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionFunctionsArgs, ChatCompletionRequestFunctionMessageArgs,
+        ChatCompletionFunctionsArgs,
         ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, Role,
     },
 };
-use deno_ast::swc::common::util::take::Take;
+
 use futures::{stream::FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;

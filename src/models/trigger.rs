@@ -8,6 +8,8 @@ use anyhow::Result;
 
 use crate::models::Transaction;
 
+use super::Function;
+
 #[derive(Deserialize, Serialize, Debug, ts_rs::TS, Apiv2Schema)]
 #[ts(export)]
 pub enum TriggerFilterPredicate {
@@ -138,6 +140,12 @@ impl Trigger {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         Ok(())
+    }
+
+    pub async fn sqlx_run(&self, transaction: &Transaction, db: &sqlx::MySqlPool) -> Result<(), anyhow::Error> {
+        let function = Function::sqlx_by_id(self.function_id, db).await?;
+        let destination = function.get_destination(serde_json::to_string(&self.params).unwrap().as_str())?;
+        destination.transaction_created(transaction).await
     }
 }
 

@@ -1,11 +1,17 @@
 use crate::accounts::SourceAccount;
-use crate::models::*;
+use crate::{models::*, synth_api};
 use anyhow::anyhow;
 use chrono::Duration;
 use log::info;
+use paperclip::actix::Apiv2Schema;
+use paperclip::v2::schema::Apiv2Schema;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
-
+use ts_rs::TS;
+use async_trait::async_trait;
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::hash::Hash;
 use std::{env, thread};
 
 pub fn is_dev() -> bool {
@@ -31,17 +37,30 @@ pub async fn sqlx_import_transactions(
         .map(|t| t.booking_date - Duration::days(7))
         .ok();
 
-    info!("Date of latest transaction for account minus 1 week to account for pending: {:?}", from_date);
+    info!(
+        "Date of latest transaction for account minus 1 week to account for pending: {:?}",
+        from_date
+    );
 
     let account_clone = account.clone();
-    let other_transactions = account_clone.source()?.transactions(&from_date, &None).await?;
+    let other_transactions = account_clone
+        .source()?
+        .transactions(&from_date, &None)
+        .await?;
 
-    info!("Found {} transactions for account: {}", other_transactions.len(), account.id);
+    info!(
+        "Found {} transactions for account: {}",
+        other_transactions.len(),
+        account.id
+    );
 
     let mut new_transactions: Vec<transaction::NewTransaction> = vec![];
     for transaction in other_transactions {
         let exists = sqlx::query_scalar!(
-            "SELECT EXISTS(SELECT 1 FROM transactions WHERE external_id = ? AND account_id = ?)", &transaction.id, &account.id)
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE external_id = ? AND account_id = ?)",
+            &transaction.id,
+            &account.id
+        )
         .fetch_one(db)
         .await?;
         if exists > 0 {
@@ -89,13 +108,21 @@ pub async fn sqlx_import_transactions(
     .fetch_all(db)
     .await?;
 
-    info!("Sucessfully imported {} transactions for account: {}", inserted_transactions.len(), account.id);
+    info!(
+        "Sucessfully imported {} transactions for account: {}",
+        inserted_transactions.len(),
+        account.id
+    );
 
     // Enrich the transactions that were inserted
     let inserted_transactions = sqlx_enrich_transactions(inserted_transactions, db).await?;
     // TODO: reenable when we have credits.
 
-    info!("Enriched {} transactions for account: {}", inserted_transactions.len(), account.id);
+    info!(
+        "Enriched {} transactions for account: {}",
+        inserted_transactions.len(),
+        account.id
+    );
 
     // Create the triggers
     for transaction in &inserted_transactions {
@@ -116,7 +143,10 @@ pub async fn sqlx_create_transaction_trigger_queue(
         .filter(|trigger| trigger.filter.matches(transaction))
         .collect::<Vec<Trigger>>();
 
-    info!("Adding {} triggers for transaction.", transaction_triggers.len());
+    info!(
+        "Adding {} triggers for transaction.",
+        transaction_triggers.len()
+    );
 
     for transaction_trigger in &transaction_triggers {
         NewTriggerQueue {
@@ -195,7 +225,12 @@ pub async fn sqlx_process_trigger_queue(
             info!("Processing trigger queue: {}", id);
             // Use the handle to the runtime to block on the future
             let result = rt_handle.block_on(async move {
-                let pool = db.options().clone().connect(env::var("DATABASE_URL").unwrap().as_str()).await.unwrap();
+                let pool = db
+                    .options()
+                    .clone()
+                    .connect(env::var("DATABASE_URL").unwrap().as_str())
+                    .await
+                    .unwrap();
                 q.sqlx_run(&pool).await
             });
             dbg!(&result);
@@ -218,14 +253,15 @@ pub async fn sqlx_enrich_transactions(
     transactions: Vec<Transaction>,
     db: &sqlx::MySqlPool,
 ) -> anyhow::Result<Vec<Transaction>> {
-    let client = crate::gpt_enricher::Client::new(env::var("OPENAI_API_KEY").unwrap());
-    let enriched_transactions = client
+    let enriched_transactions = synth_api::Client::new(env::var("SYNTH_API_KEY").unwrap())
         .get_merchants(&transactions)
         .await?;
-    let mut transactions: Vec<Transaction> = vec![];
+    let mut returned_transactions: Vec<Transaction> = vec![];
+    let mut matched_enriched_transactions: Vec<u32> = vec![];
 
-    for (t_id, merchant ) in enriched_transactions {
+    for (t_id, merchant) in enriched_transactions {
         let mut transaction: Transaction = Transaction::sqlx_by_id(t_id, db).await?;
+        matched_enriched_transactions.push(t_id);
         match merchant.sqlx_create_or_fetch(db).await {
             Ok(merchant) => {
                 transaction.merchant_id = Some(merchant.id);
@@ -236,10 +272,18 @@ pub async fn sqlx_enrich_transactions(
                 continue;
             }
         }
-        transactions.push(transaction);
+        returned_transactions.push(transaction);
     }
 
-    Ok(transactions)
+    // Push any transactions we were passed that didn't get enriched
+    for transaction in transactions {
+        if matched_enriched_transactions.contains(&transaction.id) {
+            continue;
+        }
+        returned_transactions.push(transaction);
+    }
+
+    Ok(returned_transactions)
 }
 
 mod tests {
@@ -288,4 +332,95 @@ mod tests {
     //         }
     //     });
     // }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct Currency(iso_currency::Currency);
+
+impl Display for Currency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.code())
+    }
+}
+
+impl From<String> for Currency {
+    fn from(s: String) -> Self {
+        Currency(iso_currency::Currency::from_code(&s).unwrap_or(iso_currency::Currency::USD))
+    }
+}
+
+impl From<Currency> for String {
+    fn from(c: Currency) -> Self {
+        c.to_string()
+    }
+}
+
+impl Apiv2Schema for Currency {}
+
+impl<'r> sqlx::Decode<'r, sqlx::MySql> for Currency {
+    fn decode(
+        value: <sqlx::MySql as sqlx::database::HasValueRef<'r>>::ValueRef,
+    ) -> std::result::Result<Currency, Box<(dyn std::error::Error + Send + Sync + 'static)>> {
+        let s: String = sqlx::Decode::<'r, sqlx::MySql>::decode(value)?;
+        Currency::try_from(s).map_err(|e| e.into())
+    }
+}
+
+impl<'a> sqlx::Encode<'a, sqlx::MySql> for Currency {
+    fn size_hint(&self) -> usize {
+        0
+    }
+
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::MySql as sqlx::database::HasArguments<'a>>::ArgumentBuffer,
+    ) -> sqlx::encode::IsNull {
+        sqlx::Encode::<'a, sqlx::MySql>::encode_by_ref(&self.0.code(), buf)
+    }
+}
+
+impl sqlx::Type<sqlx::MySql> for Currency {
+    fn type_info() -> <sqlx::MySql as sqlx::Database>::TypeInfo {
+        <String as sqlx::Type<sqlx::MySql>>::type_info()
+    }
+}
+
+impl TS for Currency {
+    fn name() -> String {
+        "string".to_string()
+    }
+
+    fn dependencies() -> Vec<ts_rs::Dependency> {
+        vec![]
+    }
+
+    fn transparent() -> bool {
+        false
+    }
+}
+
+impl Hash for Currency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.code().hash(state);
+    }
+}
+
+impl Currency {
+    fn try_from(s: String) -> Result<Self, anyhow::Error> {
+        Ok(Currency(
+            iso_currency::Currency::from_code(&s).ok_or(anyhow!("Invalid currency code."))?,
+        ))
+    }
+
+    pub fn used_by(&self) -> Vec<&str> {
+        self.0.used_by().iter().map(|c| c.name()).collect()
+    }
+}
+
+
+#[async_trait]
+pub trait TransactionDestination {
+    // fn new(params: &str) -> Result<Self, anyhow::Error> where Self: Sized;
+    async fn transaction_created(&self, transaction: &Transaction) -> Result<(), anyhow::Error>;
+    // async fn get_params() -> Result<FunctionParams, anyhow::Error>;
 }

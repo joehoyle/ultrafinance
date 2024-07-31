@@ -4,9 +4,9 @@ use paperclip::actix::Apiv2Schema;
 use paperclip::actix::{api_v2_operation, web::Json};
 use serde::{Deserialize, Serialize};
 
-use crate::deno::StdioMsg;
 use crate::models::{Function, NewFunction, UpdateFunction, User};
 use crate::server::{AppState, Error};
+use crate::FunctionParams;
 
 #[derive(Serialize, Apiv2Schema, ts_rs::TS)]
 #[ts(rename = "Function", export)]
@@ -14,7 +14,7 @@ pub struct FunctionWithParams {
     #[serde(flatten)]
     function: Function,
     #[ts(inline)]
-    params: Option<crate::deno::FunctionParams>,
+    params: Option<FunctionParams>,
 }
 
 #[api_v2_operation]
@@ -106,7 +106,7 @@ pub struct TestFunction {
 #[ts(export)]
 pub struct TestFunctionResult {
     pub result: String,
-    pub console: Vec<StdioMsg>,
+    pub console: Vec<String>,
 }
 
 #[api_v2_operation]
@@ -116,19 +116,20 @@ pub async fn test_function_endpoint(
     data: web::Json<TestFunction>,
     path: web::Path<u32>,
 ) -> Result<Json<TestFunctionResult>, Error> {
-    let db = &state.sqlx_pool;
-    let function_id: u32 = path.into_inner();
-    let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
-    let test_data = data.into_inner();
-    let mut deno_runtime = crate::deno::FunctionRuntime::new(&function).await?;
-    let result = deno_runtime
-        .run(&test_data.params, &test_data.payload)
-        .await?;
+    // let db = &state.sqlx_pool;
+    // let function_id: u32 = path.into_inner();
+    // let function = Function::sqlx_by_id_by_user(function_id, user.id, db).await?;
+    // let test_data = data.into_inner();
+    // let mut deno_runtime = crate::deno::FunctionRuntime::new(&function).await?;
+    // let result = deno_runtime
+    //     .run(&test_data.params, &test_data.payload)
+    //     .await?;
 
-    Ok(Json(TestFunctionResult {
-        result,
-        console: deno_runtime.get_output().await,
-    }))
+    // Ok(Json(TestFunctionResult {
+    //     result,
+    //     console: deno_runtime.get_output().await,
+    // }))
+    Err(anyhow::anyhow!("Not implemented").into())
 }
 
 #[api_v2_operation]

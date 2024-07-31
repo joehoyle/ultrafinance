@@ -7,6 +7,7 @@ pub mod trigger;
 pub mod trigger_log;
 pub mod trigger_queue;
 pub mod user;
+pub mod exchange_rate;
 
 pub use account::*;
 pub use function::*;

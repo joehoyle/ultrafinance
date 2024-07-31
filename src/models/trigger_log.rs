@@ -5,10 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
 
-use crate::deno::StdioMsg;
-
 #[derive(Serialize, Apiv2Schema, ts_rs::TS, Debug, Deserialize)]
-pub struct Console(Vec<StdioMsg>);
+pub struct Console(Vec<String>);
 
 impl From<Option<String>> for Console {
     fn from(s: Option<String>) -> Self {
@@ -69,7 +67,7 @@ impl TriggerLog {
 #[derive(Default, Debug, sqlx::FromRow)]
 pub struct NewTriggerLog {
     pub payload: String,
-    pub console: Vec<StdioMsg>,
+    pub console: Vec<String>,
     pub status: String,
     pub user_id: u32,
     pub trigger_id: u32,

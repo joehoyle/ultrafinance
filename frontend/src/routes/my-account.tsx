@@ -6,6 +6,7 @@ import Button from "../components/Button";
 import Input from "../components/forms/Input";
 import PageHeader from "../components/PageHeader";
 import FormDataToJson from "../utils/FormDataToJson";
+import currencySymbols from "../utils/currency-symbols";
 
 export async function action({ request }: { request: Request }) {
 	const formData = await request.formData();
@@ -28,6 +29,13 @@ export default function MyAccount() {
 					<span>Email</span>
 					<Input name="email" defaultValue={user.email} type="email" />
 				</label>
+				<label className="flex flex-col text-xs">
+					<span>Primary Currency</span>
+					<select name="primary_currency" className="text-xs text-gray-700 border rounded-sm w-full border-gray-200 bg-white px-2 py-2 outline-none focus:border-purple-400 focus:dark:border-purple-400">
+						{Object.entries(currencySymbols).map(([code, symbol]) => <option selected={ user.primary_currency === code } key={code} value={code}>{code} ({symbol})</option>)}
+					</select>
+				</label>
+
 				<label className="flex flex-col text-xs">
 					<span>Password</span>
 					<Input name="password" placeholder="Enter new password..." type="password" />

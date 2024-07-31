@@ -32,6 +32,10 @@ variable "openai_api_key" {
   type = string
 }
 
+variable "exchangerate_api_key" {
+  type = string
+}
+
 provider "aws" {
   region  = "eu-central-1"
   profile = "sub_account"
@@ -191,6 +195,10 @@ resource "aws_ecs_task_definition" "web" {
         {
           name = "OPENAI_API_KEY"
           value = var.openai_api_key
+        },
+        {
+          name = "EXCHANGERATE_API_KEY"
+          value = var.exchangerate_api_key
         }
       ],
       logConfiguration: {

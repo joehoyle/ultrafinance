@@ -326,7 +326,11 @@ pub async fn start() -> std::io::Result<()> {
                     .service(
                         web::resource("/users")
                             .route(web::post().to(endpoints::users::create_user_endpoint)),
-                    ),
+                    )
+                    // .service(
+                    //     web::resource("/exchange-rate")
+                    //         .route(web::get().to(endpoints::exchange_rates::get_exchange_rate)),
+                    // ),
             )
             .build()
             .route("/", actix_web::web::get().to(index))
@@ -350,7 +354,7 @@ pub async fn start() -> std::io::Result<()> {
             .route("/logs", actix_web::web::get().to(index))
             .route("/account", actix_web::web::get().to(index))
     })
-    .bind(("0.0.0.0", 3000))?
+    .bind(("0.0.0.0", env::var("PORT").unwrap_or("3000".to_string()).parse::<u16>().unwrap()))?
     .run()
     .await
 }
@@ -361,10 +365,10 @@ pub async fn get_user_by_api_key(
 ) -> Result<User, anyhow::Error> {
     let hashed = hash_api_key(raw_api_key.as_str());
 
-    sqlx::query_as::<_, User>(
+    sqlx::query_as!(User,
         "SELECT * FROM users WHERE id = (SELECT user_id FROM user_api_keys WHERE api_key = ?)",
+        hashed
     )
-    .bind(hashed)
     .fetch_one(db)
     .await
     .map_err(|e| anyhow::anyhow!(e))

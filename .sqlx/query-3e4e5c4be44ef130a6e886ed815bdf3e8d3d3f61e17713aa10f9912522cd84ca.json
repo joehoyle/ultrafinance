@@ -62,12 +62,23 @@
           "char_set": 224,
           "max_size": 1020
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "primary_currency",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "char_set": 224,
+          "max_size": 16
+        }
       }
     ],
     "parameters": {
       "Right": 1
     },
     "nullable": [
+      false,
       false,
       false,
       false,

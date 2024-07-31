@@ -1,4 +1,5 @@
 use crate::accounts::{get_source_account, SourceAccount, SourceAccountDetails};
+use crate::ultrafinance::Currency;
 use crate::utils::display_option;
 use anyhow::Result;
 use cli_table::Table;
@@ -16,7 +17,7 @@ pub struct Account {
     pub name: String,
     #[table(title = "Type")]
     pub account_type: String,
-    pub currency: String,
+    pub currency: Currency,
     #[table(title = "Product", display_fn = "display_option")]
     pub product: Option<String>,
     #[table(title = "Cash Account Type", display_fn = "display_option")]

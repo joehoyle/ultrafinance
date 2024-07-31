@@ -1,4 +1,4 @@
-use crate::accounts::SourceTransaction;
+use crate::{accounts::SourceTransaction, ultrafinance::Currency};
 use crate::utils::display_option;
 use cli_table::Table;
 
@@ -29,7 +29,7 @@ pub struct Transaction {
     #[table(title = "Amount")]
     pub transaction_amount: String,
     #[table(title = "Currency")]
-    pub transaction_amount_currency: String,
+    pub transaction_amount_currency: Currency,
     #[table(
         title = "Proprietary Bank Transaction Code",
         display_fn = "display_option"

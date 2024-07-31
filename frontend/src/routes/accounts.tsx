@@ -1,4 +1,4 @@
-import { Await, defer, Link, useLoaderData } from "react-router-dom";
+import { Await, defer, Link, useLoaderData, useRouteLoaderData } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import type { Account } from "../../../bindings/Account";
 import { getAccounts } from "../api";
@@ -6,6 +6,9 @@ import AccountsList from "../components/AccountsList";
 import { Suspense } from "react";
 import LoadingList from "../components/LoadingList";
 import Button from "../components/Button";
+import { ExchangeRate } from "../../../bindings/ExchangeRate";
+import { User } from "../../../bindings/User";
+import currencySymbols from "../utils/currency-symbols";
 
 type Data = {
 	accounts: Account[],
@@ -34,9 +37,28 @@ export default function Accounts() {
 			<Suspense fallback={<LoadingList />}>
 				<Await resolve={accounts}>
 					{(accounts: Account[]) => {
-						const total_balance = accounts.reduce((total, account) => total + Number(account.balance), 0);
+						const { exchangeRates, user } = useRouteLoaderData("app") as { exchangeRates: ExchangeRate, user: User };
+						const total_balance = accounts.reduce((total, account) => {
+							console.log(exchangeRates.conversion_rates[account.currency], account.balance);
+							const primary_currency_balance = exchangeRates.conversion_rates[account.currency] * account.balance;
+							console.log(primary_currency_balance)
+							if ( isNaN(primary_currency_balance) ) {
+								return total;
+							}
+							total += primary_currency_balance;
+							return total;
+						}, 0 );
 						return (
 							<div>
+								<div className="flex justify-end">
+									<div className="w-24 m-2 text-right sm:text-left">
+										<span>Total</span>
+										<div className="text-lg">
+											{ currencySymbols[ user.primary_currency as keyof typeof currencySymbols ] }
+											{ total_balance.toFixed(2) }
+										</div>
+									</div>
+								</div>
 								<AccountsList accounts={accounts} />
 							</div>
 						)
