@@ -64,8 +64,6 @@ enum UsersCommand {
         name: String,
         #[arg(long)]
         email: String,
-        #[arg(long)]
-        password: String,
     }
 }
 
@@ -241,7 +239,6 @@ async fn main() -> anyhow::Result<()> {
             UsersCommand::Add {
                 name,
                 email,
-                password,
             } => {
                 let user = NewUser {
                     name: name.clone(),

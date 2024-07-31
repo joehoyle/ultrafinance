@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::{env, thread};
-use tokio::runtime::Runtime;
+use std::{env};
 
 pub fn is_dev() -> bool {
     env::var("IS_DEVELOPMENT")
