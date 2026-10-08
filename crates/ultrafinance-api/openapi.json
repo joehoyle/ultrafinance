@@ -176,6 +176,198 @@
           }
         }
       }
+    },
+    "/v1/enrich/batch": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Enrich 1 to 100 transactions, preserving input order.\nEach transaction has an isolated provider question. Verified exact matches and\nempty candidate sets resolve locally. Provider calls are packed within byte\nbudgets, with at most four in flight. Invalid transactions and provider failures\nproduce per-item errors alongside successful results. The body limit is 1 MiB;\nthe overall deadline is 55 seconds, after which the whole request returns 504.",
+        "operationId": "enrich_batch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchEnrichRequest"
+              },
+              "example": {
+                "transactions": [
+                  {
+                    "country": "CA",
+                    "description": "EXAMPLE CAFE"
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ordered results, including per-item failures",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchEnrichResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Missing or unsupported JSON content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid envelope or transaction count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Batch exceeded the 55-second deadline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/merchants": {
+      "get": {
+        "tags": [
+          "Merchants"
+        ],
+        "summary": "Explore the merchant catalog without calling the AI provider.\nBrowsing is alphabetical; search ranks a bounded candidate pool rather than\nmatching every catalog row. Search totals refer to that pool (at most 255 for\nexact alias collisions, otherwise 100), not the full catalog. Results include\nmerchant records only, without internal scoring or import evidence.",
+        "operationId": "merchants",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "path",
+            "description": "Optional name or alias search; at most 256 bytes. Searches return a bounded candidate pool.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "country",
+            "in": "path",
+            "description": "Two-letter uppercase country code. Search also includes merchants with unknown country.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "Page size, from 1 to 100. Defaults to 20.",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "path",
+            "description": "Number of results to skip, up to 1,000,000. Defaults to 0.",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated catalog records or ranked search candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MerchantPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Catalog query timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -190,6 +382,82 @@
             "$ref": "#/components/schemas/ErrorDetail"
           }
         }
+      },
+      "BatchEnrichRequest": {
+        "type": "object",
+        "required": [
+          "transactions"
+        ],
+        "properties": {
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichRequest"
+            },
+            "description": "Between 1 and 100 transactions. Results preserve this order.",
+            "maxItems": 100,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "BatchEnrichResponse": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchItemResult"
+            }
+          }
+        }
+      },
+      "BatchItemResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "status"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/EnrichResponse"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "status"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          }
+        ]
       },
       "EnrichRequest": {
         "type": "object",
@@ -342,6 +610,35 @@
         },
         "additionalProperties": false
       },
+      "MerchantPage": {
+        "type": "object",
+        "required": [
+          "merchants",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "merchants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Merchant"
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "MerchantResult": {
         "oneOf": [
           {
@@ -390,6 +687,10 @@
     {
       "name": "Enrichment",
       "description": "Resolve bank descriptions against the merchant catalog"
+    },
+    {
+      "name": "Merchants",
+      "description": "Browse and search the merchant catalog"
     },
     {
       "name": "Health",

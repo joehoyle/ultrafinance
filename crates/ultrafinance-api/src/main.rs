@@ -1,23 +1,27 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderValue, StatusCode, header},
     middleware,
     response::{Html, IntoResponse, Response},
     routing::get,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{env, sync::Arc, time::Duration};
+use ultrafinance_core::batch::{BatchEnrichRequest, BatchEnrichResponse, BatchItemResult};
 use ultrafinance_core::{EnrichRequest, EnrichResponse, Enricher};
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_scalar::{Scalar, Servable};
 
 #[derive(OpenApi)]
 #[openapi(
     info(title = "Ultrafinance API", description = "Synchronous merchant enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication."),
-    tags((name = "Enrichment", description = "Resolve bank descriptions against the merchant catalog"), (name = "Health", description = "Service liveness"))
+    tags((name = "Enrichment", description = "Resolve bank descriptions against the merchant catalog"), (name = "Merchants", description = "Browse and search the merchant catalog"), (name = "Health", description = "Service liveness"))
 )]
 struct ApiDoc;
 
@@ -44,6 +48,12 @@ fn api_router() -> (Router<Arc<Enricher>>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(health))
         .routes(routes!(enrich))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(enrich_batch))
+                .layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .routes(routes!(merchants))
         .layer(middleware::map_response(no_index))
         .split_for_parts()
 }
@@ -135,6 +145,90 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+struct MerchantQuery {
+    /// Optional name or alias search; at most 256 bytes. Searches return a bounded candidate pool.
+    q: Option<String>,
+    /// Two-letter uppercase country code. Search also includes merchants with unknown country.
+    country: Option<String>,
+    /// Page size, from 1 to 100. Defaults to 20.
+    limit: Option<usize>,
+    /// Number of results to skip, up to 1,000,000. Defaults to 0.
+    offset: Option<usize>,
+}
+
+/// Explore the merchant catalog without calling the AI provider.
+/// Browsing is alphabetical; search ranks a bounded candidate pool rather than
+/// matching every catalog row. Search totals refer to that pool (at most 255 for
+/// exact alias collisions, otherwise 100), not the full catalog. Results include
+/// merchant records only, without internal scoring or import evidence.
+#[utoipa::path(get, path = "/v1/merchants", tag = "Merchants",
+    params(MerchantQuery),
+    responses(
+        (status = 200, description = "Paginated catalog records or ranked search candidates", body = ultrafinance_core::store::MerchantPage),
+        (status = 400, description = "Invalid query parameters", body = ApiError),
+        (status = 503, description = "Catalog unavailable", body = ApiError),
+        (status = 504, description = "Catalog query timed out", body = ApiError)
+    )
+)]
+async fn merchants(
+    State(enricher): State<Arc<Enricher>>,
+    query: Result<Query<MerchantQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(error) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                &error.body_text(),
+            );
+        }
+    };
+    let q = query
+        .q
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let country = query.country.filter(|value| !value.is_empty());
+    let limit = query.limit.unwrap_or(20);
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=100).contains(&limit)
+        || offset > 1_000_000
+        || q.as_ref().is_some_and(|value| value.len() > 256)
+        || country
+            .as_ref()
+            .is_some_and(|value| value.len() != 2 || !value.bytes().all(|c| c.is_ascii_uppercase()))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Use limit 1–100, offset 0–1000000, a search of at most 256 bytes, and a two-letter uppercase country code",
+        );
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(50),
+        enricher.list_merchants(q, country, limit, offset),
+    )
+    .await
+    {
+        Ok(Ok(page)) => Json(page).into_response(),
+        Ok(Err(error)) => {
+            eprintln!("Catalog query failed: {error:#}");
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "catalog_unavailable",
+                "The merchant catalog is unavailable. Please try again.",
+            )
+        }
+        Err(_) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "catalog_timeout",
+            "The merchant catalog query timed out",
+        ),
+    }
+}
+
 /// Enrich a transaction with a merchant from the catalog.
 ///
 /// Only description is required; unknown top-level fields are rejected. The JSON body
@@ -178,7 +272,7 @@ async fn enrich(
             &error.to_string(),
         );
     }
-    match tokio::time::timeout(Duration::from_secs(25), enricher.enrich(&request)).await {
+    match tokio::time::timeout(Duration::from_secs(55), enricher.enrich(&request)).await {
         Ok(Ok(result)) => Json(result).into_response(),
         Ok(Err(error)) => {
             eprintln!("Enrichment failed: {error:#}");
@@ -192,6 +286,77 @@ async fn enrich(
             StatusCode::GATEWAY_TIMEOUT,
             "enrichment_timeout",
             "Merchant evaluation timed out",
+        ),
+    }
+}
+
+/// Enrich 1 to 100 transactions, preserving input order.
+/// Each transaction has an isolated provider question. Verified exact matches and
+/// empty candidate sets resolve locally. Provider calls are packed within byte
+/// budgets, with at most four in flight. Invalid transactions and provider failures
+/// produce per-item errors alongside successful results. The body limit is 1 MiB;
+/// the overall deadline is 55 seconds, after which the whole request returns 504.
+#[utoipa::path(post, path = "/v1/enrich/batch", tag = "Enrichment",
+    request_body(content = BatchEnrichRequest, example = json!({"transactions":[{"description":"EXAMPLE CAFE","country":"CA"}]})),
+    responses(
+        (status = 200, description = "Ordered results, including per-item failures", body = BatchEnrichResponse),
+        (status = 400, description = "Malformed JSON", body = ApiError),
+        (status = 413, description = "Request body exceeds 1 MiB", body = ApiError),
+        (status = 415, description = "Missing or unsupported JSON content type", body = ApiError),
+        (status = 422, description = "Invalid envelope or transaction count", body = ApiError),
+        (status = 504, description = "Batch exceeded the 55-second deadline", body = ApiError)
+    )
+)]
+async fn enrich_batch(
+    State(enricher): State<Arc<Enricher>>,
+    payload: Result<Json<BatchEnrichRequest>, JsonRejection>,
+) -> Response {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return api_error(error.status(), "invalid_request", &error.body_text()),
+    };
+    if let Err(error) = request.validate() {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            &error.to_string(),
+        );
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(55),
+        enricher.enrich_batch(&request.transactions),
+    )
+    .await
+    {
+        Ok(outcomes) => {
+            let results = request
+                .transactions
+                .iter()
+                .zip(outcomes)
+                .map(|(request, outcome)| match outcome {
+                    Ok(data) => BatchItemResult::Success { data },
+                    Err(error) => {
+                        if let Err(validation) = request.validate() {
+                            BatchItemResult::Error {
+                                code: "invalid_request".into(),
+                                message: validation.to_string(),
+                            }
+                        } else {
+                            eprintln!("Batch enrichment failed: {error:#}");
+                            BatchItemResult::Error {
+                                code: "enrichment_failed".into(),
+                                message: "Merchant evaluation failed".into(),
+                            }
+                        }
+                    }
+                })
+                .collect();
+            Json(BatchEnrichResponse { results }).into_response()
+        }
+        Err(_) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "enrichment_timeout",
+            "Merchant batch evaluation timed out",
         ),
     }
 }
@@ -215,8 +380,15 @@ async fn main() -> Result<()> {
         println!("{}", api_router().1.to_pretty_json()?);
         return Ok(());
     }
+    let database_url = env::var("ULTRAFINANCE_DATABASE_URL").ok();
+    if env::var("ULTRAFINANCE_REQUIRE_POSTGRES").as_deref() == Ok("true") && database_url.is_none()
+    {
+        anyhow::bail!("ULTRAFINANCE_DATABASE_URL is required in production");
+    }
     let path = env::var_os("ULTRAFINANCE_MERCHANTS").map(std::path::PathBuf::from);
-    let store = if let Some(path) = path {
+    let store = if let Some(url) = database_url {
+        ultrafinance_core::store::MerchantStore::postgres_lazy(&url)?
+    } else if let Some(path) = path {
         let store = ultrafinance_core::store::MerchantStore::memory()?;
         for merchant in ultrafinance_core::load_catalog(Some(&path))? {
             store.put(&merchant)?;
@@ -258,8 +430,142 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn bulk_results_preserve_order_and_errors_and_use_their_own_body_limit() {
+        let merchants =
+            serde_json::from_value(json!([{"id":"alpha","name":"Alpha Cafe","country":"CA"}]))
+                .unwrap();
+        let app = router(Enricher::new(None, "jev-latest".into(), 0.95, merchants).unwrap());
+        let payload = json!({"transactions":[
+            {"description":"Alpha Cafe"},
+            {"description":""},
+            {"description":"Alpha Cafe PURCHASE"},
+            {"description":"NO KNOWN MERCHANT ZZZZZZ", "extra":{"notes":"x".repeat(70 * 1024)}}
+        ]});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/enrich/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            body["results"][0]["data"]["merchant"]["data"]["id"],
+            "alpha"
+        );
+        assert_eq!(body["results"][1]["code"], "invalid_request");
+        assert_eq!(body["results"][2]["code"], "enrichment_failed");
+        assert!(!body.to_string().contains("TYPESAFE_API_KEY"));
+        for (payload, status) in [
+            (
+                json!({"transactions":[]}).to_string(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                json!({"transactions":vec![json!({"description":"test"});101]}).to_string(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                json!({"transactions":[],"unknown":true}).to_string(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (" ".repeat(1024 * 1024 + 1), StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/enrich/batch")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+    }
+    #[tokio::test]
+    async fn catalog_browsing_search_and_validation_work_without_provider_calls() {
+        let merchants = serde_json::from_value(json!([
+            {"id":"alpha","name":"Alpha Cafe","country":"CA","website":"https://alpha.example"},
+            {"id":"beta","name":"Beta Shop","country":"US","aliases":["BETA BILL"]},
+            {"id":"gamma","name":"Gamma Market","country":"CA"}
+        ]))
+        .unwrap();
+        let app = router(Enricher::new(None, "jev-latest".into(), 0.95, merchants).unwrap());
+        for (url, total, ids) in [
+            ("/v1/merchants?limit=2&offset=1", 3, vec!["beta", "gamma"]),
+            ("/v1/merchants?country=CA", 2, vec!["alpha", "gamma"]),
+            ("/v1/merchants?country=US", 1, vec!["beta"]),
+            ("/v1/merchants?offset=99", 3, vec![]),
+            ("/v1/merchants?q=BETA%20BILL", 1, vec!["beta"]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(url).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{url}");
+            assert_eq!(response.headers()["x-robots-tag"], "noindex");
+            let page: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            assert_eq!(page["total"], total, "{url}");
+            let found: Vec<_> = page["merchants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|merchant| merchant["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(found, ids, "{url}");
+            assert!(
+                page["merchants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|merchant| merchant.get("provenance").is_none())
+            );
+        }
+        for url in [
+            "/v1/merchants?limit=0",
+            "/v1/merchants?limit=101",
+            "/v1/merchants?limit=no",
+            "/v1/merchants?offset=-1",
+            "/v1/merchants?offset=1000001",
+            "/v1/merchants?country=ca",
+            "/v1/merchants?unknown=yes",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(url).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{url}");
+            let error: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            assert_eq!(error["error"]["code"], "invalid_request");
+        }
+        let empty = router(Enricher::new(None, "jev-latest".into(), 0.95, vec![]).unwrap());
+        let response = empty
+            .oneshot(Request::get("/v1/merchants").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(page["total"], 0);
+        assert_eq!(page["merchants"], json!([]));
+    }
     #[tokio::test]
     async fn served_openapi_matches_reviewed_contract_and_docs_are_available() {
         let app = router(Enricher::new(None, "jev-latest".into(), 0.95, vec![]).unwrap());
@@ -278,9 +584,11 @@ mod tests {
             spec, reviewed,
             "API contract changed; review and regenerate the OpenAPI snapshot (see README)"
         );
-        assert_eq!(spec["paths"].as_object().unwrap().len(), 2);
+        assert_eq!(spec["paths"].as_object().unwrap().len(), 4);
+        assert!(spec["paths"]["/v1/enrich/batch"]["post"].is_object());
         assert!(spec["paths"]["/health"]["get"].is_object());
         assert!(spec["paths"]["/v1/enrich"]["post"].is_object());
+        assert!(spec["paths"]["/v1/merchants"]["get"].is_object());
         assert_eq!(
             spec["components"]["schemas"]["MerchantResult"]["oneOf"][1]["properties"]["data"]["type"],
             "null",

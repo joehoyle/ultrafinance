@@ -10,6 +10,18 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ultrafinance
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: ultrafinance_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ultrafinance -d ultrafinance_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -18,7 +30,13 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal --component clippy --component rustfmt
       - name: Check formatting
         run: cargo +1.98 fmt --all -- --check
+      - name: Test deployment and production CLI runner
+        run: python3 -m unittest discover -s deploy -p 'test_*.py'
       - name: Test API contract and workspace
         run: cargo +1.98 test --locked --workspace
+      - name: Test PostgreSQL migration and store
+        env:
+          ULTRAFINANCE_TEST_DATABASE_URL: postgresql://ultrafinance:test-only@localhost:5432/ultrafinance_test?sslmode=disable
+        run: cargo +1.98 test --locked -p ultrafinance-core postgres_ -- --ignored
       - name: Lint
         run: cargo +1.98 clippy --locked --workspace --all-targets -- -D warnings

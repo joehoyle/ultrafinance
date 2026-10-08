@@ -119,6 +119,28 @@
     .lookup-result[data-state="matched"] { background: #edf5df; }
     #lookup-status { font-size: 16px; font-weight: 600; margin: 16px 0 10px; }
     #lookup-message { color: #657058; font-size: 13px; line-height: 1.6; margin: 0 0 18px; }
+    .explorer { margin-top: 64px; scroll-margin-top: 24px; }
+    .catalog-form { display: grid; grid-template-columns: 1fr 145px auto auto; align-items: end; gap: 12px; margin-bottom: 21px; }
+    .catalog-form button, .pagination button { border: 1px solid var(--line); padding: 12px 17px; border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; }
+    .catalog-form .primary { color: #fff; background: var(--ink); border-color: var(--ink); }
+    .pagination button:disabled { opacity: .45; cursor: default; }
+    #catalog-status { font-size: 13px; color: #646b5c; min-height: 20px; }
+    .merchant-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .merchant-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 21px; min-width: 0; }
+    .merchant-card h3 { font-size: 17px; letter-spacing: -.3px; margin: 0 0 7px; overflow-wrap: anywhere; }
+    .merchant-card .merchant-id { display: block; font: 10px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; margin: 12px 0; }
+    .merchant-country { display: inline-block; font-size: 10px; background: #edf1e6; padding: 4px 7px; border-radius: 4px; }
+    .merchant-link { display: block; color: #58712e; font-size: 12px; overflow-wrap: anywhere; margin: 13px 0; }
+    .merchant-link:hover { text-decoration: underline; }
+    .merchant-card details { color: #646b5c; font-size: 12px; line-height: 1.6; margin: 15px 0; overflow-wrap: anywhere; }
+    .merchant-card summary { cursor: pointer; }
+    .merchant-card ul { padding-left: 18px; margin-bottom: 0; }
+    .merchant-card button { border: 0; background: #edf1e6; color: var(--ink); font-size: 12px; padding: 9px 12px; border-radius: 5px; cursor: pointer; }
+    .pagination { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 20px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); }
+    .pagination-controls { display: flex; gap: 8px; }
+    @media (max-width: 900px) { .merchant-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 720px) { .catalog-form { grid-template-columns: 1fr 110px; } .explorer { margin-top: 46px; } }
+    @media (max-width: 460px) { .merchant-grid { grid-template-columns: 1fr; } .pagination { align-items: start; flex-direction: column; } }
     @media (max-width: 720px) { .lookup-grid { grid-template-columns: 1fr; gap: 24px; } .lookup { margin-top: 46px; } }
     h2 { margin: 13px 0 9px; font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
     .details p { color: #6a725f; font-size: 13px; line-height: 1.7; margin: 0; max-width: 290px; }
@@ -151,7 +173,7 @@
             <a class="github secondary" href="/docs">API docs <span aria-hidden="true">↗</span></a>
             <a class="github secondary" data-repo href="https://github.com/joehoyle/ultrafinance" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#github-icon"/></svg>Open source <span aria-hidden="true">↗</span></a>
           </div>
-          <p class="meta">ultrafinance.app &nbsp; / &nbsp; Built in Rust</p>
+          <p class="meta">ultrafinance.app &nbsp; / &nbsp; <a class="secondary" href="#merchants">Explore merchants ↗</a></p>
         </div>
         <div class="demo" id="example" aria-label="Usage example">
           <div class="demo-head">
@@ -217,6 +239,24 @@
           </div>
         </div>
       </section>
+      <section class="explorer" id="merchants" aria-labelledby="catalog-heading">
+        <div class="eyebrow"><span class="dot" aria-hidden="true"></span>Explore the catalog</div>
+        <h2 class="lookup-heading" id="catalog-heading">Meet the merchants.</h2>
+        <p class="lookup-intro">Browse the catalog, or search names and aliases for the closest matches. Pick a merchant to try a lookup.</p>
+        <form class="catalog-form" id="catalog-form">
+          <label class="field" for="catalog-query"><span>Search merchants</span><input type="search" id="catalog-query" placeholder="Name or transaction alias" maxlength="256"></label>
+          <label class="field" for="catalog-country"><span>Country <span class="optional">optional</span></span><input id="catalog-country" placeholder="Any" maxlength="2" pattern="[A-Za-z]{2}" title="Use a two-letter country code, such as CA."></label>
+          <button type="submit" class="primary">Search</button>
+          <button type="button" id="catalog-reset">Browse all</button>
+        </form>
+        <p id="catalog-status" role="status" aria-live="polite">Loading merchants…</p>
+        <div class="merchant-grid" id="merchant-grid" aria-busy="true"></div>
+        <div class="pagination" id="catalog-pagination" hidden>
+          <span id="catalog-range"></span>
+          <div class="pagination-controls"><button type="button" id="catalog-prev" disabled>← Previous</button><button type="button" id="catalog-next" disabled>Next →</button></div>
+        </div>
+        <noscript><p class="note">Enable JavaScript to browse merchants.</p></noscript>
+      </section>
       <section class="details" aria-label="How it works">
         <div><span class="number">01 / INPUT</span><h2>Start with what you have.</h2><p>Only a description is required. Add amount, currency, country, or extra context when you have it.</p></div>
         <div><span class="number">02 / EVALUATE</span><h2>Clear results. Honest uncertainty.</h2><p>Get a merchant match when the evidence supports it. Ambiguous transactions can stay unresolved.</p></div>
@@ -227,6 +267,141 @@
     <span class="sr-only" id="announcement" role="status" aria-live="polite"></span>
   </div>
   <script>
+    const catalogGrid = document.getElementById('merchant-grid');
+    const catalogStatus = document.getElementById('catalog-status');
+    const catalogPrev = document.getElementById('catalog-prev');
+    const catalogNext = document.getElementById('catalog-next');
+    let catalogFilter = { q: '', country: '' };
+    let catalogOffset = 0;
+    let catalogController;
+    let catalogGeneration = 0;
+    const catalogPageSize = 12;
+    function safeWebsite(value) {
+      try {
+        const url = new URL(value);
+        return ['https:', 'http:'].includes(url.protocol) ? url : null;
+      } catch { return null; }
+    }
+    function merchantCard(merchant) {
+      const card = document.createElement('article');
+      card.className = 'merchant-card';
+      const title = document.createElement('h3');
+      title.textContent = merchant.name;
+      const country = document.createElement('span');
+      country.className = 'merchant-country';
+      country.textContent = merchant.country || 'Country unknown';
+      const id = document.createElement('code');
+      id.className = 'merchant-id';
+      id.textContent = merchant.id;
+      card.append(title, country, id);
+      const website = safeWebsite(merchant.website);
+      if (website) {
+        const link = document.createElement('a');
+        link.className = 'merchant-link';
+        link.href = website.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = `${website.hostname} ↗`;
+        card.append(link);
+      }
+      if (Array.isArray(merchant.aliases) && merchant.aliases.length) {
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = `${merchant.aliases.length} transaction ${merchant.aliases.length === 1 ? 'alias' : 'aliases'}`;
+        const list = document.createElement('ul');
+        merchant.aliases.forEach(alias => {
+          const item = document.createElement('li');
+          item.textContent = alias;
+          list.append(item);
+        });
+        details.append(summary, list);
+        card.append(details);
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = 'Try lookup ↗';
+      button.setAttribute('aria-label', `Try lookup for ${merchant.name}`);
+      button.addEventListener('click', () => {
+        const description = document.getElementById('description');
+        description.value = merchant.name;
+        description.setCustomValidity('');
+        document.getElementById('country').value = merchant.country || '';
+        document.getElementById('amount').value = '';
+        document.getElementById('currency').value = '';
+        document.getElementById('try-it').scrollIntoView({behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
+        description.focus({preventScroll:true});
+      });
+      card.append(button);
+      return card;
+    }
+    async function loadMerchants(offset = 0) {
+      catalogController?.abort();
+      const controller = new AbortController();
+      catalogController = controller;
+      const generation = ++catalogGeneration;
+      const timeout = setTimeout(() => controller.abort(), 65000);
+      catalogGrid.setAttribute('aria-busy', 'true');
+      catalogGrid.replaceChildren();
+      catalogStatus.textContent = 'Loading merchants…';
+      catalogPrev.disabled = catalogNext.disabled = true;
+      document.getElementById('catalog-pagination').hidden = true;
+      const params = new URLSearchParams({limit: String(catalogPageSize), offset: String(offset)});
+      if (catalogFilter.q) params.set('q', catalogFilter.q);
+      if (catalogFilter.country) params.set('country', catalogFilter.country);
+      try {
+        const response = await fetch(`/v1/merchants?${params}`, {signal:controller.signal, credentials:'omit', redirect:'error', cache:'no-store'});
+        const page = await response.json();
+        if (generation !== catalogGeneration) return;
+        if (!response.ok) throw new Error(page?.error?.message || 'The catalog is unavailable. Please try again.');
+        if (!Array.isArray(page.merchants) || !Number.isSafeInteger(page.total) || page.total < 0
+          || page.merchants.some(merchant => !merchant || typeof merchant.name !== 'string' || typeof merchant.id !== 'string')) {
+          throw new Error('The catalog returned an unexpected response. Please try again.');
+        }
+        catalogOffset = offset;
+        if (!page.merchants.length) {
+          catalogStatus.textContent = catalogFilter.q || catalogFilter.country
+            ? 'No merchants found. Try another name, alias, or country.'
+            : 'The catalog is empty. Merchants will appear here as they are added.';
+        } else {
+          catalogStatus.textContent = catalogFilter.q
+            ? `${page.total.toLocaleString()} closest ${page.total === 1 ? 'match' : 'matches'}. Search returns a ranked shortlist.`
+            : `${page.total.toLocaleString()} ${page.total === 1 ? 'merchant' : 'merchants'}${catalogFilter.country ? ` in ${catalogFilter.country}` : ' in the catalog'}.`;
+          catalogGrid.replaceChildren(...page.merchants.map(merchantCard));
+        }
+        document.getElementById('catalog-range').textContent = page.total
+          ? `${Math.min(offset + 1, page.total)}–${Math.min(offset + page.merchants.length, page.total)} of ${page.total.toLocaleString()}`
+          : '0 merchants';
+        document.getElementById('catalog-pagination').hidden = page.total === 0;
+        catalogPrev.disabled = offset === 0;
+        catalogNext.disabled = offset + page.merchants.length >= page.total;
+      } catch (error) {
+        if (generation !== catalogGeneration) return;
+        catalogStatus.textContent = error.name === 'AbortError'
+          ? 'The catalog request timed out. Search again to retry.'
+          : error instanceof TypeError || error instanceof SyntaxError
+            ? 'Couldn’t load the catalog. Open this page through the Ultrafinance service and try again.'
+            : error.message;
+      } finally {
+        clearTimeout(timeout);
+        if (generation === catalogGeneration) catalogGrid.setAttribute('aria-busy', 'false');
+      }
+    }
+    document.getElementById('catalog-form').addEventListener('submit', event => {
+      event.preventDefault();
+      catalogFilter = {
+        q: document.getElementById('catalog-query').value.trim(),
+        country: document.getElementById('catalog-country').value.trim().toUpperCase(),
+      };
+      loadMerchants();
+    });
+    document.getElementById('catalog-reset').addEventListener('click', () => {
+      document.getElementById('catalog-form').reset();
+      catalogFilter = {q:'', country:''};
+      loadMerchants();
+    });
+    catalogPrev.addEventListener('click', () => loadMerchants(Math.max(0, catalogOffset - catalogPageSize)));
+    catalogNext.addEventListener('click', () => loadMerchants(catalogOffset + catalogPageSize));
+    loadMerchants();
     const lookupForm = document.getElementById('lookup-form');
     const lookupResult = document.getElementById('lookup-result');
     const lookupSubmit = document.getElementById('lookup-submit');
@@ -258,7 +433,7 @@
       lookupJson.hidden = true;
       lookupJson.textContent = '';
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
+      const timeout = setTimeout(() => controller.abort(), 65000);
       try {
         const response = await fetch('/v1/enrich', {
           method: 'POST', headers, body: JSON.stringify(request), signal: controller.signal,

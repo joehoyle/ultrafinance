@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +158,19 @@ pub async fn run(
     model: String,
     threshold: f64,
 ) -> Result<Report> {
+    run_with_progress(contents, store, mode, api_key, model, threshold, None).await
+}
+
+/// Evaluate cases while exposing completed-case counts to a progress display.
+pub async fn run_with_progress(
+    contents: &str,
+    store: MerchantStore,
+    mode: Mode,
+    api_key: Option<String>,
+    model: String,
+    threshold: f64,
+    progress: Option<&std::sync::atomic::AtomicUsize>,
+) -> Result<Report> {
     let suite = parse_suite(contents)?;
     let database_fingerprint = store.fingerprint()?;
     let started_at_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -172,66 +185,90 @@ pub async fn run(
         None
     };
     let mut results = Vec::new();
-    for case in suite.cases {
-        let started = Instant::now();
-        let expected_local_id = match &case.expected {
-            Expected::Unresolved | Expected::Unlabeled => None,
-            Expected::Matched {
-                merchant: MerchantRef::Local(r),
-            } => Some(r.merchant_id.clone()),
-            Expected::Matched {
-                merchant: MerchantRef::External(r),
-            } => store.resolve_source(&r.source, &r.external_id)?,
-        };
-        let db = store.clone();
-        let description = case.request.description.clone();
-        let country = case.request.country.clone();
-        let candidates =
-            tokio::task::spawn_blocking(move || db.search(&description, country.as_deref(), 10))
-                .await??;
-        let candidate_ids: Vec<_> = candidates.iter().map(|c| c.merchant.id.clone()).collect();
-        let expected_rank = expected_local_id
-            .as_ref()
-            .and_then(|id| candidate_ids.iter().position(|candidate| candidate == id))
-            .map(|r| r + 1);
-        let mut result = CaseResult {
-            id: case.id,
-            description: case.request.description.clone(),
-            expected: case.expected,
-            expected_local_id,
-            candidate_ids,
-            expected_rank,
-            predicted_id: None,
-            matched: None,
-            correct: None,
-            error: None,
-            latency_ms: 0.0,
-        };
+    let mut cases = suite.cases.into_iter();
+    loop {
+        let mut batch_results = Vec::new();
+        let mut inputs = Vec::new();
+        let mut starts = Vec::new();
+        for case in cases.by_ref().take(crate::batch::MAX_BATCH_ITEMS) {
+            let started = Instant::now();
+            let expected_local_id = match &case.expected {
+                Expected::Unresolved | Expected::Unlabeled => None,
+                Expected::Matched {
+                    merchant: MerchantRef::Local(r),
+                } => Some(r.merchant_id.clone()),
+                Expected::Matched {
+                    merchant: MerchantRef::External(r),
+                } => store.resolve_source(&r.source, &r.external_id)?,
+            };
+            let db = store.clone();
+            let description = case.request.description.clone();
+            let country = case.request.country.clone();
+            let candidates = tokio::task::spawn_blocking(move || {
+                db.search(&description, country.as_deref(), 10)
+            })
+            .await??;
+            let candidate_ids: Vec<_> = candidates.iter().map(|c| c.merchant.id.clone()).collect();
+            let expected_rank = expected_local_id
+                .as_ref()
+                .and_then(|id| candidate_ids.iter().position(|candidate| candidate == id))
+                .map(|r| r + 1);
+            let result = CaseResult {
+                id: case.id,
+                description: case.request.description.clone(),
+                expected: case.expected,
+                expected_local_id,
+                candidate_ids,
+                expected_rank,
+                predicted_id: None,
+                matched: None,
+                correct: None,
+                error: None,
+                latency_ms: if enricher.is_none() {
+                    started.elapsed().as_secs_f64() * 1000.0
+                } else {
+                    0.0
+                },
+            };
+            inputs.push((case.request, Ok(candidates)));
+            starts.push(started);
+            batch_results.push(result);
+        }
+        if batch_results.is_empty() {
+            break;
+        }
         if let Some(enricher) = &enricher {
-            match tokio::time::timeout(Duration::from_secs(25), enricher.enrich(&case.request))
-                .await
-            {
-                Ok(Ok(response)) => {
-                    result.predicted_id = match response.merchant {
-                        MerchantResult::Matched { data } => Some(data.id),
-                        MerchantResult::Unresolved { .. } => None,
-                    };
-                    result.matched = Some(result.predicted_id.is_some());
-                    result.correct = match &result.expected {
-                        Expected::Unresolved => Some(result.predicted_id.is_none()),
-                        Expected::Unlabeled => None,
-                        Expected::Matched { .. } => Some(
-                            result.expected_local_id.is_some()
-                                && result.predicted_id == result.expected_local_id,
-                        ),
-                    };
+            let outcomes = enricher.enrich_batch_candidates(inputs).await;
+            for (result, outcome) in batch_results.iter_mut().zip(outcomes) {
+                match outcome {
+                    Ok(response) => {
+                        result.predicted_id = match response.merchant {
+                            MerchantResult::Matched { data } => Some(data.id),
+                            MerchantResult::Unresolved { .. } => None,
+                        };
+                        result.matched = Some(result.predicted_id.is_some());
+                        result.correct = match &result.expected {
+                            Expected::Unresolved => Some(result.predicted_id.is_none()),
+                            Expected::Unlabeled => None,
+                            Expected::Matched { .. } => Some(
+                                result.expected_local_id.is_some()
+                                    && result.predicted_id == result.expected_local_id,
+                            ),
+                        };
+                    }
+                    Err(error) => result.error = Some(error.to_string()),
                 }
-                Ok(Err(error)) => result.error = Some(error.to_string()),
-                Err(_) => result.error = Some("enrichment timed out".into()),
             }
         }
-        result.latency_ms = started.elapsed().as_secs_f64() * 1000.0;
-        results.push(result);
+        for (mut result, started) in batch_results.into_iter().zip(starts) {
+            if enricher.is_some() {
+                result.latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+            }
+            results.push(result);
+            if let Some(progress) = progress {
+                progress.store(results.len(), std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
     if store.fingerprint()? != database_fingerprint {
         bail!("database changed during evaluation; rerun against an unchanged snapshot");
@@ -247,7 +284,13 @@ pub async fn run(
         code_fingerprint: fingerprint(
             concat!(
                 include_str!("lib.rs"),
+                include_str!("batch.rs"),
                 include_str!("store.rs"),
+                include_str!("postgres_store.rs"),
+                include_str!("../migrations/001_postgres.sql"),
+                include_str!("search_score.rs"),
+                include_str!("regex_rules.rs"),
+                include_str!("search_profile.rs"),
                 include_str!("import.rs"),
                 include_str!("eval.rs")
             )
@@ -441,9 +484,19 @@ mod tests {
             {"id":"none","request":{"description":"ZZQQXX"},"expected":{"status":"unlabeled"}},
             {"id":"error","request":{"description":"Julus cafe"},"expected":{"status":"unlabeled"}}
         ]}"#;
-        let report = run(suite, db, Mode::Enrich, None, "jev-latest".into(), 0.95)
-            .await
-            .unwrap();
+        let completed = std::sync::atomic::AtomicUsize::new(0);
+        let report = run_with_progress(
+            suite,
+            db,
+            Mode::Enrich,
+            None,
+            "jev-latest".into(),
+            0.95,
+            Some(&completed),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 3);
         assert_eq!(report.metrics.unlabeled, 3);
         assert_eq!(report.metrics.matches, Some(1));
         assert_eq!(report.metrics.unresolved, Some(1));

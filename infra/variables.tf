@@ -87,3 +87,56 @@ variable "github_oidc_provider_arn" {
   type        = string
   default     = null
 }
+
+variable "database_url" {
+  description = "PostgreSQL URL for Lambda. Use a TLS-enabled connection and a runtime database role; import/schema administration uses a separate role."
+  type        = string
+  sensitive   = true
+  default     = null
+  validation {
+    condition     = var.database_url == null ? true : can(regex("^postgres(ql)?://", var.database_url))
+    error_message = "Use a PostgreSQL connection URL."
+  }
+}
+
+variable "enable_aurora" {
+  description = "Provision private Aurora Serverless v2 and one managed NAT gateway. Set database_url after migration to attach Lambda."
+  type        = bool
+  default     = false
+}
+
+variable "cli_download_image" {
+  description = "Official multi-architecture AWS CLI image used only to download staged inputs."
+  type        = string
+  default     = "public.ecr.aws/aws-cli/aws-cli@sha256:3dacc5db57c923c4223e949795f538ecf1f2212b2b7d5a028b47b97f91564c0d"
+}
+
+variable "aurora_engine_version" {
+  description = "Supported Aurora PostgreSQL 17 version in the selected region."
+  type        = string
+  default     = "17.9"
+  validation {
+    condition     = can(regex("^17\\.[0-9]+$", var.aurora_engine_version))
+    error_message = "Use a supported Aurora PostgreSQL 17 minor version."
+  }
+}
+
+variable "aurora_min_acu" {
+  description = "Minimum capacity. Zero enables auto-pause after five minutes without connections; the app expires idle sessions after one minute."
+  type        = number
+  default     = 0
+  validation {
+    condition     = var.aurora_min_acu >= 0 && var.aurora_min_acu <= var.aurora_max_acu && floor(var.aurora_min_acu * 2) == var.aurora_min_acu * 2
+    error_message = "Minimum must be a nonnegative half-ACU increment no greater than maximum."
+  }
+}
+
+variable "aurora_max_acu" {
+  description = "Capacity ceiling for the single serverless writer. Increase when the workload needs more memory/CPU."
+  type        = number
+  default     = 1
+  validation {
+    condition     = var.aurora_max_acu >= 1 && var.aurora_max_acu <= 256 && floor(var.aurora_max_acu * 2) == var.aurora_max_acu * 2
+    error_message = "Maximum must be a half-ACU increment between 1 and 256."
+  }
+}

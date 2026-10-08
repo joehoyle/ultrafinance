@@ -10,6 +10,7 @@ fn run(args: &[&str], stdin: Option<&str>) -> std::process::Output {
         .args(args)
         .env_remove("TYPESAFE_API_KEY")
         .env_remove("ULTRAFINANCE_DB")
+        .env_remove("ULTRAFINANCE_DATABASE_URL")
         .env_remove("ULTRAFINANCE_MERCHANTS")
         .env_remove("JEV_MODEL")
         .env_remove("ULTRAFINANCE_MATCH_THRESHOLD")
@@ -310,4 +311,63 @@ fn batch_eval_uses_latest_holdouts_and_summarizes_unlabeled_cases() {
             .success()
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn enrich_batch_validates_envelopes_and_outputs_partial_results_before_failing() {
+    let directory =
+        std::env::temp_dir().join(format!("ultrafinance-bulk-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("catalog.sqlite");
+    let db = database.to_str().unwrap();
+    assert!(
+        run(
+            &[
+                "--database",
+                db,
+                "merchants",
+                "add",
+                "--id",
+                "alpha",
+                "--name",
+                "Alpha Cafe"
+            ],
+            None
+        )
+        .status
+        .success()
+    );
+    let output = run(
+        &["--database", db, "enrich-batch", "--input", "-"],
+        Some(
+            r#"{"transactions":[{"description":"Alpha Cafe"},{"description":""},{"description":"Alpha Cafe PURCHASE"}]}"#,
+        ),
+    );
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["results"][0]["data"]["merchant"]["data"]["id"],
+        "alpha"
+    );
+    assert_eq!(value["results"][1]["code"], "invalid_request");
+    assert_eq!(value["results"][2]["code"], "enrichment_failed");
+    let output = run(
+        &["enrich-batch", "--input", "-", "--dry-run"],
+        Some(r#"{"transactions":[{"description":"test","extra":{"nested":{"value":1}}}]}"#),
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["transactions"][0]["extra"]["nested"]
+            ["value"],
+        1
+    );
+    for input in [
+        r#"{"transactions":[]}"#,
+        r#"{"transactions":[{"description":"x"}],"unknown":true}"#,
+    ] {
+        let output = run(&["enrich-batch", "--input", "-", "--dry-run"], Some(input));
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }

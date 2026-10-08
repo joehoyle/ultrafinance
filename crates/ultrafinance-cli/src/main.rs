@@ -9,6 +9,7 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
+use ultrafinance_core::batch::{BatchEnrichRequest, BatchEnrichResponse, BatchItemResult};
 use ultrafinance_core::{EnrichRequest, Enricher, Merchant, load_catalog, store::MerchantStore};
 
 #[derive(Parser)]
@@ -21,7 +22,7 @@ use ultrafinance_core::{EnrichRequest, Enricher, Merchant, load_catalog, store::
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// SQLite merchant database.
+    /// Local SQLite merchant database (used when no PostgreSQL URL is configured).
     #[arg(
         long,
         global = true,
@@ -29,12 +30,27 @@ struct Cli {
         default_value = "data/ultrafinance.sqlite"
     )]
     database: PathBuf,
+    /// PostgreSQL connection URL. Prefer the environment variable to keep credentials out of shell history.
+    #[arg(
+        long,
+        global = true,
+        env = "ULTRAFINANCE_DATABASE_URL",
+        hide_env_values = true
+    )]
+    database_url: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize PostgreSQL or migrate the complete SQLite catalog.
+    Database {
+        #[command(subcommand)]
+        command: DatabaseCommand,
+    },
     /// Enrich a description or a complete JSON request without starting the API.
     Enrich(Box<EnrichArgs>),
+    /// Enrich up to 100 transactions using shared provider batches.
+    EnrichBatch(BatchEnrichArgs),
     /// Benchmark labeled suites or measure coverage of dataset samples.
     Eval {
         #[arg(required_unless_present = "all", conflicts_with = "all")]
@@ -54,6 +70,7 @@ enum Command {
         limit: Option<u32>,
         #[arg(long, value_enum, default_value = "search")]
         mode: EvalMode,
+        /// Report file, or parent report directory when using --all.
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
@@ -71,6 +88,14 @@ enum Command {
         #[command(subcommand)]
         command: MerchantCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum DatabaseCommand {
+    /// Apply PostgreSQL schema migrations (safe to repeat).
+    Init,
+    /// Preserve SQLite IDs, source links, provenance, and manual overrides in an empty PostgreSQL catalog.
+    MigrateSqlite { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -217,6 +242,37 @@ struct EnrichArgs {
     dry_run: bool,
 }
 
+#[derive(Args)]
+struct BatchEnrichArgs {
+    /// JSON object containing transactions; use - for stdin (maximum 1 MiB).
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
+    model: String,
+    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.95")]
+    threshold: f64,
+    #[arg(long)]
+    dry_run: bool,
+}
+fn read_batch_request(path: &std::path::Path) -> Result<BatchEnrichRequest> {
+    let reader: Box<dyn Read> = if path.as_os_str() == "-" {
+        Box::new(io::stdin())
+    } else {
+        Box::new(
+            std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?,
+        )
+    };
+    let mut bytes = Vec::new();
+    reader.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("request exceeds 1 MiB");
+    }
+    let request: BatchEnrichRequest =
+        serde_json::from_slice(&bytes).context("invalid batch request JSON")?;
+    request.validate()?;
+    Ok(request)
+}
+
 fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
     let request = if let Some(path) = &args.input {
         // Match the API's 64 KiB input limit, including when stdin is used.
@@ -265,6 +321,26 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Database { command } => {
+            let url = cli
+                .database_url
+                .as_deref()
+                .context("set ULTRAFINANCE_DATABASE_URL for PostgreSQL commands")?;
+            match command {
+                DatabaseCommand::Init => {
+                    MerchantStore::initialize_postgres(url)?;
+                    println!("PostgreSQL schema is ready");
+                }
+                DatabaseCommand::MigrateSqlite { file } => {
+                    let store = MerchantStore::postgres(url)?;
+                    let count = store.migrate_sqlite(&file)?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"migrated":count,"database_fingerprint":store.fingerprint()?})
+                    );
+                }
+            }
+        }
         Command::Datasets { command } => match command {
             DatasetCommand::Import {
                 source,
@@ -302,7 +378,8 @@ async fn main() -> Result<()> {
             DatasetCommand::Apply { file } => {
                 let records: Vec<ultrafinance_core::store::SourceRecord> =
                     serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                MerchantStore::open(&cli.database)?.import(&records)?;
+                MerchantStore::configured(&cli.database, cli.database_url.as_deref())?
+                    .import(&records)?;
                 println!("{}", serde_json::json!({"imported":records.len()}));
             }
             DatasetCommand::ExportEval { file, output } => {
@@ -346,6 +423,7 @@ async fn main() -> Result<()> {
                     suites_dir,
                     output: output.unwrap_or_else(|| PathBuf::from("evals/reports/all")),
                     database: cli.database,
+                    database_url: cli.database_url,
                     mode,
                     limit,
                     model,
@@ -358,7 +436,7 @@ async fn main() -> Result<()> {
             let contents = batch::contents(&file, samples, limit)?;
             let report = ultrafinance_core::eval::run(
                 &contents,
-                MerchantStore::open(&cli.database)?,
+                MerchantStore::configured(&cli.database, cli.database_url.as_deref())?,
                 mode,
                 env::var("TYPESAFE_API_KEY").ok(),
                 model,
@@ -431,7 +509,7 @@ async fn main() -> Result<()> {
                 }
                 store
             } else {
-                MerchantStore::open(&cli.database)?
+                MerchantStore::configured(&cli.database, cli.database_url.as_deref())?
             };
             let enricher = Enricher::with_store(
                 env::var("TYPESAFE_API_KEY").ok(),
@@ -444,8 +522,59 @@ async fn main() -> Result<()> {
                 .context("merchant evaluation timed out")??;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        Command::EnrichBatch(args) => {
+            let request = read_batch_request(&args.input)?;
+            if args.dry_run {
+                for transaction in &request.transactions {
+                    transaction.validate()?;
+                }
+                println!("{}", serde_json::to_string_pretty(&request)?);
+                return Ok(());
+            }
+            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            let enricher = Enricher::with_store(
+                env::var("TYPESAFE_API_KEY").ok(),
+                args.model,
+                args.threshold,
+                store,
+            )?;
+            let outcomes = tokio::time::timeout(
+                Duration::from_secs(55),
+                enricher.enrich_batch(&request.transactions),
+            )
+            .await
+            .context("merchant batch evaluation timed out")?;
+            let mut failed = false;
+            let results = request
+                .transactions
+                .iter()
+                .zip(outcomes)
+                .map(|(request, outcome)| match outcome {
+                    Ok(data) => BatchItemResult::Success { data },
+                    Err(error) => {
+                        failed = true;
+                        BatchItemResult::Error {
+                            code: if request.validate().is_err() {
+                                "invalid_request"
+                            } else {
+                                "enrichment_failed"
+                            }
+                            .into(),
+                            message: error.to_string(),
+                        }
+                    }
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&BatchEnrichResponse { results })?
+            );
+            if failed {
+                bail!("some transactions failed; see results above");
+            }
+        }
         Command::Merchants { command } => {
-            let store = MerchantStore::open(&cli.database)?;
+            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
             match command {
                 MerchantCommand::Add {
                     name,

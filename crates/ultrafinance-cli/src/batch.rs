@@ -19,6 +19,7 @@ pub struct Options {
     pub suites_dir: PathBuf,
     pub output: PathBuf,
     pub database: PathBuf,
+    pub database_url: Option<String>,
     pub mode: Mode,
     pub limit: Option<u32>,
     pub model: String,
@@ -88,9 +89,6 @@ fn discover(suites: &Path, datasets: &Path) -> Result<Vec<Job>> {
             }
             let metadata: Value = serde_json::from_str(&fs::read_to_string(&manifest)?)
                 .with_context(|| format!("invalid manifest {}", manifest.display()))?;
-            if metadata["holdout_samples"].as_u64() == Some(0) {
-                continue;
-            }
             let modified = fs::metadata(&manifest)?.modified()?;
             let region = metadata["region"].as_str().unwrap_or("global").to_string();
             if latest
@@ -101,6 +99,11 @@ fn discover(suites: &Path, datasets: &Path) -> Result<Vec<Job>> {
             }
         }
         for (region, (_, version)) in latest {
+            let manifest: Value =
+                serde_json::from_str(&fs::read_to_string(version.join("manifest.json"))?)?;
+            if manifest["holdout_samples"].as_u64() == Some(0) {
+                continue;
+            }
             let path = version.join("holdout.jsonl");
             if !path.is_file() {
                 bail!("missing holdout in latest snapshot {}", version.display());
@@ -154,7 +157,7 @@ pub async fn run(options: Options) -> Result<()> {
             Ok(input)
         })
         .collect::<Result<Vec<_>>>()?;
-    let store = MerchantStore::open(&options.database)?;
+    let store = MerchantStore::configured(&options.database, options.database_url.as_deref())?;
     let fingerprint = store.fingerprint()?;
     let directory = options.output.join(format!("run-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&directory)?;
@@ -191,13 +194,16 @@ pub async fn run(options: Options) -> Result<()> {
                 .unwrap_or_default()
         );
         let started = Instant::now();
-        let future = eval::run(
+        let completed = std::sync::atomic::AtomicUsize::new(0);
+        let count = eval::parse_suite(&input)?.cases.len();
+        let future = eval::run_with_progress(
             &input,
             store.clone(),
             options.mode,
             env::var("TYPESAFE_API_KEY").ok(),
             options.model.clone(),
             options.threshold,
+            Some(&completed),
         );
         tokio::pin!(future);
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -205,7 +211,7 @@ pub async fn run(options: Options) -> Result<()> {
             tokio::select! {
                 report = &mut future => break report,
                 _ = interval.tick(), if terminal => {
-                    eprint!("\r  Running... {}s", started.elapsed().as_secs());
+                    eprint!("\r  Running... {}/{} cases · {}s", completed.load(std::sync::atomic::Ordering::Relaxed), count, started.elapsed().as_secs());
                     let _ = io::stderr().flush();
                 }
             }
@@ -253,6 +259,12 @@ pub async fn run(options: Options) -> Result<()> {
     };
     if let Some(metrics) = &metrics {
         table.add_row(row("Total", metrics));
+    }
+    if let Some(profile) = ultrafinance_core::store::search_profile() {
+        eprintln!(
+            "Search profile: {}",
+            serde_json::to_string_pretty(&profile)?
+        );
     }
     let summary = directory.join("summary.json");
     fs::write(

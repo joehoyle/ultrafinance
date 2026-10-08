@@ -17,7 +17,6 @@ repository_name=${repository#*/}
 release="$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
 docker buildx build --platform linux/arm64 --provenance=false \
-  --build-arg "MERCHANT_CATALOG=${MERCHANT_CATALOG:-deploy/catalog.json}" \
   --tag "$repository:$release" --push .
 digest=$(aws ecr describe-images --repository-name "$repository_name" \
   --image-ids "imageTag=$release" --query 'imageDetails[0].imageDigest' --output text)

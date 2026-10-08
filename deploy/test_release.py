@@ -1,5 +1,7 @@
 """Check release failure paths without credentials or AWS calls."""
 import unittest
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 from release import Lambda, release
@@ -40,6 +42,27 @@ class FakeLambda:
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_smoke_check_rejects_database_failure_even_when_health_passes(self):
+        client = Lambda("ultrafinance")
+        checked = []
+
+        def invoke(operation, *args):
+            self.assertEqual(operation, "invoke")
+            payload = args[args.index("--payload") + 1]
+            event = json.loads(Path(payload.removeprefix("fileb://")).read_text())
+            path = event["rawPath"]
+            checked.append(path)
+            Path(args[-1]).write_text(json.dumps({
+                "statusCode": 503 if path == "/v1/merchants" else 200,
+                "body": json.dumps({"status": "ok"}),
+            }))
+            return {}
+
+        with patch.object(client, "call", side_effect=invoke):
+            with self.assertRaisesRegex(RuntimeError, "/v1/merchants"):
+                client.check("8")
+        self.assertEqual(checked, ["/health", "/", "/v1/merchants"])
+
     def test_candidate_failure_never_changes_live(self):
         client = FakeLambda(fail_check="8")
         with self.assertRaises(RuntimeError):

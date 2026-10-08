@@ -51,20 +51,27 @@ resource "aws_lambda_function" "app" {
   architectures = ["arm64"]
   publish       = true
   memory_size   = 1024
-  timeout       = 30
-  # No VPC/NAT needed: Jev calls use Lambda's normal outbound network.
+  timeout       = 60
+  # Attach only at cutover, after schema/data initialization and runtime-role setup.
+  dynamic "vpc_config" {
+    for_each = var.enable_aurora && nonsensitive(var.database_url != null) ? [1] : []
+    content {
+      subnet_ids         = aws_subnet.database[*].id
+      security_group_ids = [aws_security_group.database_client[0].id]
+    }
+  }
   environment {
-    variables = {
+    variables = merge({
       TYPESAFE_API_KEY             = var.typesafe_api_key
       JEV_MODEL                    = var.jev_model
       ULTRAFINANCE_MATCH_THRESHOLD = tostring(var.match_threshold)
-    }
+    }, var.database_url == null ? {} : { ULTRAFINANCE_DATABASE_URL = var.database_url })
   }
   # Release tooling owns image updates; Tofu still owns runtime configuration.
   lifecycle {
     ignore_changes = [image_uri]
   }
-  depends_on = [aws_iam_role_policy.logs]
+  depends_on = [aws_iam_role_policy.logs, aws_iam_role_policy_attachment.lambda_vpc, aws_route.nat, aws_route_table_association.database, aws_rds_cluster_instance.database]
 }
 
 # Stable endpoint: releases publish a version and promote this alias only after checks.
@@ -124,7 +131,7 @@ resource "aws_cloudfront_distribution" "app" {
       https_port             = 443
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
-      origin_read_timeout    = 35
+      origin_read_timeout    = 60
     }
   }
   default_cache_behavior {

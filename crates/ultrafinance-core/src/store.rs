@@ -1,4 +1,5 @@
 use crate::Merchant;
+use crate::search_profile::{Stage, timed};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,24 @@ use std::{
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 pub fn normalize(value: &str) -> String {
+    // Most bank descriptors and aliases are ASCII. Avoid Unicode decomposition,
+    // intermediate strings, and token vectors on that common path.
+    if value.is_ascii() {
+        let mut result = String::with_capacity(value.len());
+        let mut separator = false;
+        for byte in value.bytes() {
+            if byte.is_ascii_alphanumeric() {
+                if separator {
+                    result.push(' ');
+                    separator = false;
+                }
+                result.push(byte.to_ascii_lowercase() as char);
+            } else if !result.is_empty() {
+                separator = true;
+            }
+        }
+        return result;
+    }
     value
         .nfkd()
         .filter(|c| !is_combining_mark(*c))
@@ -24,18 +43,154 @@ pub fn normalize(value: &str) -> String {
 }
 
 #[derive(Clone)]
-pub struct MerchantStore(Arc<Mutex<Connection>>);
+struct SqliteStore(Arc<Mutex<Connection>>);
 
-#[derive(Debug, Serialize)]
+#[path = "postgres_store.rs"]
+mod postgres_store;
+
+#[derive(Clone)]
+pub struct MerchantStore(Backend);
+#[derive(Clone)]
+enum Backend {
+    Sqlite(SqliteStore),
+    Postgres(postgres_store::PostgresStore),
+}
+
+impl MerchantStore {
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self(Backend::Sqlite(SqliteStore::open(path)?)))
+    }
+    pub fn memory() -> Result<Self> {
+        Ok(Self(Backend::Sqlite(SqliteStore::memory()?)))
+    }
+    pub fn postgres(url: &str) -> Result<Self> {
+        Ok(Self(Backend::Postgres(
+            postgres_store::PostgresStore::connect(url, false)?,
+        )))
+    }
+    /// Connect on first catalog operation, so public pages/health don't wake an
+    /// idle database. Schema/connection errors are reported by that operation.
+    pub fn postgres_lazy(url: &str) -> Result<Self> {
+        Ok(Self(Backend::Postgres(
+            postgres_store::PostgresStore::lazy(url)?,
+        )))
+    }
+    pub fn initialize_postgres(url: &str) -> Result<Self> {
+        Ok(Self(Backend::Postgres(
+            postgres_store::PostgresStore::connect(url, true)?,
+        )))
+    }
+    pub fn configured(path: &Path, database_url: Option<&str>) -> Result<Self> {
+        match database_url {
+            Some(url) => Self::postgres(url),
+            None => Self::open(path),
+        }
+    }
+    /// Copy authoritative SQLite rows into an empty PostgreSQL database atomically.
+    /// The source is opened read-only and is never modified.
+    pub fn migrate_sqlite(&self, path: &Path) -> Result<usize> {
+        let Backend::Postgres(store) = &self.0 else {
+            bail!("migration target must be PostgreSQL");
+        };
+        let mut connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let transaction = connection.transaction()?;
+        fn read(tx: &Transaction<'_>, sql: &str) -> Result<Vec<(String, String)>> {
+            let mut stmt = tx.prepare(sql)?;
+            Ok(stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        }
+        let merchants = read(&transaction, "SELECT id,data FROM merchants ORDER BY id")?;
+        let manual = read(
+            &transaction,
+            "SELECT id,data FROM manual_merchants ORDER BY id",
+        )?;
+        let sources = read(
+            &transaction,
+            "SELECT merchant_id,data FROM source_records ORDER BY source,external_id",
+        )?;
+        let mut contents = Vec::new();
+        for (_, data) in merchants.iter().chain(manual.iter()) {
+            contents.extend(data.bytes());
+            contents.push(0);
+        }
+        for (id, data) in &sources {
+            contents.extend(data.bytes());
+            contents.push(0);
+            contents.extend(id.bytes());
+            contents.push(0);
+        }
+        store.restore(
+            merchants,
+            manual,
+            sources,
+            crate::eval::fingerprint(&contents),
+        )
+    }
+    pub fn put(&self, merchant: &Merchant) -> Result<()> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.put(merchant),
+            Backend::Postgres(s) => s.put(merchant),
+        }
+    }
+    pub fn import(&self, records: &[SourceRecord]) -> Result<()> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.import(records),
+            Backend::Postgres(s) => s.import(records),
+        }
+    }
+    pub fn link(&self, source: &str, external_id: &str, target: &str) -> Result<()> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.link(source, external_id, target),
+            Backend::Postgres(s) => s.link(source, external_id, target),
+        }
+    }
+    pub fn resolve_source(&self, source: &str, external_id: &str) -> Result<Option<String>> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.resolve_source(source, external_id),
+            Backend::Postgres(s) => s.resolve_source(source, external_id),
+        }
+    }
+    pub fn fingerprint(&self) -> Result<String> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.fingerprint(),
+            Backend::Postgres(s) => s.fingerprint(),
+        }
+    }
+    pub fn list(&self, country: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.list(country, limit, offset),
+            Backend::Postgres(s) => s.list(country, limit, offset),
+        }
+    }
+    pub fn search(
+        &self,
+        description: &str,
+        country: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Candidate>> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.search(description, country, limit),
+            Backend::Postgres(s) => s.search(description, country, limit),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
     pub merchant: Merchant,
     pub score: f64,
     pub exact: bool,
+    /// Number of descriptor characters matched by an Open Enrichment rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regex_match_length: Option<usize>,
     pub trusted: bool,
     pub provenance: Vec<SourceRecord>,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MerchantPage {
     pub merchants: Vec<Merchant>,
     pub total: usize,
@@ -56,7 +211,7 @@ pub struct SourceRecord {
     pub raw: Value,
 }
 
-impl MerchantStore {
+impl SqliteStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -194,12 +349,18 @@ impl MerchantStore {
         for sql in [
             "SELECT data FROM merchants ORDER BY id",
             "SELECT data FROM manual_merchants ORDER BY id",
-            "SELECT data FROM source_records ORDER BY source,external_id",
+            "SELECT data,merchant_id FROM source_records ORDER BY source,external_id",
         ] {
-            let mut statement = connection.prepare(sql)?;
-            for row in statement.query_map([], |r| r.get::<_, String>(0))? {
-                contents.extend(row?.bytes());
-                contents.push(0);
+            let mut statement = connection.prepare_cached(sql)?;
+            for row in statement.query_map([], |r| {
+                (0..r.as_ref().column_count())
+                    .map(|column| r.get::<_, String>(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })? {
+                for value in row? {
+                    contents.extend(value.bytes());
+                    contents.push(0);
+                }
             }
         }
         Ok(crate::eval::fingerprint(&contents))
@@ -225,7 +386,7 @@ impl MerchantStore {
             [country],
             |row| row.get(0),
         )?;
-        let mut statement=connection.prepare("SELECT data FROM merchants WHERE (?1 IS NULL OR country=?1) ORDER BY json_extract(data,'$.name') COLLATE NOCASE,id LIMIT ?2 OFFSET ?3")?;
+        let mut statement=connection.prepare_cached("SELECT data FROM merchants WHERE (?1 IS NULL OR country=?1) ORDER BY json_extract(data,'$.name') COLLATE NOCASE,id LIMIT ?2 OFFSET ?3")?;
         let mut merchants = Vec::new();
         for data in statement.query_map(params![country, limit as i64, sql_offset], |row| {
             row.get::<_, String>(0)
@@ -255,10 +416,17 @@ impl MerchantStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("merchant database lock failed"))?;
         let mut found: HashMap<String, Candidate> = HashMap::new();
-        let mut exact = connection.prepare("SELECT m.data FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=?1 AND (?2 IS NULL OR m.country IS NULL OR m.country=?2) LIMIT 255")?;
-        for data in exact.query_map(params![query, country], |row| row.get::<_, String>(0))? {
-            let merchant: Merchant = serde_json::from_str(&data?)?;
-            let (trusted, provenance) = evidence(&connection, &merchant.id, &query)?;
+        let exact_rows = timed(Stage::ExactSql, || -> Result<Vec<String>> {
+            let mut exact = connection.prepare_cached("SELECT m.data FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=?1 AND (?2 IS NULL OR m.country IS NULL OR m.country=?2) LIMIT 255")?;
+            Ok(exact
+                .query_map(params![query, country], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })?;
+        for data in exact_rows {
+            let merchant: Merchant = timed(Stage::Decode, || serde_json::from_str(&data))?;
+            let (trusted, provenance) = timed(Stage::Evidence, || {
+                evidence(&connection, &merchant.id, &query)
+            })?;
             if excluded(&query, &provenance) && !trusted {
                 continue;
             }
@@ -268,10 +436,53 @@ impl MerchantStore {
                     merchant,
                     score: 1.0,
                     exact: true,
+                    regex_match_length: None,
                     trusted,
                     provenance,
                 },
             );
+        }
+        // Regexes must generate candidates independently of alias/token recall.
+        // Read authoritative source rows on every search so imports and links
+        // from other processes become visible immediately, including old bundles.
+        let mut rules = connection.prepare_cached("SELECT s.merchant_id,json_extract(s.data,'$.raw.transaction_text_regexp') FROM source_records s JOIN merchants m ON m.id=s.merchant_id WHERE s.source='open-enrichment' AND coalesce(json_extract(s.data,'$.raw.parent_id'),'')='' AND json_type(s.data,'$.raw.transaction_text_regexp')='text' AND (?1 IS NULL OR m.country IS NULL OR m.country=?1)")?;
+        let rows = rules.query_map([country], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut matches: HashMap<String, usize> = HashMap::new();
+        for row in rows {
+            let (id, pattern) = row?;
+            if let Some(length) = crate::regex_rules::match_length(&pattern, description) {
+                matches
+                    .entry(id)
+                    .and_modify(|v| *v = (*v).max(length))
+                    .or_insert(length);
+            }
+        }
+        for (id, length) in matches {
+            if let Some(candidate) = found.get_mut(&id) {
+                candidate.regex_match_length = Some(length);
+                continue;
+            }
+            let data: String =
+                connection.query_row("SELECT data FROM merchants WHERE id=?1", [&id], |r| {
+                    r.get(0)
+                })?;
+            let merchant = serde_json::from_str(&data)?;
+            let (trusted, provenance) = evidence(&connection, &id, &query)?;
+            if !excluded(&query, &provenance) || trusted {
+                found.insert(
+                    id,
+                    Candidate {
+                        merchant,
+                        score: 1.0,
+                        exact: false,
+                        regex_match_length: Some(length),
+                        trusted,
+                        provenance,
+                    },
+                );
+            }
         }
         let tokens: Vec<_> = query
             .split_whitespace()
@@ -297,6 +508,8 @@ impl MerchantStore {
             .map(|g| format!("\"{g}\""))
             .collect::<Vec<_>>()
             .join(" OR ");
+        let mut seen: HashSet<String> = found.keys().cloned().collect();
+        let mut scorer = crate::search_score::Scorer::new(&query);
         for (table, expression) in [
             ("merchant_tokens", token_query),
             ("merchant_trigrams", gram_query),
@@ -305,18 +518,38 @@ impl MerchantStore {
                 continue;
             }
             let sql = format!(
-                "SELECT m.data FROM {table} JOIN merchants m ON m.id={table}.merchant_id WHERE {table} MATCH ?1 AND (?2 IS NULL OR m.country IS NULL OR m.country=?2) ORDER BY {table}.rank LIMIT 100"
+                "SELECT m.id,m.data FROM {table} JOIN merchants m ON m.id={table}.merchant_id WHERE {table} MATCH ?1 AND (?2 IS NULL OR m.country IS NULL OR m.country=?2) ORDER BY {table}.rank LIMIT 100"
             );
-            let mut statement = connection.prepare(&sql)?;
-            for data in
-                statement.query_map(params![expression, country], |row| row.get::<_, String>(0))?
-            {
-                let merchant: Merchant = serde_json::from_str(&data?)?;
-                let score = std::iter::once(&merchant.name)
-                    .chain(merchant.aliases.iter())
-                    .map(|name| similarity(&query, &normalize(name)))
-                    .fold(0.0, f64::max);
-                let (trusted, provenance) = evidence(&connection, &merchant.id, &query)?;
+            let stage = if table == "merchant_tokens" {
+                Stage::TokenSql
+            } else {
+                Stage::TrigramSql
+            };
+            let rows = timed(stage, || -> Result<Vec<(String, String)>> {
+                let mut statement = connection.prepare_cached(&sql)?;
+                Ok(statement
+                    .query_map(params![expression, country], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?)
+            })?;
+            for (id, data) in rows {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let merchant: Merchant = timed(Stage::Decode, || serde_json::from_str(&data))?;
+                let score = timed(Stage::Score, || {
+                    std::iter::once(&merchant.name)
+                        .chain(merchant.aliases.iter())
+                        .map(|name| scorer.score(normalize(name)))
+                        .fold(0.0, f64::max)
+                });
+                if score < 0.35 {
+                    continue;
+                }
+                let (trusted, provenance) = timed(Stage::Evidence, || {
+                    evidence(&connection, &merchant.id, &query)
+                })?;
                 if excluded(&query, &provenance) && !trusted {
                     continue;
                 }
@@ -325,24 +558,39 @@ impl MerchantStore {
                         merchant,
                         score,
                         exact: false,
+                        regex_match_length: None,
                         trusted,
                         provenance,
                     });
                 }
             }
         }
-        let mut results: Vec<_> = found.into_values().collect();
-        results.sort_by(|a, b| {
-            b.exact
-                .cmp(&a.exact)
-                .then_with(|| b.score.total_cmp(&a.score))
-                .then_with(|| a.merchant.id.cmp(&b.merchant.id))
-        });
-        // Return all exact collisions so a truncated shortlist never appears unique.
-        let count = results.iter().take_while(|r| r.exact).count().max(limit);
-        results.truncate(count.min(254));
-        Ok(results)
+        Ok(rank_candidates(found, limit))
     }
+}
+fn rank_candidates(found: HashMap<String, Candidate>, limit: usize) -> Vec<Candidate> {
+    let mut results: Vec<_> = found.into_values().collect();
+    results.sort_by(|a, b| {
+        b.exact
+            .cmp(&a.exact)
+            .then_with(|| b.regex_match_length.cmp(&a.regex_match_length))
+            .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.merchant.id.cmp(&b.merchant.id))
+    });
+    // Preserve exact collisions and equally specific regex hits even at limit=1.
+    let exact_count = results.iter().take_while(|r| r.exact).count();
+    let regex_ties = results
+        .first()
+        .filter(|r| !r.exact)
+        .and_then(|r| r.regex_match_length)
+        .map_or(0, |length| {
+            results
+                .iter()
+                .take_while(|r| r.regex_match_length == Some(length))
+                .count()
+        });
+    results.truncate(exact_count.max(regex_ties).max(limit).min(254));
+    results
 }
 fn validate(merchant: &Merchant) -> Result<()> {
     if merchant.id.trim().is_empty() || normalize(&merchant.name).is_empty() {
@@ -373,7 +621,7 @@ fn validate(merchant: &Merchant) -> Result<()> {
 }
 
 fn source_records(connection: &Connection, id: &str) -> Result<Vec<SourceRecord>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT data FROM source_records WHERE merchant_id=?1 ORDER BY source,external_id",
     )?;
     let mut records = Vec::new();
@@ -384,9 +632,8 @@ fn source_records(connection: &Connection, id: &str) -> Result<Vec<SourceRecord>
 }
 fn evidence(connection: &Connection, id: &str, query: &str) -> Result<(bool, Vec<SourceRecord>)> {
     let data: Option<String> = connection
-        .query_row("SELECT data FROM manual_merchants WHERE id=?1", [id], |r| {
-            r.get(0)
-        })
+        .prepare_cached("SELECT data FROM manual_merchants WHERE id=?1")?
+        .query_row([id], |r| r.get(0))
         .optional()?;
     let trusted = if let Some(data) = data {
         let manual: Merchant = serde_json::from_str(&data)?;
@@ -461,25 +708,94 @@ fn rebuild(transaction: &Transaction<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn similarity(a: &str, b: &str) -> f64 {
-    let aa: HashSet<_> = a.split_whitespace().collect();
-    let bb: HashSet<_> = b.split_whitespace().collect();
-    let overlap = aa.intersection(&bb).count() as f64 / aa.union(&bb).count().max(1) as f64;
-    let token_similarity = aa
-        .iter()
-        .map(|token| {
-            bb.iter()
-                .map(|candidate| strsim::normalized_levenshtein(token, candidate))
-                .fold(0.0, f64::max)
-        })
-        .sum::<f64>()
-        / aa.len().max(1) as f64;
-    0.7 * strsim::normalized_levenshtein(a, b).max(token_similarity) + 0.3 * overlap
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub(super) fn regex_search_scenarios(store: &MerchantStore) -> Result<()> {
+        let rule = |id: &str, pattern: &str| {
+            let mut r = record(id, &format!("Rule merchant {id}"));
+            r.source = "open-enrichment".into();
+            r.raw = serde_json::json!({"transaction_text_regexp":pattern, "parent_id":""});
+            r
+        };
+        let broad = rule("regex-broad", r"(?i)^ZXQ(?: |\s)M");
+        let specific = rule("regex-specific", r"(?i)^ZXQ ME UP");
+        store.import(&[
+            broad.clone(),
+            specific.clone(),
+            rule("regex-invalid", "["),
+            rule("regex-empty", ".*"),
+        ])?;
+        let specific_id = store
+            .resolve_source("open-enrichment", "regex-specific")?
+            .unwrap();
+        let broad_id = store
+            .resolve_source("open-enrichment", "regex-broad")?
+            .unwrap();
+        let hits = store.search("sq * ZXQ ME UP 9876", Some("CA"), 10)?;
+        assert_eq!(hits[0].merchant.id, specific_id);
+        assert_eq!(hits[0].regex_match_length, Some(9));
+        assert_eq!(hits[1].merchant.id, broad_id);
+        assert_eq!(hits[1].regex_match_length, Some(5));
+        assert!(!hits[0].exact && !hits[0].trusted);
+        assert_eq!(hits[0].provenance[0].external_id, "regex-specific");
+        assert!(
+            store
+                .search("ZXQ ME UP 9876", Some("US"), 10)?
+                .iter()
+                .all(|c| c.regex_match_length.is_none())
+        );
+        let tied = rule("regex-tied", r"(?i)^ZXQ ME UP");
+        store.import(&[tied])?;
+        assert_eq!(store.search("ZXQ ME UP 9876", None, 1)?.len(), 2);
+        let mut refreshed = specific.clone();
+        refreshed.raw["transaction_text_regexp"] = serde_json::json!(r"(?i)^REPLACEMENT\b");
+        store.import(&[refreshed])?;
+        assert!(
+            !store
+                .search("ZXQ ME UP 9876", None, 10)?
+                .iter()
+                .any(|c| c.merchant.id == specific_id && c.regex_match_length.is_some())
+        );
+        assert_eq!(
+            store.search("REPLACEMENT 9876", None, 10)?[0].merchant.id,
+            specific_id
+        );
+        store.link("open-enrichment", "regex-broad", &specific_id)?;
+        assert_eq!(
+            store.search("ZXQ MARATHON 9876", None, 10)?[0].merchant.id,
+            specific_id
+        );
+        let mut negative = rule("regex-negative", r"^EXCLUDED\b");
+        negative.raw["negativeAliases"] = serde_json::json!(["EXCLUDED TEST"]);
+        store.import(&[negative])?;
+        assert!(
+            store
+                .search("EXCLUDED TEST", None, 10)?
+                .iter()
+                .all(|c| c.regex_match_length.is_none())
+        );
+        let mut child = rule("regex-child", "CHILDRULE");
+        child.raw["parent_id"] = serde_json::json!("some-parent");
+        store.import(&[child])?;
+        assert!(
+            store
+                .search("CHILDRULE", None, 10)?
+                .iter()
+                .all(|c| c.regex_match_length.is_none())
+        );
+        let mut manual = merchant("regex-manual", "Manually verified", "CA");
+        manual.aliases = vec!["ZXQ ME UP 9876".into()];
+        store.put(&manual)?;
+        let hits = store.search("ZXQ ME UP 9876", None, 10)?;
+        assert_eq!(hits[0].merchant.id, manual.id);
+        assert!(hits[0].trusted && hits[0].exact);
+        Ok(())
+    }
+    #[test]
+    fn open_enrichment_regex_search() -> Result<()> {
+        regex_search_scenarios(&MerchantStore::memory()?)
+    }
     fn merchant(id: &str, name: &str, country: &str) -> Merchant {
         Merchant {
             id: id.into(),
@@ -502,6 +818,31 @@ mod tests {
             url: "https://example.com".into(),
             version: Some("1".into()),
             raw: serde_json::json!({}),
+        }
+    }
+    #[test]
+    fn ascii_normalization_matches_unicode_reference() {
+        fn reference(value: &str) -> String {
+            value
+                .nfkd()
+                .filter(|c| !is_combining_mark(*c))
+                .flat_map(char::to_lowercase)
+                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        let ascii: String = (0..=127).map(char::from).collect();
+        for value in [
+            &ascii,
+            "  A--B___123 \tZ!",
+            "",
+            "---",
+            "Julius Café",
+            "İß 東京",
+        ] {
+            assert_eq!(normalize(value), reference(value));
         }
     }
     #[test]
@@ -612,4 +953,13 @@ mod tests {
         assert!(db.search("NEW DESCRIPTION", None, 10).unwrap()[0].exact);
         db.search("\" OR * (NEAR) --", None, 10).unwrap();
     }
+}
+
+#[cfg(test)]
+#[path = "postgres_tests.rs"]
+mod postgres_tests;
+
+/// Aggregate SQLite search timings when ULTRAFINANCE_PROFILE_SEARCH=1.
+pub fn search_profile() -> Option<Value> {
+    crate::search_profile::report()
 }

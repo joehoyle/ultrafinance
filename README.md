@@ -1,7 +1,7 @@
 # Ultrafinance
 
 A small synchronous merchant enrichment API in Rust. Axum serves HTTP, and the
-independent `ultrafinance-core` crate retrieves merchant candidates from SQLite
+independent `ultrafinance-core` crate retrieves merchant candidates from PostgreSQL (or local SQLite)
 and uses Jev to evaluate fuzzy matches. Unique normalized exact aliases resolve
 locally without a provider call.
 One request returns a completed result; there are no background jobs.
@@ -12,11 +12,11 @@ One request returns a completed result; there are no background jobs.
 cargo run -p ultrafinance-api
 ```
 
-The server binds to `127.0.0.1:3000` and opens `data/ultrafinance.sqlite`.
+The server binds to `127.0.0.1:3000`. Set `ULTRAFINANCE_DATABASE_URL` to use PostgreSQL; without it, local development opens `data/ultrafinance.sqlite`.
 An empty database returns `unresolved` without calling any provider.
 
 Open `http://127.0.0.1:3000/` for the project website, copyable HTTP/CLI examples,
-and an interactive merchant lookup. The form calls `/v1/enrich` on the same
+an interactive merchant lookup, and a searchable merchant explorer. The form calls `/v1/enrich` on the same
 origin. Static hosting needs a same-origin proxy for `/v1/enrich` to support
 live lookups.
 The standalone page lives in `website/index.html` and can also be hosted by any
@@ -118,6 +118,37 @@ cargo run -- enrich 'LS' --country CA --dry-run
 cargo run -- enrich --help
 ```
 
+Enrich multiple transactions through the same core batching path:
+
+```sh
+cargo run -- enrich-batch --input transactions.json
+curl -X POST http://localhost:3000/v1/enrich/batch \
+  -H 'Content-Type: application/json' --data-binary @transactions.json
+```
+
+Both accept `{"transactions":[{"description":"EXAMPLE CAFE","country":"CA"}, ...]}`
+with 1–100 transactions and a 1 MiB body limit. Results appear in input order as
+`{"results":[{"status":"success","data":{"merchant":...}},
+{"status":"error","code":"enrichment_failed","message":"..."}]}`.
+Validation and provider errors are reported per transaction; the CLI prints all
+results and exits nonzero if any failed. Invalid JSON or an invalid batch envelope
+rejects the whole request. The bulk API has a 55-second overall deadline; exceeding
+it returns 504 for the whole batch.
+
+Single enrichment, bulk enrichment, and `eval --mode enrich` share the same
+provider logic. Verified exact matches and empty shortlists resolve locally.
+Remaining transactions become independent named Choice questions in Jev's
+`/v1/systemone` request, with each transaction's evidence inside its own question
+and an empty shared state. Requests hold up to 32 questions, with conservative
+48 KiB encoded request and 24 KiB per-question budgets, and at most four provider
+calls in flight per batch. These byte budgets leave context headroom rather than
+estimating model tokens. Oversized question evidence returns a per-item error;
+it is never silently truncated. Catalog imports continue to update merchant
+knowledge without calling the provider.
+
+The question packing uses TypeSafe's documented [parallel questions](https://docs.typesafe.ai/introduction)
+and [structured instructions](https://docs.typesafe.ai/primitives/advanced).
+
 Optionally install the binary for shorter commands:
 
 ```sh
@@ -174,8 +205,19 @@ real-world accuracy. Keep a separately labeled real-world holdout for that.
 Merchant Studio and Open Enrichment provide merchant labels. A missing merchant
 label is retained as unlabeled, never assumed to mean `unresolved`. Open Enrichment
 child places are retained as unlabeled examples but excluded from the brand catalog;
-its icons are not imported. DoDataThings is synthetic category-labeled data;
-MoneyVis has real descriptions without merchant labels. MoneyVis account numbers,
+its icons are not imported.
+
+Open Enrichment's retained `transaction_text_regexp` rules also generate search
+candidates from original descriptors and a form with common payment processor
+prefixes removed. Exact aliases rank first, followed by regex hits ordered by
+matched substring length, then fuzzy candidates. Equally specific rules remain
+ambiguous; regex hits still go through Jev rather than bypassing it as trusted
+manual aliases do. Invalid, empty-matching, oversized, or unsupported PCRE rules
+(such as lookaround and backreferences) are ignored by the bounded Rust regex
+engine. Existing imported bundles benefit without reimporting.
+
+DoDataThings is synthetic category-labeled data; MoneyVis has real descriptions
+without merchant labels. MoneyVis account numbers,
 sort codes, and balances are discarded. Repeated descriptions are deduplicated,
 so output counts differ from transaction row counts.
 
@@ -209,12 +251,26 @@ Coverage does not establish whether predicted merchants are correct.
 Unlabeled samples are omitted by `datasets export-eval`. Development samples can be used for matching rules
 or future training; this importer does not train a model.
 
+For search profiling, run:
+
+```sh
+ULTRAFINANCE_PROFILE_SEARCH=1 cargo run -- eval --all --limit 500
+```
+
+This prints aggregate SQLite timings for exact, token, and trigram SQL,
+JSON decoding, fuzzy scoring, and provenance reads. It logs no descriptors or
+merchant records. The flag is off by default. `--limit` applies to each suite;
+use an unrestricted run for the complete benchmark. Enrichment evaluations
+reuse the measured candidate shortlist rather than searching twice per case.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ULTRAFINANCE_BIND` | `127.0.0.1:3000` | Listening address |
-| `ULTRAFINANCE_DB` | `data/ultrafinance.sqlite` | SQLite merchant database |
+| `ULTRAFINANCE_DATABASE_URL` | unset | PostgreSQL URL; takes precedence over local SQLite and API JSON catalogs |
+| `ULTRAFINANCE_REQUIRE_POSTGRES` | unset locally; `true` in Docker | Refuse API startup without PostgreSQL |
+| `ULTRAFINANCE_DB` | `data/ultrafinance.sqlite` | Local SQLite fallback |
 | `ULTRAFINANCE_MERCHANTS` | unset | Optional JSON catalog instead of SQLite |
 | `TYPESAFE_API_KEY` | unset | Jev credential |
 | `JEV_MODEL` | `jev-latest` | Jev model |
@@ -224,6 +280,119 @@ The threshold is provisional, not an accuracy guarantee. Evaluate against labele
 transactions before trusting matches automatically. Search retrieves the top 10 candidates for Jev, plus any exact alias collisions.
 The database can contain more than 254 merchants; Jev receives at most 254
 candidates, reserving its final choice for insufficient evidence.
+
+## PostgreSQL and production imports
+
+Set `ULTRAFINANCE_DATABASE_URL` securely in your environment. Production URLs
+should require TLS (`sslmode=require`) and use the provider's trusted certificate.
+The client validates certificates and hostnames. For a disposable local server,
+`postgresql://localhost/ultrafinance?sslmode=disable` is supported.
+
+Initialize with a schema administration role, then migrate the authoritative
+SQLite catalog with a write role:
+
+```sh
+cargo run -- database init
+cargo run -- database migrate-sqlite data/ultrafinance.sqlite
+cargo run -- merchants list --json
+```
+
+Migration requires an empty destination catalog and opens SQLite read-only.
+It copies source records, links, local IDs, manual overrides, and logos in one
+transaction, then rebuilds search indexes and verifies the complete catalog fingerprint before committing. Do not seed production from
+`deploy/catalog.json` or `export-catalog.py`: those flattened exports do not
+preserve the full import and correction history. Keep the source SQLite backup
+until the production catalog has been verified. Migration refuses to overwrite
+an existing catalog.
+
+Once connected to production, the usual commands update the shared database:
+
+```sh
+cargo run -- datasets apply data/datasets/YOUR_BUNDLE/knowledge.json
+cargo run -- merchants import data/imports/merchant-studio.json --format merchant-studio
+cargo run -- merchants add --id mer_EXISTING --name 'Corrected merchant' --country CA
+cargo run -- merchants link --source merchant-studio --external-id SOURCE_ID --merchant-id mer_EXISTING
+```
+
+For private Aurora access without a management instance, run the same CLI binary
+as an on-demand ARM64 Fargate task. CLI infrastructure is provisioned automatically
+with Aurora and the application image when you apply with `./infra/tofu.sh`.
+Store a TLS-enabled URL for a separate database write role using a hidden prompt:
+
+```sh
+python3 deploy/prod-cli.py --configure-database
+python3 deploy/prod-cli.py -- merchants list --json
+python3 deploy/prod-cli.py --input data/datasets/YOUR_BUNDLE/knowledge.json -- datasets apply @input
+python3 deploy/prod-cli.py --input data/imports/merchant-studio.json -- merchants import @input --format merchant-studio
+```
+
+The runner reuses the immutable ECR image deployed to Lambda's `live` alias,
+overriding its entrypoint with `/usr/local/bin/ultrafinance`. Use `--image
+ECR_REPOSITORY@sha256:DIGEST` before a PostgreSQL cutover or to select another
+release explicitly. A short-lived AWS CLI helper downloads the staged input
+into a shared volume before the application container starts; the application
+image needs no additional tools or changes. Tasks use the existing private
+subnets and NAT gateway, run without a public IP, and stop after the command.
+The runner prints CloudWatch logs and fails on task startup or command errors.
+
+For initial migration, use a schema administration URL with `database init`,
+then configure the import-role URL and migrate the catalog:
+
+```sh
+python3 deploy/prod-cli.py -- database init
+python3 deploy/prod-cli.py --configure-database
+python3 deploy/prod-cli.py --input data/ultrafinance.sqlite -- database migrate-sqlite @input
+```
+
+Configure the administration URL through the same hidden prompt before the first
+command; keep the secret on the import role afterwards. Use `--image` for these
+commands if `live` still runs a pre-PostgreSQL release. The SQLite upload uses
+SQLite's backup API to include committed WAL data and leave the local database
+untouched. Migration still requires an empty destination catalog.
+
+Files are staged in a private encrypted S3 bucket and removed after a completed
+task; leftover files expire after seven days. If waiting times out or is
+interrupted, the task continues and its input is preserved. Check the printed
+task ARN before retrying a write: the runner never retries an import itself.
+Secret values stay out of OpenTofu state, command arguments, and runner output.
+Commands that prepare datasets remain local; this runner supports shared-catalog
+merchant operations, database commands, and `datasets apply`.
+
+Imports validate the batch before writing and commit atomically. Writers use a
+transaction advisory lock to serialize imports, corrections, and links across
+processes. API reads use consistent snapshots and see committed changes on the
+next request. PostgreSQL uses indexed token-prefix and substring-trigram
+retrieval; the final Rust similarity score, provenance, negative aliases, and
+verified exact-match rules remain the same. Candidate ranking may differ from
+SQLite FTS, so compare held-out evaluations before production cutover.
+
+Schema creation is an explicit CLI operation, never an API startup side effect.
+Use a runtime role with `CONNECT`, schema `USAGE`, and `SELECT` on catalog tables
+for Lambda. Use a separate import role with `SELECT`, `INSERT`, `UPDATE`, and
+`DELETE`, and an administration role that can install `pg_trgm` and run schema
+migrations. Configure managed database backups and a connection budget before
+cutover: each Lambda execution environment opens at most one connection on its
+first catalog operation. Static pages and health checks do not connect to the
+database. PostgreSQL closes sessions idle for 60 seconds; before each operation
+the worker probes the connection and reconnects if necessary. It never replays
+a job after execution begins, so uncertain write outcomes aren't duplicated.
+Size Lambda concurrency to the database's connection budget. RDS Proxy keeps
+connections open and prevents Aurora auto-pause, so it is not used here.
+
+Aurora Serverless v2 can pause after five minutes without connections with
+`aurora_min_acu = 0`. With idle session expiry, that is roughly six minutes after
+the last database activity, provided no other clients hold connections open.
+The app allows 35 seconds to connect and 50/55 seconds for catalog/enrichment
+requests, bounded by 60-second Lambda/CloudFront limits. The browser waits 65
+seconds. The first lookup after a pause can take 15–30+ seconds to resume;
+unusually slow resumes can still time out and require a fresh request.
+
+The PostgreSQL integration test runs against an **empty disposable database**:
+
+```sh
+ULTRAFINANCE_TEST_DATABASE_URL=postgresql://localhost/ultrafinance_test?sslmode=disable \
+  cargo test -p ultrafinance-core postgres_ -- --ignored
+```
 
 ## Merchant database and search
 
@@ -246,7 +415,7 @@ Generated merchant IDs remain stable. To replace a record and its aliases, use
 `merchants add --id EXISTING_ID ...`. Import an existing JSON catalog with
 `merchants import FILE`. Imports update source/external ID pairs; repeat imports preserve local IDs.
 Imported aliases remain unverified and cannot bypass Jev. Manual names, country,
-website and verified aliases take precedence over imported records. `--database FILE` overrides the SQLite path globally.
+website and verified aliases take precedence over imported records. `--database FILE` overrides the local SQLite path globally. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects PostgreSQL for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
 
 Search removes accents, folds case, and normalizes punctuation and whitespace.
 Exact aliases are indexed separately; SQLite FTS5 token/prefix and trigram
@@ -325,7 +494,7 @@ cargo run -- eval --all --mode enrich --limit 100
 ```
 
 The default search run is offline. Enrich mode runs actual matching and may call
-Jev; `--limit` applies to each suite. The CLI shows suite progress and a summary
+Jev; `--limit` applies to each suite. The CLI shows completed/total cases and elapsed time while each suite runs, then a summary
 table with case counts, labels, candidate coverage, retrieval recall, match rate,
 accuracy, and errors. Totals are calculated across cases, not averaged across
 suites. Unlabeled cases contribute to coverage and match rate; accuracy uses only
@@ -336,7 +505,7 @@ Every run saves individual reports and `summary.json` in a unique directory unde
 `--datasets-dir DIR` to change snapshot discovery, or `--suites-dir DIR` for suite
 files. Batch discovery excludes development files, older snapshots, nested report
 directories, and temporary preparations. All inputs are validated before provider
-calls. Suite failures are displayed, remaining suites continue, and the command
+calls. Execution failures are displayed, remaining suites continue, and the command
 exits nonzero if any suite or case errors. Reports identify the exact input paths.
 
 
@@ -405,6 +574,11 @@ or imported dataset being evaluated. Grow coverage as bugs are found, tracking
 which cases were used for tuning. Include a natural mix of cases; report curated
 stress cases separately rather than treating their accuracy as production accuracy.
 
+Enrichment evals process windows of up to 100 cases and reuse their retrieved
+shortlists. Enrichment case latency includes waiting within that window for
+retrieval and shared provider calls; use the suite wall time to assess throughput.
+Search-only latency remains the individual catalog lookup time.
+
 Reports include per-case ranks, predictions, correctness, errors, latency,
 suite/database/code fingerprints, model and threshold. Save reports for each
 change and compare the same suite and database snapshot when isolating algorithm
@@ -415,7 +589,7 @@ by Git; reports still contain labels and merchant identifiers.
 
 ## Current scope
 
-This version stores merchants and aliases in SQLite and evaluates retrieved
+This version stores merchants and aliases in PostgreSQL (or local SQLite) and evaluates retrieved
 candidates. It does not yet discover merchants through web research, use
 embeddings, or cache transaction results. Retrieval currently uses the description
 and country; Jev considers all supplied fields and `extra` when evaluating the
@@ -424,8 +598,8 @@ Jev key produce a configuration error. The server defaults to a local binding.
 The API is public without client authentication. The function URL setup has no
 application request throttle.
 Provider requests have a 20-second timeout,
-and enrichment has a 25-second overall deadline. No provider response bodies or
-credentials are logged. SQLite operations during API enrichment run on Tokio's
+and enrichment has a 55-second overall deadline, including database resume. No provider response bodies or
+credentials are logged. Store operations during API enrichment run on Tokio's
 blocking thread pool.
 
 ```sh
@@ -443,3 +617,21 @@ storage approach packages a SQLite catalog snapshot into each image. After the
 initial infrastructure setup, `./deploy/deploy.sh` builds, checks and promotes a
 release through the stable `live` alias. GitHub Actions can run the same release
 process from `main` using AWS OIDC.
+
+## Merchant explorer
+
+The website browses the live catalog using `GET /v1/merchants`. Optional query
+parameters are `q` (name or alias), `country` (uppercase two-letter code),
+`limit` (1–100, default 20), and `offset` (0–1000000, default 0). The response
+contains `merchants`, `total`, `limit`, and `offset`. Browsing is alphabetical
+and paginated across the full catalog. Search paginates a ranked shortlist of
+up to 100 candidates (up to 255 for exact alias collisions); its total describes
+that shortlist. Search includes merchants with unknown country when a country
+is supplied. Browsing filters to the specified country exactly. Catalog queries
+do not call the AI provider. Cards show merchant IDs, websites, and aliases;
+“Try lookup” fills the enrichment form without submitting it.
+
+The development profile optimizes the enrichment core, JSON/edit-distance dependencies, and bundled SQLite engine
+while retaining debug symbols, so offline evals are practical with `cargo run`.
+Search reuses query tokenization and similarity scores within each request and
+scores each retrieved merchant once. For production timing, use `cargo run --release`.

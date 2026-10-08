@@ -18,6 +18,29 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 rusqlite = { version = "0.38", features = ["bundled"] }
 unicode-normalization = "0.1"
 strsim = "0.11"
+rapidfuzz = "0.5"
+regex = "1"
 uuid = { version = "1", features = ["v4"] }
 csv = "1.4"
 utoipa = "6"
+
+postgres = "0.19"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+
+# Fuzzy scoring is CPU-heavy; keep normal `cargo run` practical while retaining debug symbols.
+[profile.dev.package.ultrafinance-core]
+opt-level = 2
+
+[profile.dev.package.strsim]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 2
+
+# This also enables C optimization for the bundled SQLite engine, including FTS.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
+
+[profile.dev.package.rapidfuzz]
+opt-level = 3

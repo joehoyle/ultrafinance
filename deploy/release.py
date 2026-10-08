@@ -30,6 +30,9 @@ class Lambda:
         for method, path, body, expected in [
             ("GET", "/health", None, 200),
             ("GET", "/", None, 200),
+            # Startup/health are intentionally database-lazy. Exercise a real
+            # catalog read before promotion to catch URL/schema/connect failures.
+            ("GET", "/v1/merchants", None, 200),
             ("POST", "/v1/enrich", '{"description":""}', 422),
         ]:
             event = {
