@@ -1,3 +1,4 @@
+use crate::markets::{MarketIndex, market_counts, paginate};
 use crate::search_profile::{Stage, timed};
 use crate::{
     Merchant,
@@ -163,12 +164,12 @@ impl MerchantStore {
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?)
         }
-        let merchants = read(&transaction, "SELECT id,data FROM merchants ORDER BY id")?;
-        let manual = read(
+        let mut merchants = read(&transaction, "SELECT id,data FROM merchants ORDER BY id")?;
+        let mut manual = read(
             &transaction,
             "SELECT id,data FROM manual_merchants ORDER BY id",
         )?;
-        let sources = read(
+        let mut sources = read(
             &transaction,
             "SELECT merchant_id,data FROM source_records ORDER BY source,external_id",
         )?;
@@ -181,6 +182,15 @@ impl MerchantStore {
         } else {
             vec![]
         };
+        let version: i64 = transaction.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 3 {
+            for (_, data) in merchants.iter_mut().chain(manual.iter_mut()) {
+                *data = crate::markets::migrate_country(data, false)?;
+            }
+            for (_, data) in &mut sources {
+                *data = crate::markets::migrate_country(data, true)?;
+            }
+        }
         let mut contents = Vec::new();
         for (_, data) in merchants.iter().chain(manual.iter()) {
             contents.extend(data.bytes());
@@ -317,10 +327,17 @@ impl MerchantStore {
             Backend::Postgres(s) => s.fingerprint(),
         }
     }
-    pub fn list(&self, country: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
+    /// Catalog counts from one consistent database snapshot.
+    pub fn stats(&self) -> Result<MerchantStats> {
         match &self.0 {
-            Backend::Sqlite(s) => s.list(country, limit, offset),
-            Backend::Postgres(s) => s.list(country, limit, offset),
+            Backend::Sqlite(s) => s.stats(),
+            Backend::Postgres(s) => s.stats(),
+        }
+    }
+    pub fn list(&self, market: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
+        match &self.0 {
+            Backend::Sqlite(s) => s.list(market, limit, offset),
+            Backend::Postgres(s) => s.list(market, limit, offset),
         }
     }
     pub fn search(
@@ -357,6 +374,43 @@ pub struct MerchantPage {
     pub offset: usize,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MerchantStats {
+    pub total: usize,
+    /// Includes manual corrections to imported merchants.
+    pub manual: usize,
+    pub without_source: usize,
+    pub by_source: Vec<MerchantSourceStats>,
+    pub without_market_evidence: usize,
+    pub by_market: Vec<MerchantMarketStats>,
+    pub by_source_region: Vec<MerchantRegionStats>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MerchantSourceStats {
+    pub source: String,
+    pub merchants: usize,
+    pub records: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MerchantMarketStats {
+    pub market: String,
+    pub merchants: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MerchantRegionStats {
+    pub source: String,
+    pub region: String,
+    pub merchants: usize,
+    pub records: usize,
+}
+
+// Portable aggregate queries shared by SQLite and PostgreSQL.
+const STATS_TOTALS: &str = "SELECT (SELECT COUNT(*) FROM merchants), (SELECT COUNT(*) FROM manual_merchants), (SELECT COUNT(*) FROM merchants m WHERE NOT EXISTS (SELECT 1 FROM source_records s WHERE s.merchant_id=m.id))";
+const STATS_SOURCES: &str = "SELECT source,COUNT(DISTINCT merchant_id),COUNT(*) FROM source_records GROUP BY source ORDER BY COUNT(DISTINCT merchant_id) DESC,source";
+
 /// An external record retained independently from manual merchant corrections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRecord {
@@ -387,7 +441,7 @@ impl SqliteStore {
             CREATE INDEX IF NOT EXISTS enrichment_log_created ON enrichment_log(created_at DESC,id);
             CREATE INDEX IF NOT EXISTS enrichment_log_status ON enrichment_log(status,created_at DESC);
             CREATE INDEX IF NOT EXISTS enrichment_log_merchant ON enrichment_log(merchant_id,created_at DESC);
-            CREATE TABLE IF NOT EXISTS merchants(id TEXT PRIMARY KEY, country TEXT, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS merchants(id TEXT PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS aliases(merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE, normalized TEXT NOT NULL, PRIMARY KEY(merchant_id, normalized));
             CREATE INDEX IF NOT EXISTS aliases_normalized ON aliases(normalized);
             CREATE VIRTUAL TABLE IF NOT EXISTS merchant_tokens USING fts5(merchant_id UNINDEXED, text, tokenize='unicode61');
@@ -406,6 +460,30 @@ impl SqliteStore {
                 [],
             )?;
             transaction.execute_batch("PRAGMA user_version=1;")?;
+        }
+        if version < 3 {
+            for table in ["merchants", "manual_merchants", "source_records"] {
+                let rows: Vec<(i64, String)> = transaction
+                    .prepare(&format!("SELECT rowid,data FROM {table}"))?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (rowid, data) in rows {
+                    let data = crate::markets::migrate_country(&data, table == "source_records")?;
+                    transaction.execute(
+                        &format!("UPDATE {table} SET data=?1 WHERE rowid=?2"),
+                        params![data, rowid],
+                    )?;
+                }
+            }
+            let has_country: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('merchants') WHERE name='country')",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_country {
+                transaction.execute_batch("ALTER TABLE merchants DROP COLUMN country;")?;
+            }
+            transaction.execute_batch("PRAGMA user_version=3;")?;
         }
         transaction.commit()?;
         Ok(Self(Arc::new(Mutex::new(connection))))
@@ -451,7 +529,7 @@ impl SqliteStore {
                 .optional()?;
             let id = existing.unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple()));
             transaction.execute(
-                "INSERT OR IGNORE INTO merchants VALUES(?1,NULL,?2)",
+                "INSERT OR IGNORE INTO merchants(id,data) VALUES(?1,?2)",
                 params![id, serde_json::to_string(&record.merchant)?],
             )?;
             transaction.execute("INSERT INTO source_records VALUES(?1,?2,?3,?4) ON CONFLICT(source,external_id) DO UPDATE SET data=excluded.data", params![record.source,record.external_id,id,serde_json::to_string(record)?])?;
@@ -533,39 +611,86 @@ impl SqliteStore {
         Ok(crate::eval::fingerprint(&contents))
     }
 
-    /// Browse stored merchants by name, with deterministic pagination.
-    pub fn list(&self, country: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
-        if !(1..=1000).contains(&limit) {
-            bail!("limit must be between 1 and 1000");
-        }
-        if country
-            .is_some_and(|value| value.len() != 2 || !value.bytes().all(|c| c.is_ascii_uppercase()))
-        {
-            bail!("country must be a two-letter uppercase code");
-        }
-        let sql_offset = i64::try_from(offset)?;
-        let connection = self
+    pub fn stats(&self) -> Result<MerchantStats> {
+        let mut connection = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("merchant database lock failed"))?;
-        let total: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM merchants WHERE (?1 IS NULL OR country=?1)",
-            [country],
-            |row| row.get(0),
-        )?;
-        let mut statement=connection.prepare_cached("SELECT data FROM merchants WHERE (?1 IS NULL OR country=?1) ORDER BY json_extract(data,'$.name') COLLATE NOCASE,id LIMIT ?2 OFFSET ?3")?;
-        let mut merchants = Vec::new();
-        for data in statement.query_map(params![country, limit as i64, sql_offset], |row| {
-            row.get::<_, String>(0)
+        let tx = connection.transaction()?;
+        let (total, manual, without_source): (i64, i64, i64) =
+            tx.query_row(STATS_TOTALS, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let mut by_source = Vec::new();
+        for row in tx.prepare_cached(STATS_SOURCES)?.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })? {
-            merchants.push(serde_json::from_str(&data?)?);
+            let (source, merchants, records) = row?;
+            by_source.push(MerchantSourceStats {
+                source,
+                merchants: usize::try_from(merchants)?,
+                records: usize::try_from(records)?,
+            });
         }
-        Ok(MerchantPage {
-            merchants,
+        let index = sqlite_markets(&tx, None)?;
+        let merchants = sqlite_catalog(&tx, &index)?;
+        let (without_market_evidence, by_market) = market_counts(&merchants);
+        let by_source_region = index.region_stats();
+        tx.commit()?;
+        Ok(MerchantStats {
             total: usize::try_from(total)?,
-            limit,
-            offset,
+            manual: usize::try_from(manual)?,
+            without_source: usize::try_from(without_source)?,
+            by_source,
+            without_market_evidence,
+            by_market,
+            by_source_region,
         })
+    }
+
+    /// Browse stored merchants by name, with deterministic pagination.
+    pub fn list(&self, market: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
+        if !(1..=1000).contains(&limit) {
+            bail!("limit must be between 1 and 1000");
+        }
+        if market
+            .is_some_and(|value| value.len() != 2 || !value.bytes().all(|c| c.is_ascii_uppercase()))
+        {
+            bail!("market must be a two-letter uppercase code");
+        }
+        let sql_offset = i64::try_from(offset)?;
+        let mut connection = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("merchant database lock failed"))?;
+        let tx = connection.transaction()?;
+        let page = if market.is_some() {
+            let index = sqlite_markets(&tx, None)?;
+            paginate(sqlite_catalog(&tx, &index)?, market, limit, offset)
+        } else {
+            let total: i64 = tx.query_row("SELECT COUNT(*) FROM merchants", [], |r| r.get(0))?;
+            let mut statement = tx.prepare_cached("SELECT data FROM merchants ORDER BY json_extract(data,'$.name') COLLATE NOCASE,id LIMIT ?1 OFFSET ?2")?;
+            let mut merchants = Vec::new();
+            for data in
+                statement.query_map(params![limit as i64, sql_offset], |r| r.get::<_, String>(0))?
+            {
+                let merchant: Merchant = serde_json::from_str(&data?)?;
+                merchants.push(merchant);
+            }
+            let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();
+            let index = sqlite_markets(&tx, Some(&ids))?;
+            let merchants = merchants.into_iter().map(|m| index.hydrate(m)).collect();
+            MerchantPage {
+                merchants,
+                total: usize::try_from(total)?,
+                limit,
+                offset,
+            }
+        };
+        tx.commit()?;
+        Ok(page)
     }
 
     pub fn search(
@@ -578,15 +703,16 @@ impl SqliteStore {
         if query.is_empty() || limit == 0 {
             return Ok(vec![]);
         }
-        let connection = self
+        let mut guard = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("merchant database lock failed"))?;
+        let connection = guard.transaction()?;
         let mut found: HashMap<String, Candidate> = HashMap::new();
         let exact_rows = timed(Stage::ExactSql, || -> Result<Vec<String>> {
-            let mut exact = connection.prepare_cached("SELECT m.data FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=?1 AND (?2 IS NULL OR m.country IS NULL OR m.country=?2) LIMIT 255")?;
+            let mut exact = connection.prepare_cached("SELECT m.data FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=?1 LIMIT 255")?;
             Ok(exact
-                .query_map(params![query, country], |row| row.get::<_, String>(0))?
+                .query_map(params![query], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<_>>()?)
         })?;
         for data in exact_rows {
@@ -612,10 +738,8 @@ impl SqliteStore {
         // Regexes must generate candidates independently of alias/token recall.
         // Read authoritative source rows on every search so imports and links
         // from other processes become visible immediately, including old bundles.
-        let mut rules = connection.prepare_cached("SELECT s.merchant_id,json_extract(s.data,'$.raw.transaction_text_regexp') FROM source_records s JOIN merchants m ON m.id=s.merchant_id WHERE s.source='open-enrichment' AND coalesce(json_extract(s.data,'$.raw.parent_id'),'')='' AND json_type(s.data,'$.raw.transaction_text_regexp')='text' AND (?1 IS NULL OR m.country IS NULL OR m.country=?1)")?;
-        let rows = rules.query_map([country], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let mut rules = connection.prepare_cached("SELECT s.merchant_id,json_extract(s.data,'$.raw.transaction_text_regexp') FROM source_records s JOIN merchants m ON m.id=s.merchant_id WHERE s.source='open-enrichment' AND coalesce(json_extract(s.data,'$.raw.parent_id'),'')='' AND json_type(s.data,'$.raw.transaction_text_regexp')='text'")?;
+        let rows = rules.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut matches: HashMap<String, usize> = HashMap::new();
         for row in rows {
             let (id, pattern) = row?;
@@ -685,7 +809,7 @@ impl SqliteStore {
                 continue;
             }
             let sql = format!(
-                "SELECT m.id,m.data FROM {table} JOIN merchants m ON m.id={table}.merchant_id WHERE {table} MATCH ?1 AND (?2 IS NULL OR m.country IS NULL OR m.country=?2) ORDER BY {table}.rank LIMIT 100"
+                "SELECT m.id,m.data FROM {table} JOIN merchants m ON m.id={table}.merchant_id WHERE {table} MATCH ?1 ORDER BY {table}.rank LIMIT 100"
             );
             let stage = if table == "merchant_tokens" {
                 Stage::TokenSql
@@ -695,9 +819,7 @@ impl SqliteStore {
             let rows = timed(stage, || -> Result<Vec<(String, String)>> {
                 let mut statement = connection.prepare_cached(&sql)?;
                 Ok(statement
-                    .query_map(params![expression, country], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })?
+                    .query_map(params![expression], |row| Ok((row.get(0)?, row.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?)
             })?;
             for (id, data) in rows {
@@ -732,16 +854,95 @@ impl SqliteStore {
                 }
             }
         }
-        Ok(rank_candidates(found, limit))
+        let ids: Vec<_> = found.keys().cloned().collect();
+        let index = sqlite_markets(&connection, Some(&ids))?;
+        for candidate in found.values_mut() {
+            candidate.merchant = index.hydrate(candidate.merchant.clone());
+        }
+        Ok(rank_candidates(found, limit, country))
     }
 }
-fn rank_candidates(found: HashMap<String, Candidate>, limit: usize) -> Vec<Candidate> {
+fn sqlite_markets(connection: &Connection, ids: Option<&[String]>) -> Result<MarketIndex> {
+    let mut index = MarketIndex::default();
+    let ids = ids.map(serde_json::to_string).transpose()?;
+    let filter = |column: &str| {
+        if ids.is_some() {
+            format!("{column} IN (SELECT value FROM json_each(?1))")
+        } else {
+            "?1 IS NULL".into()
+        }
+    };
+    let manual_sql = format!(
+        "SELECT id,data FROM manual_merchants WHERE {}",
+        filter("id")
+    );
+    for row in connection
+        .prepare_cached(&manual_sql)?
+        .query_map([&ids], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+    {
+        let (id, data) = row?;
+        index.declaration(&id, &serde_json::from_str(&data)?, "manual", None);
+    }
+    let sources_sql = format!(
+        "SELECT merchant_id,data FROM source_records WHERE {} ORDER BY source,external_id",
+        filter("merchant_id")
+    );
+    for row in connection
+        .prepare_cached(&sources_sql)?
+        .query_map([&ids], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+    {
+        let (id, data) = row?;
+        index.source(&id, &serde_json::from_str(&data)?);
+    }
+    let outlets_sql = if ids.is_some() {
+        format!(
+            "SELECT merchant_id,data FROM location_records WHERE {} UNION ALL SELECT s.merchant_id,l.data FROM source_records s JOIN location_records l ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE l.merchant_id IS NULL AND {}",
+            filter("merchant_id"),
+            filter("s.merchant_id")
+        )
+    } else {
+        "SELECT COALESCE(l.merchant_id,s.merchant_id),l.data FROM location_records l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE ?1 IS NULL".into()
+    };
+    for row in connection
+        .prepare_cached(&outlets_sql)?
+        .query_map([&ids], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+    {
+        let (id, data) = row?;
+        index.outlet(&id, &serde_json::from_str(&data)?);
+    }
+    Ok(index)
+}
+fn sqlite_catalog(connection: &Connection, index: &MarketIndex) -> Result<Vec<Merchant>> {
+    connection
+        .prepare_cached("SELECT data FROM merchants")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .map(|data| Ok(index.hydrate(serde_json::from_str(&data?)?)))
+        .collect()
+}
+
+fn rank_candidates(
+    found: HashMap<String, Candidate>,
+    limit: usize,
+    country: Option<&str>,
+) -> Vec<Candidate> {
     let mut results: Vec<_> = found.into_values().collect();
     results.sort_by(|a, b| {
         b.exact
             .cmp(&a.exact)
             .then_with(|| b.regex_match_length.cmp(&a.regex_match_length))
             .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| {
+                let known = |c: &Candidate| {
+                    country.is_some_and(|country| c.merchant.markets.iter().any(|m| m == country))
+                };
+                known(b).cmp(&known(a))
+            })
             .then_with(|| a.merchant.id.cmp(&b.merchant.id))
     });
     // Preserve exact collisions and equally specific regex hits even at limit=1.
@@ -759,16 +960,21 @@ fn rank_candidates(found: HashMap<String, Candidate>, limit: usize) -> Vec<Candi
     results.truncate(exact_count.max(regex_ties).max(limit).min(254));
     results
 }
-fn validate(merchant: &Merchant) -> Result<()> {
+pub(crate) fn validate(merchant: &Merchant) -> Result<()> {
     if merchant.id.trim().is_empty() || normalize(&merchant.name).is_empty() {
         bail!("merchant ID and name must be nonblank");
     }
     if merchant
-        .country
-        .as_ref()
-        .is_some_and(|c| c.len() != 2 || !c.bytes().all(|b| b.is_ascii_uppercase()))
+        .markets
+        .iter()
+        .any(|c| !crate::markets::valid_country(c))
     {
-        bail!("country must be a two-letter uppercase code");
+        bail!("markets must contain two-letter uppercase country codes");
+    }
+    for evidence in &merchant.market_evidence {
+        if !crate::markets::valid_country(&evidence.country) || evidence.source.trim().is_empty() {
+            bail!("market evidence must have a valid country and nonblank source");
+        }
     }
     if let Some(logo) = &merchant.logo_url {
         let url = reqwest::Url::parse(logo)
@@ -857,7 +1063,7 @@ fn rebuild(transaction: &Transaction<'_>, id: &str) -> Result<()> {
     merchant.aliases.dedup();
     merchant.sources.sort();
     merchant.sources.dedup();
-    transaction.execute("INSERT INTO merchants VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET country=excluded.country,data=excluded.data", params![id,merchant.country,serde_json::to_string(&merchant)?])?;
+    transaction.execute("INSERT INTO merchants(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data", params![id,serde_json::to_string(&merchant)?])?;
     let names: HashSet<_> = std::iter::once(&merchant.name)
         .chain(merchant.aliases.iter())
         .map(|n| normalize(n))
@@ -910,7 +1116,7 @@ mod tests {
             store
                 .search("ZXQ ME UP 9876", Some("US"), 10)?
                 .iter()
-                .all(|c| c.regex_match_length.is_none())
+                .any(|c| c.regex_match_length.is_some())
         );
         let tied = rule("regex-tied", r"(?i)^ZXQ ME UP");
         store.import(&[tied])?;
@@ -967,7 +1173,8 @@ mod tests {
         Merchant {
             id: id.into(),
             name: name.into(),
-            country: Some(country.into()),
+            markets: vec![country.into()],
+            market_evidence: vec![],
             website: None,
             logo_url: None,
             logo_source: None,
@@ -1082,14 +1289,14 @@ mod tests {
         );
     }
     #[test]
-    fn normalization_fuzzy_retrieval_and_country_filter() {
+    fn normalization_fuzzy_retrieval_and_market_preference() {
         let db = MerchantStore::memory().unwrap();
         db.put(&merchant("a", "Julius Café", "CA")).unwrap();
         db.put(&merchant("b", "Julius Café", "US")).unwrap();
         let exact = db.search("JULIUS CAFE", Some("CA"), 10).unwrap();
         assert_eq!(exact[0].merchant.id, "a");
         assert!(exact[0].exact);
-        assert_eq!(exact.len(), 1);
+        assert_eq!(exact.len(), 2);
         assert_eq!(
             db.search("Julus cafe", Some("CA"), 10).unwrap()[0]
                 .merchant

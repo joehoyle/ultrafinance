@@ -40,7 +40,8 @@ pub fn merchant_studio(contents: &str) -> Result<Vec<SourceRecord>> {
             let merchant = Merchant {
                 id: entry.id.clone(),
                 name: entry.canonical_name,
-                country: None,
+                markets: vec![],
+                market_evidence: vec![],
                 website: entry.website.map(|s| {
                     if s.starts_with("https://") || s.starts_with("http://") {
                         s
@@ -103,7 +104,7 @@ mod tests {
         let records = merchant_studio(input).unwrap();
         assert_eq!(records[0].source, "merchant-studio");
         assert_eq!(records[0].external_id, "amazon");
-        assert_eq!(records[0].merchant.country, None);
+        assert!(records[0].merchant.markets.is_empty());
         assert_eq!(
             records[0].merchant.website.as_deref(),
             Some("https://amazon.com")

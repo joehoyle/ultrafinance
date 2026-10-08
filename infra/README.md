@@ -93,11 +93,17 @@ service or continuously running task. Tasks use the existing database client
 security group, private subnets, and NAT gateway.
 
 Run `python3 deploy/prod-cli.py` in a terminal to launch the existing application
-image and open `/bin/sh` through ECS Exec. Install the AWS CLI and Session Manager
+image and open interactive Bash through ECS Exec, with an `ultrafinance` prompt
+showing the working directory. Install the AWS CLI and Session Manager
 plugin locally first. The container runs a bounded sleep process with init
 process support while the Exec session is active. The runner waits for the
 ExecuteCommandAgent to be ready and stops the task when the session ends or
 fails. A task also exits after one hour, bounding costs after a lost connection.
+During an active session, Ctrl-C is handled by ECS Exec so it can cancel remote
+commands. Use `exit` to close the shell and stop the task; Ctrl-C during startup
+still cancels the launch and cleans up any known task.
+Run `cargo run -- infra cli-cleanup` to stop leftover CLI tasks and wait for
+them to stop. This also closes any active production CLI shells.
 
 Set `database_url` in the private infrastructure variables to the shared
 TLS-enabled application URL. OpenTofu configures Lambda's environment variable
@@ -109,8 +115,11 @@ ECR repository. The task role has the four `ssmmessages` channel permissions
 required for ECS Exec.
 
 The runner selects the immutable image behind Lambda's `live` alias and
-registers a temporary task definition revision for the session. `--image`
-can select a newer image during initial database cutover. The runner stops
+registers a temporary task definition revision for the session. Use
+`cargo run -- infra cli --latest` (or `python3 deploy/prod-cli.py --latest`) to
+select the highest published Lambda version, including one awaiting a database
+migration before promotion. Mutable `$LATEST` is excluded. `--image` selects a
+specific immutable digest and cannot be combined with `--latest`. The runner stops
 known tasks and deregisters their temporary revisions on exit. If launching
 has an uncertain outcome, inspect ECS tasks using the printed session ID;
 the task's one-hour lifetime still applies. The filesystem is ephemeral.

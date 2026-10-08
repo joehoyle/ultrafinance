@@ -20,7 +20,10 @@ an interactive merchant lookup, and a searchable merchant explorer. The form cal
 origin. Static hosting needs a same-origin proxy for `/v1/enrich` to support
 live lookups.
 The standalone page lives in `website/index.html` and can also be hosted by any
-static web server, without a frontend build step.
+static web server, without a frontend build step. The `/sources` page
+(`website/sources.html`) documents supported catalog and evaluation datasets,
+credits, licenses, transformations, and coverage limitations. Static hosts need
+to map `/sources` to that file.
 
 The website's canonical URL is `https://ultrafinance.app/`. Search metadata,
 Open Graph and Twitter cards, and JSON-LD are in the initial HTML. A branded
@@ -54,8 +57,9 @@ curl -s http://127.0.0.1:3000/v1/enrich \
 
 A supported match returns `merchant.status = "matched"` with the catalog merchant
 in `merchant.data`. Merchant IDs belong to this service's catalog and must remain
-stable when names or aliases change. The `country` field narrows the candidate
-pool, not the location of a specific outlet.
+stable when names or aliases change. Request `country` describes the transaction
+country and prefers candidates with known coverage there. Merchant `markets`
+are countries with evidence of operation; missing coverage never excludes a match.
 
 Only `description` is required. Optional structured fields are `amount` (a decimal
 string), `currency`, `date` (ISO date string), and `country`. `extra` is a JSON
@@ -70,7 +74,7 @@ an API client. `/openapi.json` serves the generated OpenAPI document. Both are
 served by the API on the same origin; static website hosting also needs to proxy
 these paths. Scalar's browser JavaScript loads from jsDelivr.
 
-Schemas come from the core request and response types using the optional `openapi`
+Schemas come from public API response types and core request/location types using the optional `openapi`
 feature. Register HTTP API handlers with `utoipa_axum::routes!` in `api_router()`
 so serving the handler also includes it in the document. Add descriptions,
 examples and error responses alongside the handler and field definitions.
@@ -201,7 +205,7 @@ cargo run -- enrich 'CAFE PURCHASE' --location '{"city":"Bromont","country":"CA"
 
 Structured evidence appears as `extracted` unless a unique outlet is identified.
 Conflicting descriptor geography is discarded rather than combined with caller
-fields. Existing top-level `country` remains a merchant retrieval hint and is
+fields. Top-level `country` describes the transaction and can exclude incompatible outlets; it is
 never copied into the location result. Outlet matching requires a matched
 merchant plus a unique alias/pattern, store number, or street address, without
 contradictory location evidence. Merely knowing a city does not pick an outlet.
@@ -219,7 +223,7 @@ cargo run -- locations eval evals/location-smoke.json
 ```
 
 SQLite adds outlet storage when opened. PostgreSQL requires migration 003 through
-`database init`. This additive migration preserves the version-2 merchant/log
+`database init`. The outlet migration preserves the version-2 merchant/log
 contract, so the previous application remains compatible and release rollback
 continues to work. Apply it before deploying the location-enabled application.
 The Lambda runtime role also needs `SELECT` on `location_records`;
@@ -382,7 +386,7 @@ Once connected to production, the usual commands update the shared database:
 ```sh
 cargo run -- datasets apply data/datasets/YOUR_BUNDLE/knowledge.json
 cargo run -- merchants import data/imports/merchant-studio.json --format merchant-studio
-cargo run -- merchants add --id mer_EXISTING --name 'Corrected merchant' --country CA
+cargo run -- merchants add --id mer_EXISTING --name 'Corrected merchant' --market CA
 cargo run -- merchants link --source merchant-studio --external-id SOURCE_ID --merchant-id mer_EXISTING
 ```
 
@@ -390,7 +394,8 @@ For private Aurora access without a management instance, open an interactive
 shell in the existing Ultrafinance image on an on-demand ARM64 Fargate task:
 
 ```sh
-python3 deploy/prod-cli.py
+cargo run -- infra cli
+cargo run -- infra cli-cleanup
 # Inside the container:
 ultrafinance merchants list --json
 exit
@@ -400,18 +405,26 @@ CLI infrastructure is provisioned automatically with Aurora and the application
 image when you apply with `./infra/tofu.sh`. Install the AWS CLI and
 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 on your machine, and run the shell command in an interactive terminal.
-The runner uses ECS Exec to open `/bin/sh` in the immutable image behind
-Lambda's `live` alias. Tasks use the existing private subnets and NAT gateway
+The runner uses ECS Exec to open interactive Bash in the immutable image behind
+Lambda's `live` alias. The prompt shows `ultrafinance`, the working directory,
+and `$` (or `#` for root), with colors on supported terminals.
+Tasks use the existing private subnets and NAT gateway
 without a public IP. The runner stops the task when the shell closes, including
 on connection failure or interruption; tasks also expire after one hour.
+During an active shell session, Ctrl-C cancels remote commands without
+interrupting the launcher. Use `exit` to close the shell and stop the task.
 
 The shell automatically receives the same `ULTRAFINANCE_DATABASE_URL` as
 Lambda. Set `database_url` in the private infrastructure variables and apply
 once; OpenTofu populates the shared Secrets Manager URL used by ECS. Use a
 non-administrator application login with catalog read/write permissions so
 both the API and CLI can use it. Schema administration remains separate.
-Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a newer image before an
-initial PostgreSQL cutover. The shell filesystem is temporary.
+Use `cargo run -- infra cli --latest` to open the newest published Lambda image,
+including a release held back by a required database migration. Run
+`ultrafinance database init` in that new shell with schema-administration
+permissions before completing the release. `--latest` selects the highest
+published version, excludes mutable `$LATEST`, and conflicts with `--image`.
+Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a specific immutable image. The shell filesystem is temporary.
 
 Imports validate the batch before writing and commit atomically. Writers use a
 transaction advisory lock to serialize imports, corrections, and links across
@@ -452,7 +465,7 @@ ULTRAFINANCE_TEST_DATABASE_URL=postgresql://localhost/ultrafinance_test?sslmode=
 ## Merchant database and search
 
 ```sh
-cargo run -- merchants add --name 'Julius Café' --country CA \
+cargo run -- merchants add --name 'Julius Café' --market CA \
   --alias 'JULIUS CAFE BROMONT'
 cargo run -- merchants list
 cargo run -- merchants list --limit 50 --offset 50
@@ -461,16 +474,16 @@ cargo run -- enrich 'JULIUS CAFE BROMONT' --country CA
 ```
 
 `merchants list` (alias `ls`) displays an alphabetic table of IDs, names,
-countries, websites, and alias counts. Use `--json` for complete merchant records
+known markets, websites, and alias counts. Use `--json` for complete merchant records
 with `total`, `limit`, and `offset` for pagination. The default limit is 50 (maximum
-1000). `--country CA` filters declared countries only; imported country hints
-remain evidence and do not count as a declared country. Listing never calls Jev.
+1000). `--market CA` filters known market evidence. The HTTP catalog uses
+`/v1/merchants?market=CA`; request `country` belongs to enrichment and search. Listing never calls Jev.
 
 Generated merchant IDs remain stable. To replace a record and its aliases, use
 `merchants add --id EXISTING_ID ...`. Import an existing JSON catalog with
 `merchants import FILE`. Imports update source/external ID pairs; repeat imports preserve local IDs.
-Imported aliases remain unverified and cannot bypass Jev. Manual names, country,
-website and verified aliases take precedence over imported records. `--database FILE` overrides the local SQLite path globally. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects PostgreSQL for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
+Imported aliases remain unverified and cannot bypass Jev. Manual names, websites and verified aliases take precedence over imported records.
+Manual markets supplement imported market evidence. `--database FILE` overrides the local SQLite path globally. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects PostgreSQL for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
 
 Search removes accents, folds case, and normalizes punctuation and whitespace.
 Exact aliases are indexed separately; SQLite FTS5 token/prefix and trigram
@@ -478,8 +491,42 @@ indexes retrieve a bounded fuzzy pool. Rust ranks candidates using edit distance
 and token overlap. Search scores are retrieval scores, not match probabilities.
 Short descriptors such as `LS` don't generate fuzzy candidates from letters alone.
 A unique exact match of at least three normalized characters resolves locally;
-ambiguous exact aliases and fuzzy results go to Jev. Country narrows retrieval
-while records with unknown country remain eligible.
+ambiguous exact aliases and fuzzy results go to Jev. Transaction country breaks ranking ties in favor of known markets; all other
+markets and merchants without market evidence remain eligible. Exact alias
+collisions still require evaluation, even if only one candidate has that market.
+
+View catalog totals and breakdowns by imported source, known market, and source dataset region:
+
+```sh
+cargo run -- merchants stats
+cargo run -- merchants stats --json
+```
+
+Source counts distinguish unique merchants from external records. A merchant
+linked to multiple sources counts once in each source, so source totals can
+exceed the catalog total. Manual entries include corrections to imported
+merchants; “without imported source” counts merchants with no source records.
+Market counts include each merchant once per country; merchants can appear in
+several markets. `without_market_evidence` counts those with no known coverage.
+
+Markets combine explicit declarations (`--market CA --market US`), Merchant
+Studio's `countryHints`, country-specific Open Enrichment dataset regions, and
+linked outlet countries. Each `market_evidence` entry retains its source,
+external ID, kind, and qualitative confidence: declarations/outlets are high;
+country hints/dataset regions are medium. Supplied evidence retains its confidence.
+Publisher geography and global dataset scope do not establish operating markets.
+Manual and source markets combine across links; refreshes recalculate them from
+current authoritative records. Dataset-region statistics remain separate from
+market coverage.
+
+Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
+`merchants add/list --country` have been removed. SQLite upgrades existing stored
+country declarations to markets transactionally on open. PostgreSQL requires
+`ultrafinance database init` with a schema-administration login to migrate to
+schema version 3 before running this application. The migration preserves IDs,
+source links, outlets, and manual corrections. Older application versions cannot
+run against version 3, so application-only rollback across this migration is
+unsupported.
 
 ## Merchant logos
 
@@ -487,7 +534,7 @@ Merchants optionally include `logo_url` and `logo_source`. Add a verified brand
 logo URL manually:
 
 ```sh
-cargo run -- merchants add --name 'Example Café' --country CA \
+cargo run -- merchants add --name 'Example Café' --market CA \
   --logo-url 'https://example.com/logo.png' --logo-source 'official website'
 ```
 
@@ -512,8 +559,8 @@ cargo run -- merchants search 'amzn mktp' --country CA
 
 Source records retain the original JSON, namespace, external ID, dataset version,
 attribution and license. Search output includes `provenance`, and `trusted` tells
-whether the query matched a manually verified name or alias. Country hints stay
-in source evidence; they do not claim the merchant operates only in those countries.
+whether the query matched a manually verified name or alias. Country hints become known markets with source evidence; they do not claim
+the merchant operates only in those countries.
 Negative aliases exclude contradictory imported candidates. Matches derived from
 source-linked merchants include `attributions` in enrichment output.
 
@@ -697,6 +744,33 @@ Tests run locally without credentials or live provider calls.
 
 ## Hosting
 
+Operational commands live under `infra`:
+
+```sh
+cargo run -- infra deploy
+cargo run -- infra logs --since 10m
+cargo run -- infra logs --follow
+cargo run -- infra cli
+```
+
+`infra deploy` builds and pushes the ARM64 image with Docker, then publishes,
+checks, and promotes the Lambda version with revision guards and rollback.
+The Docker build runs workspace tests and Clippy. After release, the command
+verifies the public health, docs, and OpenAPI endpoints and expected API paths.
+`infra logs` reads the Lambda
+CloudWatch log group using the profile, region, and function name from OpenTofu
+outputs. `infra cli` launches the production shell through ECS Exec and cleans up
+the temporary task and task definition when the session ends;
+`--latest` selects the newest published Lambda version for migration work;
+`--image` selects a specific immutable ECR digest. These flags are mutually
+exclusive. `infra shell` is an alias.
+`infra cli-cleanup` stops all Fargate tasks in the configured CLI task family,
+including active shells and tasks still starting, and waits for them to stop.
+Run these from the workspace or use `infra --workspace PATH ...` with an installed
+binary. They require the same external tools and AWS login as the underlying
+scripts, plus `curl` for public release verification. These Rust commands do not
+invoke Python. The top-level `logs` command continues to read database enrichment history.
+
 See [the OpenTofu deployment guide](infra/README.md) for CloudFront, a Lambda function URL,
 and a Rust container on Lambda using the `joehoyle` AWS profile. The initial
 storage approach packages a SQLite catalog snapshot into each image. After the
@@ -707,14 +781,15 @@ process from `main` using AWS OIDC.
 ## Merchant explorer
 
 The website browses the live catalog using `GET /v1/merchants`. Optional query
-parameters are `q` (name or alias), `country` (uppercase two-letter code),
+parameters are `q` (name or alias), `market` (uppercase two-letter country code),
 `limit` (1–100, default 20), and `offset` (0–1000000, default 0). The response
 contains `merchants`, `total`, `limit`, and `offset`. Browsing is alphabetical
 and paginated across the full catalog. Search paginates a ranked shortlist of
 up to 100 candidates (up to 255 for exact alias collisions); its total describes
-that shortlist. Search includes merchants with unknown country when a country
-is supplied. Browsing filters to the specified country exactly. Catalog queries
-do not call the AI provider. Cards show merchant IDs, websites, and aliases;
+that shortlist. Both browsing and catalog search filter to known market
+evidence when `market` is supplied; enrichment search uses transaction country
+as a positive ranking signal instead. Catalog queries
+do not call the AI provider. API responses omit matching aliases. Cards show known markets, merchant IDs, and websites;
 “Try lookup” fills the enrichment form without submitting it.
 
 The development profile optimizes the enrichment core, JSON/edit-distance dependencies, and bundled SQLite engine

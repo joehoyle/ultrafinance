@@ -66,10 +66,16 @@ for link in metadata.links:
     if link.get("rel") in ["icon", "apple-touch-icon"]:
         assert (site / link["href"].lstrip("/")).is_file(), f"Missing icon: {link['href']}"
 root = ET.parse(site / "sitemap.xml").getroot()
-assert [element.text for element in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")] == [canonical]
+assert [element.text for element in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")] == [canonical, canonical + "sources"]
 assert f"Sitemap: {canonical}sitemap.xml" in (site / "robots.txt").read_text()
 assert metadata.schemas and metadata.schemas[0]["@context"] == "https://schema.org"
 for entity in metadata.schemas[0]["@graph"]:
     assert entity["url"] == canonical
 assert 'href="https://github.com/"' not in (site / "index.html").read_text()
+sources = Metadata()
+sources.feed((site / "sources.html").read_text())
+assert [link["href"] for link in sources.links if link.get("rel") == "canonical"] == [canonical + "sources"]
+assert sources.meta["og:url"] == canonical + "sources"
+assert sources.meta["description"]
+assert 'href="/sources"' in (site / "index.html").read_text()
 print("Production metadata, structured data, sitemap, icons, and share image validated.")

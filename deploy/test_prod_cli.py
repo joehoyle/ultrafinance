@@ -3,6 +3,9 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +38,8 @@ class FakeAWS:
                 "secrets": [{"name": "ULTRAFINANCE_DATABASE_URL", "valueFrom": "secret"}] if self.has_secret else []}]}}
         if operation == ("lambda", "get-function"):
             return IMAGE
+        if operation == ("lambda", "list-versions-by-function"):
+            return ["9", "$LATEST", "11", "10"]
         if operation == ("ecs", "register-task-definition"):
             self.registered = json.loads(Path(args[-1].removeprefix("file://")).read_text())
             return {"taskDefinition": {"taskDefinitionArn": "revision"}}
@@ -62,6 +67,23 @@ class ProductionShellTests(unittest.TestCase):
                 cli.run_shell(aws, CONFIG)
                 return execute.call_args.args[0]
 
+    def test_image_selection_uses_live_or_latest_published_version(self):
+        for latest, qualifier in [(False, "live"), (True, "11")]:
+            aws = FakeAWS()
+            self.assertEqual(cli.resolve_image(aws, "function", latest=latest), IMAGE)
+            get = next(call for call in aws.calls if call[:2] == ("lambda", "get-function"))
+            self.assertEqual(get[get.index("--qualifier") + 1], qualifier)
+        aws = FakeAWS()
+        self.assertEqual(cli.resolve_image(aws, "function", image=IMAGE), IMAGE)
+        self.assertEqual(aws.calls, [])
+        with self.assertRaisesRegex(ValueError, "cannot be used together"):
+            cli.resolve_image(aws, "function", image=IMAGE, latest=True)
+
+    def test_latest_without_published_versions_fails(self):
+        with patch.object(FakeAWS, "call", return_value=["$LATEST"]):
+            with self.assertRaisesRegex(RuntimeError, "No published Lambda versions"):
+                cli.resolve_image(FakeAWS(), "function", latest=True)
+
     def test_private_task_enables_exec_and_stops_on_shell_exit(self):
         aws = FakeAWS()
         command = self.shell(aws)
@@ -71,7 +93,7 @@ class ProductionShellTests(unittest.TestCase):
         self.assertEqual(network["awsvpcConfiguration"]["assignPublicIp"], "DISABLED")
         self.assertIn("execute-command", command)
         self.assertIn("--interactive", command)
-        self.assertEqual(command[-1], "/bin/sh")
+        self.assertEqual(command[-1], "/bin/bash --rcfile /etc/bash.bashrc -i")
         self.assertEqual(aws.calls[-2][:2], ("ecs", "stop-task"))
         self.assertEqual(aws.calls[-1][:2], ("ecs", "deregister-task-definition"))
         self.assertEqual(aws.registered["containerDefinitions"][0]["secrets"][0]["valueFrom"], "secret")
@@ -80,6 +102,41 @@ class ProductionShellTests(unittest.TestCase):
         aws = FakeAWS(has_secret=False)
         self.shell(aws)
         self.assertEqual(aws.registered["containerDefinitions"][0]["secrets"], [])
+
+    def test_ctrl_c_during_session_keeps_task_running_and_child_interruptible(self):
+        aws = FakeAWS()
+        previous = signal.getsignal(signal.SIGINT)
+        real_run = subprocess.run
+
+        def session(*args, **kwargs):
+            # Exercise a real child: it must not inherit SIG_IGN, and a real
+            # SIGINT sent to the launcher must not cause task cleanup yet.
+            result = real_run([sys.executable, "-c", "\n".join([
+                "import os, signal",
+                "assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN",
+                "os.kill(os.getppid(), signal.SIGINT)",
+            ])], check=True)
+            self.assertFalse(any(call[:2] == ("ecs", "stop-task") for call in aws.calls))
+            return result
+
+        with patch.object(cli.subprocess, "run", side_effect=session), contextlib.redirect_stdout(io.StringIO()):
+            cli.run_shell(aws, CONFIG)
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+        self.assertEqual(aws.calls[-2][:2], ("ecs", "stop-task"))
+
+    def test_session_failure_restores_interrupt_handler(self):
+        previous = signal.getsignal(signal.SIGINT)
+        with self.assertRaises(RuntimeError):
+            self.shell(FakeAWS(), exec_code=1)
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+
+    def test_startup_interrupt_still_stops_task(self):
+        aws = FakeAWS()
+        with patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt), contextlib.redirect_stdout(io.StringIO()):
+            aws.ready = False
+            with self.assertRaises(KeyboardInterrupt):
+                cli.run_shell(aws, CONFIG)
+        self.assertEqual(aws.calls[-2][:2], ("ecs", "stop-task"))
 
     def test_exec_failure_and_interrupt_stop_task(self):
         for exception in (RuntimeError, KeyboardInterrupt):

@@ -368,7 +368,7 @@ pub(crate) fn enrich(
     let extracted = descriptor_geography(&request.description);
     let mut geography = request.location.clone().unwrap_or_default();
     // Conflicting descriptor geography is discarded as a group, avoiding mixed
-    // cities/regions. Request.country remains a merchant retrieval hint only.
+    // cities/regions. Transaction country can exclude an outlet, but alone does not invent a place.
     if compatible(&geography, &extracted) {
         macro_rules! fill { ($($field:ident),*) => { $(if geography.$field.is_none() { geography.$field = extracted.$field; })* }; }
         fill!(address, city, region, postal_code, country, store_number);
@@ -378,6 +378,14 @@ pub(crate) fn enrich(
         .iter()
         .filter(|record| {
             let place = record.location.geography();
+            if request
+                .country
+                .as_ref()
+                .zip(place.country.as_ref())
+                .is_some_and(|(a, b)| a != b)
+            {
+                return false;
+            }
             if !compatible(&geography, &place) {
                 return false;
             }
@@ -721,6 +729,17 @@ mod tests {
         );
         assert!(!matches!(
             enrich(&request("APPLE STORE R483 SYDNEY NSW AU"), &outlets).0,
+            LocationResult::Matched { .. }
+        ));
+        let mut overseas = request("APPLE STORE R483 R483 CANBERRA");
+        overseas.country = Some("CA".into());
+        assert!(!matches!(
+            enrich(&overseas, &outlets).0,
+            LocationResult::Matched { .. }
+        ));
+        overseas.country = Some("AU".into());
+        assert!(matches!(
+            enrich(&overseas, &outlets).0,
             LocationResult::Matched { .. }
         ));
         outlets.push(outlets[0].clone());

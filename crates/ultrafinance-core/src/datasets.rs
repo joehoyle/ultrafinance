@@ -227,7 +227,8 @@ pub fn prepare(
                 let merchant = crate::Merchant {
                     id: id.into(),
                     name: brand.into(),
-                    country: None,
+                    markets: vec![],
+                    market_evidence: vec![],
                     website: (!field(&row, "website_url")?.is_empty())
                         .then(|| row["website_url"].clone()),
                     logo_url: None,

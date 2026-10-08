@@ -2,11 +2,13 @@
 """Open an interactive shell in the Ultrafinance image on private Fargate."""
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -63,17 +65,43 @@ def registration(definition, image):
     return request
 
 
-def run_shell(aws, config, image=None, timeout=300):
+@contextmanager
+def remote_interrupts():
+    """Let ECS Exec handle Ctrl-C without interrupting the local launcher."""
+    # Use a caught handler, not SIG_IGN: subprocesses reset caught handlers to
+    # default, whereas SIG_IGN would also disable Ctrl-C in the AWS child.
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def resolve_image(aws, function, image=None, latest=False):
+    if image and latest:
+        raise ValueError("--image and --latest cannot be used together")
+    if image:
+        return image
+    qualifier = "live"
+    if latest:
+        versions = aws.call("lambda", "list-versions-by-function", "--function-name", function,
+                            "--query", "Versions[].Version")
+        published = [int(version) for version in versions if isinstance(version, str) and version.isdigit() and int(version) > 0]
+        if not published:
+            raise RuntimeError("No published Lambda versions are available.")
+        qualifier = str(max(published))
+    return aws.call("lambda", "get-function", "--function-name", function,
+                    "--qualifier", qualifier, "--query", "Code.ResolvedImageUri")
+
+
+def run_shell(aws, config, image=None, timeout=300, latest=False):
     job_id = uuid.uuid4().hex
     task = None
     revision = None
     launch_attempted = False
     try:
         definition = aws.call("ecs", "describe-task-definition", "--task-definition", config["task_definition"])["taskDefinition"]
-        chosen_image = image or aws.call(
-            "lambda", "get-function", "--function-name", config["function_name"],
-            "--qualifier", "live", "--query", "Code.ResolvedImageUri",
-        )
+        chosen_image = resolve_image(aws, config["function_name"], image, latest)
         request = registration(definition, chosen_image)
         container = next(item for item in request["containerDefinitions"] if item["name"] == "cli")
         has_database = any(item["name"] == "ULTRAFINANCE_DATABASE_URL" for item in container.get("secrets", []))
@@ -122,16 +150,17 @@ def run_shell(aws, config, image=None, timeout=300):
             if time.monotonic() >= deadline:
                 raise RuntimeError("Timed out waiting for the ECS Exec agent.")
             time.sleep(5)
-        print("Opening shell. Run ultrafinance commands here; exiting stops the task. The task expires after one hour.", flush=True)
-        result = subprocess.run(
-            [*aws.prefix, "ecs", "execute-command", "--cluster", config["cluster"],
-             "--task", task, "--container", "cli", "--interactive", "--command", "/bin/sh"],
-            env=aws.environment, check=False,
-        )
+        print("Opening shell. Ctrl-C cancels remote commands; use exit to stop the task. The task expires after one hour.", flush=True)
+        with remote_interrupts():
+            result = subprocess.run(
+                [*aws.prefix, "ecs", "execute-command", "--cluster", config["cluster"],
+                 "--task", task, "--container", "cli", "--interactive", "--command", "/bin/bash --rcfile /etc/bash.bashrc -i"],
+                env=aws.environment, check=False,
+            )
         if result.returncode:
             raise RuntimeError("ECS Exec session failed.")
     finally:
-        # Known tasks are stopped on exit, startup failure, timeout, or Ctrl-C.
+        # Known tasks are stopped on exit, session failure, or interrupted startup.
         # An uncertain launch is bounded by the task's one-hour lifetime.
         if task:
             aws.call("ecs", "stop-task", "--cluster", config["cluster"], "--task", task,
@@ -142,7 +171,9 @@ def run_shell(aws, config, image=None, timeout=300):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", help="Immutable ECR digest; defaults to Lambda's live image")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--image", help="Immutable ECR digest; defaults to Lambda's live image")
+    selection.add_argument("--latest", action="store_true", help="Use the newest published Lambda version, even if it is not live")
     args = parser.parse_args()
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         parser.error("Run this command in an interactive terminal.")
@@ -152,7 +183,7 @@ def main():
     if not config:
         raise RuntimeError("Apply the Aurora and application infrastructure first; CLI tasks are provisioned automatically.")
     aws = AWS(output("aws_profile"), output("aws_region"))
-    run_shell(aws, config, args.image)
+    run_shell(aws, config, args.image, latest=args.latest)
 
 
 if __name__ == "__main__":

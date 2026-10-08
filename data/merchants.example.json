@@ -2,7 +2,7 @@
   {
     "id": "mer_example_cafe",
     "name": "Example Café",
-    "country": "CA",
+    "markets": ["CA"],
     "aliases": ["EXAMPLE CAFE QC"],
     "sources": []
   }

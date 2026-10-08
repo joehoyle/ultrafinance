@@ -1,0 +1,19 @@
+# Interactive Bash configuration for the Ultrafinance container.
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+
+shopt -s checkwinsize histappend
+HISTCONTROL=ignoreboth
+HISTSIZE=1000
+HISTFILESIZE=2000
+
+# Keep the application name visible so remote sessions are easy to identify.
+# Wrap color escapes in Bash's non-printing markers for correct line editing.
+case ${TERM:-dumb} in
+    xterm*|screen*|tmux*|rxvt*|linux|ansi)
+        PS1='\[\e[1;36m\]ultrafinance\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \$ '
+        ;;
+    *) PS1='ultrafinance \w \$ ' ;;
+esac

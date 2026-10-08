@@ -3,6 +3,7 @@ pub mod datasets;
 pub mod eval;
 pub mod import;
 pub mod location;
+pub mod markets;
 pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
 mod regex_rules;
 mod search_profile;
@@ -28,7 +29,7 @@ pub struct EnrichRequest {
     pub currency: Option<String>,
     /// Transaction date, conventionally YYYY-MM-DD. The service does not validate its format.
     pub date: Option<String>,
-    /// Two uppercase ASCII letters. Narrows merchant candidates, not the location of an outlet.
+    /// Transaction country, as two uppercase ASCII letters. Known markets improve ranking; missing markets never exclude a merchant.
     #[cfg_attr(feature = "openapi", schema(pattern = "^[A-Z]{2}$"))]
     pub country: Option<String>,
     /// Known transaction geography. Used as evidence, never as a merchant country restriction.
@@ -72,7 +73,12 @@ pub struct Merchant {
     /// Stable ID in this service's merchant catalog.
     pub id: String,
     pub name: String,
-    pub country: Option<String>,
+    /// Countries with evidence of operation. Coverage is not exhaustive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markets: Vec<String>,
+    /// Source and qualitative confidence for each known market.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub market_evidence: Vec<markets::MarketEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,7 +97,7 @@ pub struct Merchant {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum MerchantResult {
     /// A supported catalog match, with its merchant record.
-    Matched { data: Merchant },
+    Matched { data: Box<Merchant> },
     /// Insufficient evidence or no candidates. The data field is always null.
     Unresolved {
         #[cfg_attr(feature = "openapi", schema(schema_with = null_schema))]
@@ -176,14 +182,17 @@ impl Enricher {
     pub async fn list_merchants(
         &self,
         query: Option<String>,
-        country: Option<String>,
+        market: Option<String>,
         limit: usize,
         offset: usize,
     ) -> Result<store::MerchantPage> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
             if let Some(query) = query {
-                let candidates = store.search(&query, country.as_deref(), 100)?;
+                let mut candidates = store.search(&query, market.as_deref(), 100)?;
+                if let Some(market) = &market {
+                    candidates.retain(|c| c.merchant.markets.contains(market));
+                }
                 let total = candidates.len();
                 Ok(store::MerchantPage {
                     merchants: candidates
@@ -197,7 +206,7 @@ impl Enricher {
                     offset,
                 })
             } else {
-                store.list(country.as_deref(), limit, offset)
+                store.list(market.as_deref(), limit, offset)
             }
         })
         .await?
@@ -262,7 +271,7 @@ fn parse_choice_answer(
         location: LocationResult::default(),
         attributions: vec![],
         merchant: MerchantResult::Matched {
-            data: candidate.clone(),
+            data: Box::new(candidate.clone()),
         },
     })
 }
@@ -289,7 +298,7 @@ pub fn load_catalog(path: Option<&std::path::Path>) -> Result<Vec<Merchant>> {
 mod tests {
     use super::*;
     fn candidates() -> Vec<Merchant> {
-        serde_json::from_value(json!([{"id":"mer_1","name":"Example Café","country":"CA"}]))
+        serde_json::from_value(json!([{"id":"mer_1","name":"Example Café","markets":["CA"]}]))
             .unwrap()
     }
     #[tokio::test]
@@ -334,7 +343,8 @@ mod tests {
             .map(|index| Merchant {
                 id: format!("mer_{index}"),
                 name: format!("Merchant {index}"),
-                country: Some("CA".into()),
+                markets: vec!["CA".into()],
+                market_evidence: vec![],
                 website: None,
                 logo_url: None,
                 logo_source: None,

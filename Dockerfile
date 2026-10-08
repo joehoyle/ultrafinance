@@ -24,7 +24,9 @@ COPY evals/location-smoke.json ./evals/location-smoke.json
 RUN cargo test --locked --release --workspace && cargo clippy --locked --release --workspace --all-targets -- -D warnings
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+COPY deploy/bashrc /etc/bash.bashrc
+ENV SHELL=/bin/bash
 COPY deploy/rds-ca/ /usr/local/share/ca-certificates/ultrafinance-rds/
 RUN update-ca-certificates
 COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 /lambda-adapter /opt/extensions/lambda-adapter

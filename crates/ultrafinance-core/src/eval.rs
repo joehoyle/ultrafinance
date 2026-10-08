@@ -405,7 +405,8 @@ mod tests {
         db.put(&crate::Merchant {
             id: "mer_a".into(),
             name: "Julius Café".into(),
-            country: Some("CA".into()),
+            markets: vec!["CA".into()],
+            market_evidence: vec![],
             website: None,
             logo_url: None,
             logo_source: None,
@@ -441,7 +442,8 @@ mod tests {
         db.put(&crate::Merchant {
             id: "mer_a".into(),
             name: "Julius Café".into(),
-            country: None,
+            markets: vec![],
+            market_evidence: vec![],
             website: None,
             logo_url: None,
             logo_source: None,
@@ -473,7 +475,8 @@ mod tests {
         db.put(&crate::Merchant {
             id: "a".into(),
             name: "Julius Cafe".into(),
-            country: None,
+            markets: vec![],
+            market_evidence: vec![],
             website: None,
             logo_url: None,
             logo_source: None,

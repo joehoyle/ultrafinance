@@ -67,6 +67,7 @@
     .brand { display: inline-flex; align-items: center; gap: 11px; font-size: 21px; font-weight: 750; letter-spacing: -.8px; }
     .mark { width: 33px; height: 33px; background: var(--lime); border-radius: 9px; display: grid; place-items: center; }
     .mark svg { width: 20px; height: 24px; }
+    .nav-links { display: flex; align-items: center; gap: 24px; font-size: 13px; font-weight: 600; }
     .github { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; }
     .github svg { width: 19px; height: 19px; }
     .arrow { margin-left: 5px; font-size: 17px; }
@@ -129,12 +130,9 @@
     .merchant-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 21px; min-width: 0; }
     .merchant-card h3 { font-size: 17px; letter-spacing: -.3px; margin: 0 0 7px; overflow-wrap: anywhere; }
     .merchant-card .merchant-id { display: block; font: 10px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; margin: 12px 0; }
-    .merchant-country { display: inline-block; font-size: 10px; background: #edf1e6; padding: 4px 7px; border-radius: 4px; }
+    .merchant-markets { display: inline-block; font-size: 10px; background: #edf1e6; padding: 4px 7px; border-radius: 4px; }
     .merchant-link { display: block; color: #58712e; font-size: 12px; overflow-wrap: anywhere; margin: 13px 0; }
     .merchant-link:hover { text-decoration: underline; }
-    .merchant-card details { color: #646b5c; font-size: 12px; line-height: 1.6; margin: 15px 0; overflow-wrap: anywhere; }
-    .merchant-card summary { cursor: pointer; }
-    .merchant-card ul { padding-left: 18px; margin-bottom: 0; }
     .merchant-card button { border: 0; background: #edf1e6; color: var(--ink); font-size: 12px; padding: 9px 12px; border-radius: 5px; cursor: pointer; }
     .pagination { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 20px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); }
     .pagination-controls { display: flex; gap: 8px; }
@@ -144,14 +142,14 @@
     @media (max-width: 720px) { .lookup-grid { grid-template-columns: 1fr; gap: 24px; } .lookup { margin-top: 46px; } }
     h2 { margin: 13px 0 9px; font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
     .details p { color: #6a725f; font-size: 13px; line-height: 1.7; margin: 0; max-width: 290px; }
-    footer { border-top: 1px solid var(--line); padding: 24px 0 30px; display: flex; justify-content: space-between; gap: 20px; color: #78806d; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    footer { border-top: 1px solid var(--line); padding: 24px 0 30px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 20px; color: #78806d; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
     footer a:hover, .secondary:hover { color: var(--ink); }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
     [hidden] { display: none !important; }
     @media (min-width: 1400px) { main { padding-top: 110px; } }
     @media (max-width: 900px) { .wrap { padding: 0 28px; } .hero { gap: 28px; } h1 { font-size: 56px; letter-spacing: -3px; } pre { font-size: 11px; } .code-area, .response { padding-left: 18px; padding-right: 18px; } }
     @media (max-width: 720px) { nav { height: 85px; } main { padding: 52px 0 46px; } .hero { grid-template-columns: 1fr; gap: 40px; } h1 { font-size: clamp(49px, 9vw, 66px); } .intro { max-width: 440px; } .details { margin-top: 45px; gap: 22px; } pre { font-size: 12px; } }
-    @media (max-width: 460px) { .wrap { padding: 0 22px; } .brand { font-size: 19px; } nav .github .nav-label { display: none; } .details { grid-template-columns: 1fr; gap: 24px; } .details p { max-width: none; } .details h2 { margin-top: 7px; } footer { font-size: 10px; } .actions { gap: 18px; } pre { font-size: 11px; } }
+    @media (max-width: 460px) { .wrap { padding: 0 22px; } .brand { font-size: 19px; } .nav-links { gap: 16px; } nav .github .nav-label { display: none; } .details { grid-template-columns: 1fr; gap: 24px; } .details p { max-width: none; } .details h2 { margin-top: 7px; } footer { font-size: 10px; } .actions { gap: 18px; } pre { font-size: 11px; } }
     @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .primary { transition: none; } }
   </style>
 </head>
@@ -160,7 +158,7 @@
   <div class="wrap">
     <nav aria-label="Main navigation">
       <a class="brand" href="./" aria-label="Ultrafinance home"><span class="mark"><svg viewBox="0 0 24 28" aria-hidden="true"><path fill="currentColor" d="M14 1 3 16h9L9 27l12-16h-9z"/></svg></span>Ultrafinance</a>
-      <a class="github" data-repo href="https://github.com/joehoyle/ultrafinance" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#github-icon"/></svg><span class="nav-label">View on GitHub</span><span class="arrow" aria-hidden="true">↗</span></a>
+      <div class="nav-links"><a href="/sources">Sources</a><a class="github" data-repo href="https://github.com/joehoyle/ultrafinance" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#github-icon"/></svg><span class="nav-label">View on GitHub</span><span class="arrow" aria-hidden="true">↗</span></a></div>
     </nav>
     <main>
       <section class="hero" aria-labelledby="headline">
@@ -207,12 +205,12 @@
     <span class="key">"data"</span>: {
       <span class="key">"id"</span>: <span class="string">"mer_northstar_coffee"</span>,
       <span class="key">"name"</span>: <span class="string">"Northstar Coffee"</span>,
-      <span class="key">"country"</span>: <span class="string">"CA"</span>,
+      <span class="key">"markets"</span>: <span class="string">["CA"]</span>,
       <span class="key">"website"</span>: <span class="string">"https://northstar.example"</span>
     }
   }
 }</code></pre>
-            <p class="note">Illustrative merchant and response. A messy descriptor becomes a merchant name, stable ID, country, and website.</p>
+            <p class="note">Illustrative merchant and response. A messy descriptor becomes a merchant name, stable ID, known markets, and website.</p>
           </div>
         </div>
       </section>
@@ -226,7 +224,7 @@
             <div class="context-fields">
               <label class="field" for="amount"><span>Amount <span class="optional">optional</span></span><input id="amount" name="amount" placeholder="6.50" inputmode="decimal" pattern="-?[0-9]+([.][0-9]+)?" title="Enter a decimal amount, such as 6.50."></label>
               <label class="field" for="currency"><span>Currency <span class="optional">optional</span></span><input id="currency" name="currency" placeholder="CAD" maxlength="3" pattern="[A-Za-z]{3}" title="Use a three-letter currency code, such as CAD."></label>
-              <label class="field" for="country"><span>Country <span class="optional">optional</span></span><input id="country" name="country" placeholder="CA" maxlength="2" pattern="[A-Za-z]{2}" title="Use a two-letter country code, such as CA."></label>
+              <label class="field" for="country"><span>Transaction country <span class="optional">optional</span></span><input id="country" name="country" placeholder="CA" maxlength="2" pattern="[A-Za-z]{2}" title="Use a two-letter country code, such as CA."></label>
             </div>
             <p class="note" id="lookup-privacy">Your input is sent to the service and may be evaluated by its AI provider. Use a sample description without personal information.</p>
             <button class="primary" id="lookup-submit" type="submit">Look up merchant <span aria-hidden="true">↗</span></button>
@@ -245,7 +243,7 @@
         <p class="lookup-intro">Browse the catalog, or search names and aliases for the closest matches. Pick a merchant to try a lookup.</p>
         <form class="catalog-form" id="catalog-form">
           <label class="field" for="catalog-query"><span>Search merchants</span><input type="search" id="catalog-query" placeholder="Name or transaction alias" maxlength="256"></label>
-          <label class="field" for="catalog-country"><span>Country <span class="optional">optional</span></span><input id="catalog-country" placeholder="Any" maxlength="2" pattern="[A-Za-z]{2}" title="Use a two-letter country code, such as CA."></label>
+          <label class="field" for="catalog-market"><span>Known market <span class="optional">optional</span></span><input id="catalog-market" placeholder="Any" maxlength="2" pattern="[A-Za-z]{2}" title="Use a two-letter country code, such as CA."></label>
           <button type="submit" class="primary">Search</button>
           <button type="button" id="catalog-reset">Browse all</button>
         </form>
@@ -263,7 +261,7 @@
         <div><span class="number">03 / BUILD</span><h2>Hosted convenience. Open source.</h2><p>Build against the hosted API, or run the Rust service yourself. The code is yours to explore.</p></div>
       </section>
     </main>
-    <footer><span>Ultrafinance <span aria-hidden="true">/</span> ultrafinance.app</span><a data-readme href="https://github.com/joehoyle/ultrafinance" target="_blank" rel="noopener noreferrer">Source on GitHub <span aria-hidden="true">↗</span></a></footer>
+    <footer><span>Ultrafinance <span aria-hidden="true">/</span> ultrafinance.app</span><a href="/sources">Data sources</a><a data-readme href="https://github.com/joehoyle/ultrafinance" target="_blank" rel="noopener noreferrer">Source on GitHub <span aria-hidden="true">↗</span></a></footer>
     <span class="sr-only" id="announcement" role="status" aria-live="polite"></span>
   </div>
   <script>
@@ -271,7 +269,7 @@
     const catalogStatus = document.getElementById('catalog-status');
     const catalogPrev = document.getElementById('catalog-prev');
     const catalogNext = document.getElementById('catalog-next');
-    let catalogFilter = { q: '', country: '' };
+    let catalogFilter = { q: '', market: '' };
     let catalogOffset = 0;
     let catalogController;
     let catalogGeneration = 0;
@@ -287,13 +285,13 @@
       card.className = 'merchant-card';
       const title = document.createElement('h3');
       title.textContent = merchant.name;
-      const country = document.createElement('span');
-      country.className = 'merchant-country';
-      country.textContent = merchant.country || 'Country unknown';
+      const markets = document.createElement('span');
+      markets.className = 'merchant-markets';
+      markets.textContent = (merchant.markets || []).join(', ') || 'No market evidence';
       const id = document.createElement('code');
       id.className = 'merchant-id';
       id.textContent = merchant.id;
-      card.append(title, country, id);
+      card.append(title, markets, id);
       const website = safeWebsite(merchant.website);
       if (website) {
         const link = document.createElement('a');
@@ -304,19 +302,6 @@
         link.textContent = `${website.hostname} ↗`;
         card.append(link);
       }
-      if (Array.isArray(merchant.aliases) && merchant.aliases.length) {
-        const details = document.createElement('details');
-        const summary = document.createElement('summary');
-        summary.textContent = `${merchant.aliases.length} transaction ${merchant.aliases.length === 1 ? 'alias' : 'aliases'}`;
-        const list = document.createElement('ul');
-        merchant.aliases.forEach(alias => {
-          const item = document.createElement('li');
-          item.textContent = alias;
-          list.append(item);
-        });
-        details.append(summary, list);
-        card.append(details);
-      }
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = 'Try lookup ↗';
@@ -325,7 +310,6 @@
         const description = document.getElementById('description');
         description.value = merchant.name;
         description.setCustomValidity('');
-        document.getElementById('country').value = merchant.country || '';
         document.getElementById('amount').value = '';
         document.getElementById('currency').value = '';
         document.getElementById('try-it').scrollIntoView({behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
@@ -347,7 +331,7 @@
       document.getElementById('catalog-pagination').hidden = true;
       const params = new URLSearchParams({limit: String(catalogPageSize), offset: String(offset)});
       if (catalogFilter.q) params.set('q', catalogFilter.q);
-      if (catalogFilter.country) params.set('country', catalogFilter.country);
+      if (catalogFilter.market) params.set('market', catalogFilter.market);
       try {
         const response = await fetch(`/v1/merchants?${params}`, {signal:controller.signal, credentials:'omit', redirect:'error', cache:'no-store'});
         const page = await response.json();
@@ -359,13 +343,13 @@
         }
         catalogOffset = offset;
         if (!page.merchants.length) {
-          catalogStatus.textContent = catalogFilter.q || catalogFilter.country
-            ? 'No merchants found. Try another name, alias, or country.'
+          catalogStatus.textContent = catalogFilter.q || catalogFilter.market
+            ? 'No merchants found. Try another name, alias, or market.'
             : 'The catalog is empty. Merchants will appear here as they are added.';
         } else {
           catalogStatus.textContent = catalogFilter.q
             ? `${page.total.toLocaleString()} closest ${page.total === 1 ? 'match' : 'matches'}. Search returns a ranked shortlist.`
-            : `${page.total.toLocaleString()} ${page.total === 1 ? 'merchant' : 'merchants'}${catalogFilter.country ? ` in ${catalogFilter.country}` : ' in the catalog'}.`;
+            : `${page.total.toLocaleString()} ${page.total === 1 ? 'merchant' : 'merchants'}${catalogFilter.market ? ` in ${catalogFilter.market}` : ' in the catalog'}.`;
           catalogGrid.replaceChildren(...page.merchants.map(merchantCard));
         }
         document.getElementById('catalog-range').textContent = page.total
@@ -390,13 +374,13 @@
       event.preventDefault();
       catalogFilter = {
         q: document.getElementById('catalog-query').value.trim(),
-        country: document.getElementById('catalog-country').value.trim().toUpperCase(),
+        market: document.getElementById('catalog-market').value.trim().toUpperCase(),
       };
       loadMerchants();
     });
     document.getElementById('catalog-reset').addEventListener('click', () => {
       document.getElementById('catalog-form').reset();
-      catalogFilter = {q:'', country:''};
+      catalogFilter = {q:'', market:''};
       loadMerchants();
     });
     catalogPrev.addEventListener('click', () => loadMerchants(Math.max(0, catalogOffset - catalogPageSize)));

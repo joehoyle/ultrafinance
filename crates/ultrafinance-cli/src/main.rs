@@ -1,7 +1,8 @@
 mod batch;
+mod infra;
 mod output;
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Map;
 use std::{
     env,
@@ -16,8 +17,7 @@ use ultrafinance_core::{EnrichRequest, Enricher, Merchant, load_catalog, store::
 #[command(
     name = "ultrafinance",
     version,
-    about = "Test merchant enrichment locally",
-    arg_required_else_help = true
+    about = "Test merchant enrichment locally"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,6 +42,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Deploy the workspace, inspect Lambda logs, or open the production CLI shell.
+    Infra(infra::InfraArgs),
     /// Initialize PostgreSQL or migrate the complete SQLite catalog.
     Database {
         #[command(subcommand)]
@@ -161,12 +163,19 @@ enum DatasetSource {
 
 #[derive(Subcommand)]
 enum MerchantCommand {
+    /// Show catalog totals and breakdowns by imported source and known market.
+    Stats {
+        /// Print statistics as JSON for scripts.
+        #[arg(long)]
+        json: bool,
+    },
     /// Add a verified merchant, or replace one by supplying its existing ID.
     Add {
         #[arg(long)]
         name: String,
-        #[arg(long)]
-        country: Option<String>,
+        /// Declare a known operating market (repeat for multiple countries).
+        #[arg(long = "market")]
+        markets: Vec<String>,
         #[arg(long)]
         website: Option<String>,
         /// Public HTTP(S) URL of a verified merchant brand logo.
@@ -185,9 +194,9 @@ enum MerchantCommand {
     /// List stored merchants alphabetically, without calling Jev.
     #[command(alias = "ls")]
     List {
-        /// Filter by a declared country; unknown countries are excluded.
-        #[arg(long)]
-        country: Option<String>,
+        /// Filter by known market evidence; merchants without that evidence are excluded.
+        #[arg(long = "market")]
+        market: Option<String>,
         #[arg(long, default_value = "50")]
         limit: usize,
         #[arg(long, default_value = "0")]
@@ -199,6 +208,7 @@ enum MerchantCommand {
     /// Show exact and fuzzy candidates without calling Jev.
     Search {
         description: String,
+        /// Transaction country. Prefers known markets without excluding other candidates.
         #[arg(long)]
         country: Option<String>,
         #[arg(long, default_value = "10")]
@@ -358,8 +368,33 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Check for missing subcommands after parsing so global flags and environment
+    // defaults do not prevent command groups from showing their help.
+    fn help_on_missing_subcommand(command: clap::Command) -> clap::Command {
+        if command.has_subcommands() {
+            command
+                .subcommand_required(false)
+                .arg_required_else_help(false)
+                .mut_subcommands(help_on_missing_subcommand)
+        } else {
+            command
+        }
+    }
+    let mut command = help_on_missing_subcommand(Cli::command());
+    let matches = command.get_matches_mut();
+    let mut current_matches = &matches;
+    while let Some((name, submatches)) = current_matches.subcommand() {
+        command = command.find_subcommand_mut(name).unwrap().clone();
+        current_matches = submatches;
+    }
+    if command.has_subcommands() {
+        command.print_help()?;
+        println!();
+        return Ok(());
+    }
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
+        Command::Infra(args) => infra::run(args)?,
         Command::Logs {
             json,
             status,
@@ -657,9 +692,12 @@ async fn main() -> Result<()> {
         Command::Merchants { command } => {
             let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
             match command {
+                MerchantCommand::Stats { json } => {
+                    output::merchant_stats(&store.stats()?, json)?;
+                }
                 MerchantCommand::Add {
                     name,
-                    country,
+                    mut markets,
                     website,
                     logo_url,
                     logo_source,
@@ -667,10 +705,13 @@ async fn main() -> Result<()> {
                     sources,
                     id,
                 } => {
+                    markets.sort();
+                    markets.dedup();
                     let merchant = Merchant {
                         id: id.unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple())),
                         name,
-                        country,
+                        markets,
+                        market_evidence: vec![],
                         website,
                         logo_source: logo_source
                             .or_else(|| logo_url.as_ref().map(|_| "manual".into())),
@@ -682,12 +723,12 @@ async fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&merchant)?);
                 }
                 MerchantCommand::List {
-                    country,
+                    market,
                     limit,
                     offset,
                     json,
                 } => {
-                    let page = store.list(country.as_deref(), limit, offset)?;
+                    let page = store.list(market.as_deref(), limit, offset)?;
                     output::merchant_list(&page, json)?;
                 }
                 MerchantCommand::Search {

@@ -1,10 +1,11 @@
 //! Synchronous store on a dedicated worker: postgres owns a Tokio runtime and
 //! must never be constructed or dropped on the API/CLI's async runtime threads.
-use super::location_reference;
 use super::{
     Candidate, Merchant, MerchantPage, SourceRecord, excluded, normalize, rank_candidates, validate,
 };
+use super::{MerchantSourceStats, MerchantStats, STATS_SOURCES, STATS_TOTALS, location_reference};
 use crate::location::LocationRecord;
+use crate::markets::{MarketIndex, market_counts, paginate};
 use anyhow::{Context, Result, bail};
 use postgres::{Client, GenericClient, IsolationLevel, Transaction};
 use postgres_native_tls::MakeTlsConnector;
@@ -53,11 +54,12 @@ impl PostgresStore {
                     let version: i32 = tx.query_one("SELECT version FROM ultrafinance_schema", &[])?.get(0);
                     if version == 1 { tx.batch_execute(include_str!("../migrations/002_enrichment_log.sql"))?; }
                     if version <= 2 { tx.batch_execute(include_str!("../migrations/003_locations.sql"))?; }
+                    if version <= 2 { migrate_markets(&mut tx)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 2 { bail!("unsupported PostgreSQL schema version {version}"); }
+                if version != 3 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate markets"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -191,7 +193,7 @@ impl PostgresStore {
             for record in records {
                 let id: String = tx.query_opt("SELECT merchant_id FROM source_records WHERE source=$1 AND external_id=$2", &[&record.source,&record.external_id])?
                     .map(|r| r.get(0)).unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple()));
-                tx.execute("INSERT INTO merchants VALUES($1,NULL,$2) ON CONFLICT(id) DO NOTHING", &[&id,&serde_json::to_string(&record.merchant)?])?;
+                tx.execute("INSERT INTO merchants(id,data) VALUES($1,$2) ON CONFLICT(id) DO NOTHING", &[&id,&serde_json::to_string(&record.merchant)?])?;
                 tx.execute("INSERT INTO source_records VALUES($1,$2,$3,$4) ON CONFLICT(source,external_id) DO UPDATE SET data=excluded.data", &[&record.source,&record.external_id,&id,&serde_json::to_string(&record)?])?;
                 changed.insert(id);
             }
@@ -252,22 +254,66 @@ impl PostgresStore {
             Ok(fingerprint)
         })
     }
-    pub fn list(&self, country: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
+    pub fn stats(&self) -> Result<MerchantStats> {
+        self.run(|client| {
+            let mut tx = client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()?;
+            let totals = tx.query_one(STATS_TOTALS, &[])?;
+            let mut by_source = Vec::new();
+            for row in tx.query(STATS_SOURCES, &[])? {
+                by_source.push(MerchantSourceStats {
+                    source: row.get(0),
+                    merchants: usize::try_from(row.get::<_, i64>(1))?,
+                    records: usize::try_from(row.get::<_, i64>(2))?,
+                });
+            }
+            let index = postgres_markets(&mut tx, None)?;
+            let merchants = postgres_catalog(&mut tx, &index)?;
+            let (without_market_evidence, by_market) = market_counts(&merchants);
+            let by_source_region = index.region_stats();
+            tx.commit()?;
+            Ok(MerchantStats {
+                total: usize::try_from(totals.get::<_, i64>(0))?,
+                manual: usize::try_from(totals.get::<_, i64>(1))?,
+                without_source: usize::try_from(totals.get::<_, i64>(2))?,
+                by_source,
+                without_market_evidence,
+                by_market,
+                by_source_region,
+            })
+        })
+    }
+    pub fn list(&self, market: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
         if !(1..=1000).contains(&limit) {
             bail!("limit must be between 1 and 1000");
         }
-        if country.is_some_and(|v| v.len() != 2 || !v.bytes().all(|c| c.is_ascii_uppercase())) {
-            bail!("country must be a two-letter uppercase code");
+        if market.is_some_and(|v| v.len() != 2 || !v.bytes().all(|c| c.is_ascii_uppercase())) {
+            bail!("market must be a two-letter uppercase code");
         }
-        let country = country.map(str::to_owned);
+        let market = market.map(str::to_owned);
         let sql_offset = i64::try_from(offset)?;
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
-            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants WHERE ($1::text IS NULL OR country=$1)", &[&country])?.get(0);
-            let merchants = tx.query("SELECT data FROM merchants WHERE ($1::text IS NULL OR country=$1) ORDER BY lower(data::jsonb->>'name') COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&country,&(limit as i64),&sql_offset])?
-                .iter().map(|r| serde_json::from_str::<Merchant>(r.get::<_, &str>(0))).collect::<std::result::Result<Vec<_>,_>>()?;
+            let page = if market.is_some() {
+                let index = postgres_markets(&mut tx, None)?;
+                paginate(postgres_catalog(&mut tx, &index)?, market.as_deref(), limit, offset)
+            } else {
+                let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants", &[])?.get(0);
+                let mut merchants = Vec::new();
+                for row in tx.query("SELECT data FROM merchants ORDER BY lower(data::jsonb->>'name') COLLATE \"C\",id LIMIT $1 OFFSET $2", &[&(limit as i64), &sql_offset])? {
+                    let merchant: Merchant = serde_json::from_str(row.get::<_, &str>(0))?;
+                    merchants.push(merchant);
+                }
+                let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();
+                let index = postgres_markets(&mut tx, Some(&ids))?;
+                let merchants = merchants.into_iter().map(|m| index.hydrate(m)).collect();
+                MerchantPage { merchants, total: usize::try_from(total)?, limit, offset }
+            };
             tx.commit()?;
-            Ok(MerchantPage { merchants, total: usize::try_from(total)?, limit, offset })
+            Ok(page)
         })
     }
     pub fn search(
@@ -286,12 +332,12 @@ impl PostgresStore {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
-            let exact = tx.query("SELECT m.data FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 AND ($2::text IS NULL OR m.country IS NULL OR m.country=$2) ORDER BY m.id LIMIT 255", &[&query,&country])?;
+            let exact = tx.query("SELECT m.data FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
             for row in exact {
                 add_candidate(&mut tx, &mut found, row.get(0), &query, true, None, &mut scorer)?;
             }
             let mut matches: HashMap<String, usize> = HashMap::new();
-            for row in tx.query("SELECT s.merchant_id,s.data::jsonb->'raw'->>'transaction_text_regexp' FROM source_records s JOIN merchants m ON m.id=s.merchant_id WHERE s.source='open-enrichment' AND coalesce(s.data::jsonb->'raw'->>'parent_id','')='' AND jsonb_typeof(s.data::jsonb->'raw'->'transaction_text_regexp')='string' AND ($1::text IS NULL OR m.country IS NULL OR m.country=$1)", &[&country])? {
+            for row in tx.query("SELECT s.merchant_id,s.data::jsonb->'raw'->>'transaction_text_regexp' FROM source_records s JOIN merchants m ON m.id=s.merchant_id WHERE s.source='open-enrichment' AND coalesce(s.data::jsonb->'raw'->>'parent_id','')='' AND jsonb_typeof(s.data::jsonb->'raw'->'transaction_text_regexp')='string'", &[])? {
                 let id: String = row.get(0);
                 if let Some(length) = crate::regex_rules::match_length(row.get(1), &description) {
                     matches.entry(id).and_modify(|v| *v = (*v).max(length)).or_insert(length);
@@ -307,7 +353,7 @@ impl PostgresStore {
             let tokens: Vec<_> = query.split_whitespace().filter(|t| t.chars().count()>=3).take(16).collect();
             let expression = tokens.iter().map(|t| format!("'{t}':*")).collect::<Vec<_>>().join(" | ");
             if !expression.is_empty() {
-                for row in tx.query("SELECT m.data FROM merchant_search s JOIN merchants m ON m.id=s.merchant_id WHERE s.tokens @@ to_tsquery('simple',$1) AND ($2::text IS NULL OR m.country IS NULL OR m.country=$2) ORDER BY ts_rank(s.tokens,to_tsquery('simple',$1)) DESC,m.id LIMIT 100", &[&expression,&country])? {
+                for row in tx.query("SELECT m.data FROM merchant_search s JOIN merchants m ON m.id=s.merchant_id WHERE s.tokens @@ to_tsquery('simple',$1) ORDER BY ts_rank(s.tokens,to_tsquery('simple',$1)) DESC,m.id LIMIT 100", &[&expression])? {
                     add_candidate(&mut tx,&mut found,row.get(0),&query,false,None,&mut scorer)?;
                 }
             }
@@ -323,17 +369,22 @@ impl PostgresStore {
             let mut patterns: Vec<String> = grams.into_iter().map(|g| format!("%{g}%")).collect();
             patterns.sort();
             if !patterns.is_empty() {
-                let clauses = (0..patterns.len()).map(|i| format!("s.text LIKE ${}",i+2)).collect::<Vec<_>>().join(" OR ");
-                let sql = format!("SELECT m.data FROM merchant_search s JOIN merchants m ON m.id=s.merchant_id WHERE ($1::text IS NULL OR m.country IS NULL OR m.country=$1) AND ({clauses}) ORDER BY similarity(s.text,${}) DESC,m.id LIMIT 100",patterns.len()+2);
-                let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![&country];
+                let clauses = (0..patterns.len()).map(|i| format!("s.text LIKE ${}",i+1)).collect::<Vec<_>>().join(" OR ");
+                let sql = format!("SELECT m.data FROM merchant_search s JOIN merchants m ON m.id=s.merchant_id WHERE ({clauses}) ORDER BY similarity(s.text,${}) DESC,m.id LIMIT 100",patterns.len()+1);
+                let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
                 for pattern in &patterns { params.push(pattern); }
                 params.push(&query);
                 for row in tx.query(&sql,&params)? {
                     add_candidate(&mut tx,&mut found,row.get(0),&query,false,None,&mut scorer)?;
                 }
             }
+            let ids: Vec<_> = found.keys().cloned().collect();
+            let index = postgres_markets(&mut tx, Some(&ids))?;
+            for candidate in found.values_mut() {
+                candidate.merchant = index.hydrate(candidate.merchant.clone());
+            }
             tx.commit()?;
-            Ok(rank_candidates(found, limit))
+            Ok(rank_candidates(found, limit, country.as_deref()))
         })
     }
     pub fn restore(
@@ -358,7 +409,7 @@ impl PostgresStore {
                 if &merchant.id != id {
                     bail!("SQLite merchant ID does not match its record");
                 }
-                tx.execute("INSERT INTO merchants VALUES($1,$2,$3)",&[id,&merchant.country,data])?;
+                tx.execute("INSERT INTO merchants(id,data) VALUES($1,$2)",&[id,data])?;
             }
             for (id,data) in manual {
                 let merchant: Merchant = serde_json::from_str(&data)?;
@@ -391,6 +442,30 @@ impl PostgresStore {
         })
     }
 }
+fn migrate_markets(tx: &mut Transaction<'_>) -> Result<()> {
+    for table in ["merchants", "manual_merchants"] {
+        for row in tx.query(&format!("SELECT id,data FROM {table}"), &[])? {
+            let id: String = row.get(0);
+            let data = crate::markets::migrate_country(row.get(1), false)?;
+            tx.execute(
+                &format!("UPDATE {table} SET data=$1 WHERE id=$2"),
+                &[&data, &id],
+            )?;
+        }
+    }
+    for row in tx.query("SELECT source,external_id,data FROM source_records", &[])? {
+        let source: String = row.get(0);
+        let external_id: String = row.get(1);
+        let data = crate::markets::migrate_country(row.get(2), true)?;
+        tx.execute(
+            "UPDATE source_records SET data=$1 WHERE source=$2 AND external_id=$3",
+            &[&data, &source, &external_id],
+        )?;
+    }
+    tx.batch_execute(include_str!("../migrations/004_markets.sql"))?;
+    Ok(())
+}
+
 fn write_lock(tx: &mut Transaction<'_>) -> Result<()> {
     tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&WRITE_LOCK])?;
     Ok(())
@@ -403,6 +478,54 @@ fn source_records(c: &mut impl GenericClient, id: &str) -> Result<Vec<SourceReco
     .iter()
     .map(|r| serde_json::from_str(r.get::<_, &str>(0)))
     .collect::<std::result::Result<_, _>>()?)
+}
+fn postgres_markets(tx: &mut impl GenericClient, ids: Option<&[String]>) -> Result<MarketIndex> {
+    let mut index = MarketIndex::default();
+    let filter = |column: &str| {
+        if ids.is_some() {
+            format!("{column} = ANY($1::text[])")
+        } else {
+            "$1::text[] IS NULL".into()
+        }
+    };
+    let manual_sql = format!(
+        "SELECT id,data FROM manual_merchants WHERE {}",
+        filter("id")
+    );
+    for row in tx.query(&manual_sql, &[&ids])? {
+        index.declaration(
+            row.get(0),
+            &serde_json::from_str(row.get::<_, &str>(1))?,
+            "manual",
+            None,
+        );
+    }
+    let sources_sql = format!(
+        "SELECT merchant_id,data FROM source_records WHERE {} ORDER BY source,external_id",
+        filter("merchant_id")
+    );
+    for row in tx.query(&sources_sql, &[&ids])? {
+        index.source(row.get(0), &serde_json::from_str(row.get::<_, &str>(1))?);
+    }
+    let outlets_sql = if ids.is_some() {
+        format!(
+            "SELECT merchant_id,data FROM location_records WHERE {} UNION ALL SELECT s.merchant_id,l.data FROM source_records s JOIN location_records l ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE l.merchant_id IS NULL AND {}",
+            filter("merchant_id"),
+            filter("s.merchant_id")
+        )
+    } else {
+        "SELECT COALESCE(l.merchant_id,s.merchant_id),l.data FROM location_records l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE $1::text[] IS NULL".into()
+    };
+    for row in tx.query(&outlets_sql, &[&ids])? {
+        index.outlet(row.get(0), &serde_json::from_str(row.get::<_, &str>(1))?);
+    }
+    Ok(index)
+}
+fn postgres_catalog(tx: &mut impl GenericClient, index: &MarketIndex) -> Result<Vec<Merchant>> {
+    tx.query("SELECT data FROM merchants", &[])?
+        .iter()
+        .map(|r| Ok(index.hydrate(serde_json::from_str(r.get::<_, &str>(0))?)))
+        .collect()
 }
 fn add_candidate(
     tx: &mut Transaction<'_>,
@@ -484,7 +607,7 @@ fn rebuild(tx: &mut Transaction<'_>, id: &str) -> Result<()> {
     merchant.aliases.dedup();
     merchant.sources.sort();
     merchant.sources.dedup();
-    tx.execute("INSERT INTO merchants VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET country=excluded.country,data=excluded.data",&[&id,&merchant.country,&serde_json::to_string(&merchant)?])?;
+    tx.execute("INSERT INTO merchants(id,data) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",&[&id,&serde_json::to_string(&merchant)?])?;
     let mut names: Vec<_> = std::iter::once(&merchant.name)
         .chain(merchant.aliases.iter())
         .map(|n| normalize(n))
@@ -544,8 +667,8 @@ mod connection_tests {
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get(0);
             assert_eq!(
-                version, 2,
-                "additive outlet migration must preserve older application compatibility"
+                version, 3,
+                "market migration must run before application use"
             );
             let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
             assert_eq!(idle, "1min");

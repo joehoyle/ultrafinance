@@ -101,8 +101,10 @@
                       },
                       "merchant": {
                         "data": {
-                          "country": "CA",
                           "id": "mer_example",
+                          "markets": [
+                            "CA"
+                          ],
                           "name": "Example Café"
                         },
                         "status": "matched"
@@ -300,56 +302,44 @@
         "tags": [
           "Merchants"
         ],
-        "summary": "Explore the merchant catalog without calling the AI provider.\nBrowsing is alphabetical; search ranks a bounded candidate pool rather than\nmatching every catalog row. Search totals refer to that pool (at most 255 for\nexact alias collisions, otherwise 100), not the full catalog. Results include\nmerchant records only, without internal scoring or import evidence.",
+        "summary": "Explore the merchant catalog without calling the AI provider.\nBrowsing is alphabetical; search ranks a bounded candidate pool rather than\nmatching every catalog row. Search totals refer to that pool (at most 255 for\nexact alias collisions, otherwise 100), not the full catalog. Results include\nmerchant records with market evidence, without aliases or internal matching scores.",
         "operationId": "merchants",
         "parameters": [
           {
             "name": "q",
-            "in": "path",
+            "in": "query",
             "description": "Optional name or alias search; at most 256 bytes. Searches return a bounded candidate pool.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
-            "name": "country",
-            "in": "path",
-            "description": "Two-letter uppercase country code. Search also includes merchants with unknown country.",
-            "required": true,
+            "name": "market",
+            "in": "query",
+            "description": "Filter by known operating market, as a two-letter uppercase country code. Coverage is not exhaustive.",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
+            "in": "query",
             "description": "Page size, from 1 to 100. Defaults to 20.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "minimum": 0
             }
           },
           {
             "name": "offset",
-            "in": "path",
+            "in": "query",
             "description": "Number of results to skip, up to 1,000,000. Defaults to 0.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "minimum": 0
             }
           }
@@ -506,7 +496,7 @@
               "string",
               "null"
             ],
-            "description": "Two uppercase ASCII letters. Narrows merchant candidates, not the location of an outlet.",
+            "description": "Transaction country, as two uppercase ASCII letters. Known markets improve ranking; missing markets never exclude a merchant.",
             "pattern": "^[A-Z]{2}$"
           },
           "currency": {
@@ -796,6 +786,53 @@
           }
         ]
       },
+      "MarketConfidence": {
+        "type": "string",
+        "description": "Qualitative strength of the supplied evidence, not a match probability.",
+        "enum": [
+          "high",
+          "medium"
+        ]
+      },
+      "MarketEvidence": {
+        "type": "object",
+        "required": [
+          "country",
+          "source",
+          "kind",
+          "confidence"
+        ],
+        "properties": {
+          "confidence": {
+            "$ref": "#/components/schemas/MarketConfidence"
+          },
+          "country": {
+            "type": "string"
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MarketKind"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MarketKind": {
+        "type": "string",
+        "enum": [
+          "declaration",
+          "country_hint",
+          "dataset_region",
+          "outlet"
+        ]
+      },
       "Merchant": {
         "type": "object",
         "required": [
@@ -803,18 +840,6 @@
           "name"
         ],
         "properties": {
-          "aliases": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "country": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "id": {
             "type": "string",
             "description": "Stable ID in this service's merchant catalog."
@@ -831,6 +856,20 @@
               "null"
             ]
           },
+          "market_evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MarketEvidence"
+            },
+            "description": "Source and qualitative confidence for each known market."
+          },
+          "markets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Countries with evidence of operation. Coverage is not exhaustive."
+          },
           "name": {
             "type": "string"
           },
@@ -846,8 +885,7 @@
               "null"
             ]
           }
-        },
-        "additionalProperties": false
+        }
       },
       "MerchantPage": {
         "type": "object",
@@ -882,7 +920,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "A supported catalog match, with its merchant record.",
+            "description": "A supported catalog match, with its public merchant record.",
             "required": [
               "data",
               "status"

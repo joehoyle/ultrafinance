@@ -32,6 +32,107 @@ fn run(args: &[&str], stdin: Option<&str>) -> std::process::Output {
 }
 
 #[test]
+fn missing_subcommands_show_contextual_help() {
+    for group in [
+        None,
+        Some("infra"),
+        Some("database"),
+        Some("datasets"),
+        Some("locations"),
+        Some("merchants"),
+    ] {
+        for global_flags in [false, true] {
+            let mut args = Vec::new();
+            if global_flags {
+                args.extend(["--database", "/unused/catalog.sqlite"]);
+            }
+            if let Some(group) = group {
+                args.push(group);
+            }
+            let output = run(&args, None);
+            let help = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+            let usage = match group {
+                Some(group) => format!("Usage: ultrafinance {group}"),
+                None => "Usage: ultrafinance".to_owned(),
+            };
+            assert!(help.contains(&usage), "{help}");
+            assert!(help.contains("Commands:"), "{help}");
+            assert!(help.contains("--help"), "{help}");
+        }
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+        .env("ULTRAFINANCE_DB", "/unused/catalog.sqlite")
+        .env("ULTRAFINANCE_DATABASE_URL", "postgres://unused")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("Commands:")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn infra_routes_logs_and_stops_deploy_before_build_on_config_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory =
+        std::env::temp_dir().join(format!("ultrafinance-infra-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(directory.join("deploy")).unwrap();
+    std::fs::create_dir_all(directory.join("infra")).unwrap();
+    std::fs::create_dir_all(directory.join("bin")).unwrap();
+    std::fs::write(directory.join("infra/outputs.tf"), "").unwrap();
+    std::fs::write(directory.join("Cargo.toml"), "").unwrap();
+    for (file, body) in [
+        ("deploy/deploy.sh", "#!/bin/sh\necho SHOULD_NOT_DEPLOY\n"),
+        (
+            "bin/tofu",
+            "#!/bin/sh\ncase \"$4\" in\naws_profile) echo test-profile;;\naws_region) echo test-region;;\nfunction_name) echo test-function;;\n*) exit 2;;\nesac\n",
+        ),
+        ("bin/aws", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n"),
+    ] {
+        let path = directory.join(file);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .current_dir(&directory)
+            .env("PATH", directory.join("bin"))
+            .env_remove("ULTRAFINANCE_DATABASE_URL")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let logs = invoke(&["infra", "logs", "--since", "2h", "--follow"]);
+    assert!(
+        logs.status.success(),
+        "{}",
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(logs.stdout).unwrap(),
+        "--profile\ntest-profile\n--region\ntest-region\nlogs\ntail\n/aws/lambda/test-function\n--since\n2h\n--format\nshort\n--follow\n"
+    );
+    let deploy = invoke(&["infra", "deploy"]);
+    assert!(!deploy.status.success());
+    assert!(deploy.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&deploy.stderr).contains("repository_url"));
+    let shell = invoke(&["infra", "cli"]);
+    assert!(!shell.status.success());
+    assert!(String::from_utf8_lossy(&shell.stderr).contains("interactive terminal"));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn flags_and_stdin_preserve_nested_evidence() {
     let output = run(
         &[
@@ -84,8 +185,8 @@ fn invalid_requests_and_conflicting_modes_exit_nonzero() {
 }
 
 #[test]
-fn country_exclusion_returns_unresolved_without_provider_credentials() {
-    // The example fixture is Canadian, so US input must never trigger a Jev call.
+fn short_descriptor_remains_unresolved_without_provider_credentials() {
+    // A short descriptor supplies no matching evidence, regardless of market.
     let catalog = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../data/merchants.example.json"
@@ -120,7 +221,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
             "add",
             "--name",
             "Julius Café",
-            "--country",
+            "--market",
             "CA",
             "--alias",
             "JULIUS CAFE BROMONT",
@@ -529,4 +630,163 @@ fn locations_import_list_eval_and_structured_flags_work() {
     let request: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(request["location"]["city"], "Toronto");
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
+    use ultrafinance_core::{import, store::MerchantStore};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stats.sqlite");
+    let db = path.to_str().unwrap();
+    let invoke = |json: bool| {
+        let mut args = vec!["--database", db, "merchants", "stats"];
+        if json {
+            args.push("--json");
+        }
+        let output = run(&args, None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let empty: Value = serde_json::from_slice(&invoke(true)).unwrap();
+    assert_eq!(
+        empty,
+        json!({"total":0,"manual":0,"without_source":0,"by_source":[],"without_market_evidence":0,"by_market":[],"by_source_region":[]})
+    );
+    let store = MerchantStore::open(&path).unwrap();
+    let catalog = r#"[{"id":"one","name":"One","markets":["CA"]},{"id":"two","name":"Two","markets":["CA"]}]"#;
+    store
+        .import(&import::catalog(catalog, "alpha").unwrap())
+        .unwrap();
+    let id = store.resolve_source("alpha", "one").unwrap().unwrap();
+    store.link("alpha", "two", &id).unwrap();
+    store
+        .import(
+            &import::catalog(
+                r#"[{"id":"three","name":"Three","markets":["CA"]}]"#,
+                "beta",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    store.link("beta", "three", &id).unwrap();
+    store
+        .put(&serde_json::from_value(json!({"id":id,"name":"Corrected","markets":["CA"]})).unwrap())
+        .unwrap();
+    store
+        .put(&serde_json::from_value(json!({"id":"manual-only","name":"Unknown"})).unwrap())
+        .unwrap();
+    let stats: Value = serde_json::from_slice(&invoke(true)).unwrap();
+    assert_eq!(
+        stats,
+        json!({
+            "total":2,"manual":2,"without_source":1,
+            "by_source":[{"source":"alpha","merchants":1,"records":2},{"source":"beta","merchants":1,"records":1}],
+            "without_market_evidence":1,"by_market":[{"market":"CA","merchants":1}],"by_source_region":[]
+        })
+    );
+    let text = String::from_utf8(invoke(false)).unwrap();
+    for expected in [
+        "Total merchants: 2",
+        "Manual entries / corrections: 2",
+        "Without imported source: 1",
+        "alpha",
+        "beta",
+        "No market evidence: 1",
+        "CA",
+    ] {
+        assert!(text.contains(expected), "{text}");
+    }
+}
+
+#[test]
+fn merchant_markets_flags_replace_country_and_exact_matches_remain_eligible() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("markets.sqlite");
+    let db = path.to_str().unwrap();
+    let added = run(
+        &[
+            "--database",
+            db,
+            "merchants",
+            "add",
+            "--name",
+            "Example Brand",
+            "--market",
+            "US",
+            "--market",
+            "CA",
+            "--market",
+            "CA",
+        ],
+        None,
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let merchant: Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(merchant["markets"], json!(["CA", "US"]));
+    assert!(merchant.get("country").is_none());
+    let listed = run(
+        &[
+            "--database",
+            db,
+            "merchants",
+            "list",
+            "--market",
+            "CA",
+            "--json",
+        ],
+        None,
+    );
+    assert!(listed.status.success());
+    let page: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(
+        page["merchants"][0]["market_evidence"][0]["source"],
+        "manual"
+    );
+    let enriched = run(
+        &[
+            "--database",
+            db,
+            "enrich",
+            "Example Brand",
+            "--country",
+            "DE",
+        ],
+        None,
+    );
+    assert!(
+        enriched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enriched.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&enriched.stdout).unwrap()["merchant"]["status"],
+        "matched"
+    );
+    for args in [
+        vec!["merchants", "add", "--name", "Brand", "--country", "CA"],
+        vec!["merchants", "list", "--country", "CA"],
+    ] {
+        assert!(!run(&args, None).status.success());
+    }
+}
+
+#[test]
+fn infra_cli_latest_is_documented_and_conflicts_with_explicit_image() {
+    let help = run(&["infra", "cli", "--help"], None);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("--latest"));
+    assert!(text.contains("newest published Lambda version"));
+    let conflict = run(&["infra", "cli", "--latest", "--image", "example"], None);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"));
 }

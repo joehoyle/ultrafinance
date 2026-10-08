@@ -1,7 +1,7 @@
 use anyhow::Result;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use std::io::{self, IsTerminal, Write};
-use ultrafinance_core::store::MerchantPage;
+use ultrafinance_core::store::{MerchantPage, MerchantStats};
 
 pub fn enrichment_logs(logs: &[serde_json::Value], json: bool, offset: usize) -> Result<()> {
     let rendered = if json {
@@ -71,7 +71,7 @@ pub fn merchant_list(page: &MerchantPage, json: bool) -> Result<()> {
         table
             .load_style(UTF8_FULL_CONDENSED)
             .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(["ID", "Name", "Country", "Website", "Aliases"]);
+            .set_header(["ID", "Name", "Markets", "Website", "Aliases"]);
         if !io::stdout().is_terminal() {
             table.set_width(120);
         }
@@ -79,7 +79,7 @@ pub fn merchant_list(page: &MerchantPage, json: bool) -> Result<()> {
             table.add_row([
                 text(&merchant.id),
                 text(&merchant.name),
-                text(merchant.country.as_deref().unwrap_or("—")),
+                text(&merchant.markets.join(", ")),
                 text(merchant.website.as_deref().unwrap_or("—")),
                 merchant.aliases.len().to_string(),
             ]);
@@ -92,6 +92,49 @@ pub fn merchant_list(page: &MerchantPage, json: bool) -> Result<()> {
         )
     };
     write_output(&rendered)
+}
+
+pub fn merchant_stats(stats: &MerchantStats, json: bool) -> Result<()> {
+    if json {
+        return write_output(&serde_json::to_string_pretty(stats)?);
+    }
+    let mut sources = Table::new();
+    sources
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_header(["Source", "Merchants", "Source records"]);
+    for source in &stats.by_source {
+        sources.add_row([
+            text(&source.source),
+            source.merchants.to_string(),
+            source.records.to_string(),
+        ]);
+    }
+    let mut markets = Table::new();
+    markets
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_header(["Market", "Merchants"]);
+    for market in &stats.by_market {
+        markets.add_row([text(&market.market), market.merchants.to_string()]);
+    }
+    let mut regions = Table::new();
+    regions.load_style(UTF8_FULL_CONDENSED).set_header([
+        "Source",
+        "Dataset region",
+        "Merchants",
+        "Source records",
+    ]);
+    for region in &stats.by_source_region {
+        regions.add_row([
+            text(&region.source),
+            text(&region.region),
+            region.merchants.to_string(),
+            region.records.to_string(),
+        ]);
+    }
+    write_output(&format!(
+        "Total merchants: {}\nManual entries / corrections: {}\nWithout imported source: {}\nNo market evidence: {}\n\nBy source\n{sources}\n\nCounts are distinct per source; a merchant linked to multiple sources appears in each.\n\nBy known market\n{markets}\n\nMarkets are known coverage, not exhaustive. A merchant can count in multiple markets.\n\nBy source dataset region\n{regions}",
+        stats.total, stats.manual, stats.without_source, stats.without_market_evidence
+    ))
 }
 
 fn write_output(rendered: &str) -> Result<()> {

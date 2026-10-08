@@ -307,7 +307,7 @@ impl Enricher {
                 let response = EnrichResponse {
                     location: LocationResult::default(),
                     merchant: MerchantResult::Matched {
-                        data: candidates[0].merchant.clone(),
+                        data: Box::new(candidates[0].merchant.clone()),
                     },
                     attributions: vec![],
                 };
@@ -444,8 +444,8 @@ mod tests {
     }
     fn enricher() -> Enricher {
         let merchants = serde_json::from_value(json!([
-            {"id":"alpha","name":"Alpha Cafe","country":"CA"},
-            {"id":"beta","name":"Beta Shop","country":"CA"}
+            {"id":"alpha","name":"Alpha Cafe","markets":["CA"]},
+            {"id":"beta","name":"Beta Shop","markets":["CA"]}
         ]))
         .unwrap();
         Enricher::new(

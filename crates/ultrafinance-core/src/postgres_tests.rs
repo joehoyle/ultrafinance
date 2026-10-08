@@ -4,7 +4,8 @@ fn merchant(id: &str, name: &str) -> Merchant {
     Merchant {
         id: id.into(),
         name: name.into(),
-        country: Some("CA".into()),
+        markets: vec!["CA".into()],
+        market_evidence: vec![],
         website: None,
         logo_url: Some("https://example.com/logo.png".into()),
         logo_source: Some("manual".into()),
@@ -32,6 +33,8 @@ fn record(id: &str, name: &str) -> SourceRecord {
 async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     let url = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")?;
     let pg = MerchantStore::initialize_postgres(&url)?;
+    let migration_url = url.clone();
+    tokio::task::spawn_blocking(move || exercise_market_migration(&migration_url)).await??;
     MerchantStore::initialize_postgres(&url)?; // migrations are repeatable
     let log_id = uuid::Uuid::new_v4().to_string();
     pg.write_log(
@@ -102,6 +105,7 @@ async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     )?;
     drop(raw);
     assert_eq!(pg.migrate_sqlite(&path)?, 1);
+    assert_eq!(pg.stats()?, sqlite.stats()?);
     assert_eq!(pg.fingerprint()?, original);
     assert_eq!(
         serde_json::to_value(pg.locations(&id)?)?,
@@ -186,10 +190,10 @@ async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     assert!(second.search("NEW DESCRIPTION", None, 10)?[0].trusted);
     second.search("\" OR * (NEAR) --", None, 10)?;
     let mut us = merchant("us", "Julius Café");
-    us.country = Some("US".into());
+    us.markets = vec!["US".into()];
     pg.put(&us)?;
     assert!(
-        !second
+        second
             .search("Julius cafe", Some("CA"), 10)?
             .iter()
             .any(|c| c.merchant.id == "us")
@@ -242,5 +246,87 @@ async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     drop(pg);
     drop(sqlite);
     std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+fn exercise_market_migration(url: &str) -> Result<()> {
+    use postgres::Client;
+    use postgres_native_tls::MakeTlsConnector;
+    let mut client = Client::connect(
+        url,
+        MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?),
+    )?;
+    let old =
+        serde_json::json!({"id":"pre-market","name":"Before markets","country":"CA"}).to_string();
+    let source = serde_json::json!({
+        "source":"pre-market-source","external_id":"external","merchant":{"id":"external","name":"Before markets","country":"ca"},
+        "attribution":"Test","license":"Test","url":"https://example.com","version":null,"raw":{"countryHints":["US"]}
+    }).to_string();
+    client.batch_execute(
+        "ALTER TABLE merchants ADD COLUMN country TEXT; UPDATE ultrafinance_schema SET version=2;",
+    )?;
+    client.execute(
+        "INSERT INTO merchants(id,country,data) VALUES('pre-market','CA',$1)",
+        &[&old],
+    )?;
+    client.execute(
+        "INSERT INTO manual_merchants(id,data) VALUES('pre-market',$1)",
+        &[&old],
+    )?;
+    client.execute(
+        "INSERT INTO source_records VALUES('pre-market-source','external','pre-market',$1)",
+        &[&source],
+    )?;
+    // Invalid source data rolls back earlier row conversions and schema changes.
+    assert!(MerchantStore::initialize_postgres(url).is_err());
+    assert_eq!(
+        client
+            .query_one("SELECT version FROM ultrafinance_schema", &[])?
+            .get::<_, i32>(0),
+        2
+    );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT data FROM manual_merchants WHERE id='pre-market'",
+                &[]
+            )?
+            .get::<_, String>(0),
+        old
+    );
+    let mut repaired: Value = serde_json::from_str(&source)?;
+    repaired["merchant"]["country"] = serde_json::json!("CA");
+    client.execute(
+        "UPDATE source_records SET data=$1 WHERE source='pre-market-source'",
+        &[&repaired.to_string()],
+    )?;
+    assert!(MerchantStore::postgres(url).is_err());
+    let store = MerchantStore::initialize_postgres(url)?;
+    let page = store.list(Some("US"), 10, 0)?;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.merchants[0].markets, ["CA", "US"]);
+    assert!(
+        serde_json::to_value(&page.merchants[0])?
+            .get("country")
+            .is_none()
+    );
+    assert_eq!(
+        store.resolve_source("pre-market-source", "external")?,
+        Some("pre-market".into())
+    );
+    let fingerprint = store.fingerprint()?;
+    assert_eq!(
+        MerchantStore::initialize_postgres(url)?.fingerprint()?,
+        fingerprint
+    );
+    assert_eq!(
+        client
+            .query_one("SELECT version FROM ultrafinance_schema", &[])?
+            .get::<_, i32>(0),
+        3
+    );
+    let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
+    assert!(!has_country);
+    client.batch_execute("DELETE FROM source_records WHERE source='pre-market-source'; DELETE FROM manual_merchants WHERE id='pre-market'; DELETE FROM merchants WHERE id='pre-market';")?;
     Ok(())
 }
