@@ -47,8 +47,11 @@ enum Command {
         #[command(subcommand)]
         command: DatabaseCommand,
     },
-    /// Inspect private enrichment history as JSON (newest first).
+    /// Inspect private enrichment history (newest first).
     Logs {
+        /// Print full records as JSON instead of a summary table.
+        #[arg(long)]
+        json: bool,
         #[arg(long, value_parser = ["started", "matched", "unresolved", "error"])]
         status: Option<String>,
         #[arg(long)]
@@ -358,21 +361,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Logs {
+            json,
             status,
             merchant_id,
             limit,
             offset,
         } => {
             let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&store.enrichment_logs(
-                    status.as_deref(),
-                    merchant_id.as_deref(),
-                    limit,
-                    offset
-                )?)?
-            );
+            output::enrichment_logs(
+                &store.enrichment_logs(status.as_deref(), merchant_id.as_deref(), limit, offset)?,
+                json,
+                offset,
+            )?;
         }
         Command::Database { command } => {
             let url = cli

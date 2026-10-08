@@ -659,9 +659,11 @@ cargo run -- logs --limit 50
 cargo run -- logs --status unresolved
 cargo run -- logs --status error
 cargo run -- logs --merchant-id mer_example --limit 100 --offset 0
+cargo run -- logs --json
 ```
 
-Output is JSON, newest first; limit is 1–1000. Inspection uses the configured
+Output is a summary table, newest first, with UTC timestamps, status, description,
+merchant, method, and errors. Use `--json` for full records; limit is 1–1000. Inspection uses the configured
 SQLite or PostgreSQL database and is available through the CLI, with no public
 history endpoint. Input `extra` and candidate evidence are retained as supplied.
 History has no automatic expiry. A log write failure fails enrichment so a result

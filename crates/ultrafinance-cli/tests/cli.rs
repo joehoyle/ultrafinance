@@ -177,6 +177,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
             "matched",
             "--merchant-id",
             merchant["id"].as_str().unwrap(),
+            "--json",
         ],
         None,
     );
@@ -193,6 +194,31 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
         "julius café bromont"
     );
     assert_eq!(logs[0]["data"]["response"], result);
+
+    let history_table = run(&["--database", db, "logs", "--status", "matched"], None);
+    assert!(history_table.status.success());
+    let table = String::from_utf8(history_table.stdout).unwrap();
+    for expected in [
+        "Created (UTC)",
+        "Status",
+        "Description",
+        "Merchant",
+        "Method",
+        "Error",
+        "matched",
+        "julius café bromont",
+        "exact",
+        "Showing 1–1",
+    ] {
+        assert!(table.contains(expected), "{table}");
+    }
+    let empty = run(&["--database", db, "logs", "--offset", "1"], None);
+    assert!(empty.status.success());
+    assert!(
+        String::from_utf8(empty.stdout)
+            .unwrap()
+            .contains("No enrichment logs on this page (offset 1).")
+    );
 
     std::fs::remove_dir_all(directory).unwrap();
 }
