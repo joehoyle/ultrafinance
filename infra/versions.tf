@@ -9,7 +9,7 @@ terraform {
 }
 
 provider "aws" {
-  profile             = var.aws_use_cli_credentials ? null : var.aws_profile
+  profile             = var.aws_profile
   region              = var.aws_region
   allowed_account_ids = var.aws_account_id == null ? null : [var.aws_account_id]
   default_tags {
@@ -19,7 +19,7 @@ provider "aws" {
 
 provider "aws" {
   alias               = "us_east_1"
-  profile             = var.aws_use_cli_credentials ? null : var.aws_profile
+  profile             = var.aws_profile
   region              = "us-east-1"
   allowed_account_ids = var.aws_account_id == null ? null : [var.aws_account_id]
   default_tags {

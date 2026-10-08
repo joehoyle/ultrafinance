@@ -7,11 +7,6 @@ variable "domain_name" {
   type        = string
   default     = null
 }
-variable "aws_use_cli_credentials" {
-  description = "Use temporary credentials exported by infra/tofu.sh for AWS CLI login profiles."
-  type        = bool
-  default     = false
-}
 variable "aws_account_id" {
   description = "Optional AWS account guard for infrastructure operations."
   type        = string
