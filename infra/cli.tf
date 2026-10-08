@@ -19,12 +19,18 @@ resource "aws_cloudwatch_log_group" "cli" {
   retention_in_days = 14
 }
 
-# The value is set outside OpenTofu so write credentials never enter state.
+# Lambda and the shell use the same application login, never the administrator.
 resource "aws_secretsmanager_secret" "cli_database_url" {
   count                   = local.cli_enabled ? 1 : 0
   name                    = "${var.name}/cli-database-url"
-  description             = "TLS PostgreSQL URL for the Ultrafinance CLI import role"
+  description             = "Shared TLS PostgreSQL application URL for Lambda and the CLI shell"
   recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "cli_database_url" {
+  count         = local.cli_enabled && nonsensitive(var.database_url != null) ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.cli_database_url[0].id
+  secret_string = var.database_url
 }
 
 resource "aws_iam_role" "cli_execution" {
@@ -83,11 +89,13 @@ resource "aws_ecs_task_definition" "cli" {
     command                = ["exec sleep 3600"]
     linuxParameters        = { initProcessEnabled = true }
     readonlyRootFilesystem = false
+    secrets                = var.database_url == null ? [] : [{ name = "ULTRAFINANCE_DATABASE_URL", valueFrom = aws_secretsmanager_secret.cli_database_url[0].arn }]
     logConfiguration = {
       logDriver = "awslogs"
       options   = { awslogs-group = aws_cloudwatch_log_group.cli[0].name, awslogs-region = var.aws_region, awslogs-stream-prefix = "cli" }
     }
   }])
+  depends_on = [aws_secretsmanager_secret_version.cli_database_url]
   lifecycle {
     precondition {
       condition     = var.enable_aurora && var.image_uri != null

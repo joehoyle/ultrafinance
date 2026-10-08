@@ -101,7 +101,7 @@ fn country_exclusion_returns_unresolved_without_provider_credentials() {
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"merchant":{"status":"unresolved","data":null}})
+        json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}})
     );
 }
 
@@ -395,5 +395,112 @@ fn enrich_batch_validates_envelopes_and_outputs_partial_results_before_failing()
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
     }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn locations_import_list_eval_and_structured_flags_work() {
+    let directory =
+        std::env::temp_dir().join(format!("ultrafinance-locations-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("catalog.sqlite");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let merchants = root.join("data/locations/merchants.example.json");
+    let outlets = root.join("data/locations/open-enrichment-au.json");
+    let suite = root.join("evals/location-smoke.json");
+    for args in [
+        vec![
+            "--database",
+            database.to_str().unwrap(),
+            "merchants",
+            "import",
+            merchants.to_str().unwrap(),
+            "--source",
+            "open-enrichment",
+        ],
+        vec![
+            "--database",
+            database.to_str().unwrap(),
+            "locations",
+            "import",
+            outlets.to_str().unwrap(),
+        ],
+        vec![
+            "--database",
+            database.to_str().unwrap(),
+            "locations",
+            "import",
+            outlets.to_str().unwrap(),
+        ],
+    ] {
+        let output = run(&args, None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = run(
+        &[
+            "--database",
+            database.to_str().unwrap(),
+            "merchants",
+            "list",
+            "--json",
+        ],
+        None,
+    );
+    let merchants: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let merchant_id = merchants["merchants"][0]["id"].as_str().unwrap();
+    let output = run(
+        &[
+            "--database",
+            database.to_str().unwrap(),
+            "locations",
+            "list",
+            merchant_id,
+        ],
+        None,
+    );
+    let records: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(records.as_array().unwrap().len(), 2);
+    assert!(
+        records[0]["location"]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("loc_")
+    );
+    let output = run(
+        &[
+            "--database",
+            database.to_str().unwrap(),
+            "locations",
+            "eval",
+            suite.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outlet_accuracy"], 1.0);
+    assert_eq!(report["geographic_field_accuracy"], 1.0);
+    assert_eq!(report["unresolved_accuracy"], 1.0);
+    let output = run(
+        &[
+            "enrich",
+            "UNKNOWN",
+            "--location",
+            r#"{"city":"Toronto","country":"CA"}"#,
+            "--dry-run",
+        ],
+        None,
+    );
+    assert!(output.status.success());
+    let request: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(request["location"]["city"], "Toronto");
     std::fs::remove_dir_all(directory).unwrap();
 }

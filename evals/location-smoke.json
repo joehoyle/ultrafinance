@@ -1,0 +1,188 @@
+{
+  "name": "location-smoke-source-consistency",
+  "cases": [
+    {
+      "id": "city-store",
+      "request": {
+        "description": "POLLO TROPICAL #10241 HIALEAH FL"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "extracted",
+        "fields": {
+          "city": "Hialeah",
+          "region": "FL",
+          "country": "US",
+          "store_number": "10241"
+        }
+      }
+    },
+    {
+      "id": "city-canada",
+      "request": {
+        "description": "CAFE TORONTO ON CA"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "extracted",
+        "fields": {
+          "city": "Toronto",
+          "region": "ON",
+          "country": "CA"
+        }
+      }
+    },
+    {
+      "id": "store-leading-zero",
+      "request": {
+        "description": "WALMART #0006"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "extracted",
+        "fields": {
+          "store_number": "0006"
+        }
+      }
+    },
+    {
+      "id": "caller-evidence",
+      "request": {
+        "description": "UNKNOWN CAFE",
+        "location": {
+          "city": "Bromont",
+          "country": "CA"
+        }
+      },
+      "merchant": null,
+      "expected": {
+        "status": "extracted",
+        "fields": {
+          "city": "Bromont",
+          "country": "CA"
+        }
+      }
+    },
+    {
+      "id": "billing-city",
+      "request": {
+        "description": "HULU LOS ANGELES CA"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "processor",
+      "request": {
+        "description": "PAYPAL *CARVANA 402-935-7733 AZ"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "truncated-city",
+      "request": {
+        "description": "LIDL GB NOTTINGHA"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "ambiguous-country",
+      "request": {
+        "description": "CAFE CA"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "plain-brand",
+      "request": {
+        "description": "APPLE STORE"
+      },
+      "merchant": null,
+      "expected": {
+        "status": "unresolved"
+      }
+    },
+    {
+      "id": "canberra-outlet",
+      "request": {
+        "description": "APPLE RETAIL STORE R483 CANBERRA"
+      },
+      "merchant": {
+        "source": "open-enrichment",
+        "external_id": "04eb38e9-d678-4d44-90a9-1786f12effd6"
+      },
+      "expected": {
+        "status": "matched",
+        "source": "open-enrichment",
+        "external_id": "070e812f-5a24-4fef-a109-c602167d1afe",
+        "fields": {
+          "city": "Canberra",
+          "region": "ACT",
+          "country": "AU",
+          "store_number": "R483"
+        }
+      }
+    },
+    {
+      "id": "sydney-outlet",
+      "request": {
+        "description": "APPLE R238 SYDNEY NSW"
+      },
+      "merchant": {
+        "source": "open-enrichment",
+        "external_id": "04eb38e9-d678-4d44-90a9-1786f12effd6"
+      },
+      "expected": {
+        "status": "matched",
+        "source": "open-enrichment",
+        "external_id": "3700e092-c7d5-4cb3-b1b1-cfdf0aa9c6d8",
+        "fields": {
+          "city": "Sydney",
+          "region": "NSW",
+          "country": "AU",
+          "store_number": "R238"
+        }
+      }
+    },
+    {
+      "id": "unknown-outlet",
+      "request": {
+        "description": "APPLE STORE R9999"
+      },
+      "merchant": {
+        "source": "open-enrichment",
+        "external_id": "04eb38e9-d678-4d44-90a9-1786f12effd6"
+      },
+      "expected": {
+        "status": "extracted",
+        "fields": {
+          "store_number": "R9999"
+        }
+      }
+    },
+    {
+      "id": "billing-apple",
+      "request": {
+        "description": "APPLE.COM/BILL SYDNEY"
+      },
+      "merchant": {
+        "source": "open-enrichment",
+        "external_id": "04eb38e9-d678-4d44-90a9-1786f12effd6"
+      },
+      "expected": {
+        "status": "unresolved"
+      }
+    }
+  ]
+}

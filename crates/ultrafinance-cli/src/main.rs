@@ -94,11 +94,26 @@ enum Command {
         #[command(subcommand)]
         command: DatasetCommand,
     },
+    /// Import reviewed merchant outlets or inspect a merchant's locations.
+    Locations {
+        #[command(subcommand)]
+        command: LocationCommand,
+    },
     /// Maintain and search the local merchant database.
     Merchants {
         #[command(subcommand)]
         command: MerchantCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum LocationCommand {
+    /// Import reviewed outlet JSON. Import the referenced merchants first.
+    Import { file: PathBuf },
+    /// Evaluate location-only labels offline with geography and outlet accuracy.
+    Eval { file: PathBuf },
+    /// List catalog outlets for a local merchant ID, including provenance.
+    List { merchant_id: String },
 }
 
 #[derive(Subcommand)]
@@ -225,7 +240,7 @@ struct EnrichArgs {
     #[arg(required_unless_present = "input", conflicts_with = "input")]
     description: Option<String>,
     /// Read a complete JSON request from a file, or use - for stdin.
-    #[arg(long, conflicts_with_all = ["description", "amount", "currency", "date", "country", "extra"])]
+    #[arg(long, conflicts_with_all = ["description", "amount", "currency", "date", "country", "location", "extra"])]
     input: Option<PathBuf>,
     /// Decimal amount, supplied as a string.
     #[arg(long, allow_hyphen_values = true)]
@@ -237,6 +252,9 @@ struct EnrichArgs {
     date: Option<String>,
     #[arg(long)]
     country: Option<String>,
+    /// Structured transaction geography as a JSON object.
+    #[arg(long)]
+    location: Option<String>,
     /// Additional evidence as a JSON object.
     #[arg(long)]
     extra: Option<String>,
@@ -314,6 +332,13 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
             currency: args.currency.clone(),
             date: args.date.clone(),
             country: args.country.clone(),
+            location: args
+                .location
+                .as_ref()
+                .map(|value| {
+                    serde_json::from_str(value).context("--location must be a location object")
+                })
+                .transpose()?,
             extra: match &args.extra {
                 Some(extra) => serde_json::from_str::<Map<String, serde_json::Value>>(extra)
                     .context("--extra must be a JSON object")?,
@@ -365,6 +390,32 @@ async fn main() -> Result<()> {
                     println!(
                         "{}",
                         serde_json::json!({"migrated":count,"database_fingerprint":store.fingerprint()?})
+                    );
+                }
+            }
+        }
+        Command::Locations { command } => {
+            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            match command {
+                LocationCommand::Import { file } => {
+                    let records: Vec<ultrafinance_core::location::LocationRecord> =
+                        serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                    store.import_locations(&records)?;
+                    println!("{}", serde_json::json!({"imported":records.len()}));
+                }
+                LocationCommand::Eval { file } => {
+                    let suite = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&ultrafinance_core::location::evaluate(
+                            &store, suite
+                        )?)?
+                    );
+                }
+                LocationCommand::List { merchant_id } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&store.locations(&merchant_id)?)?
                     );
                 }
             }
@@ -578,7 +629,9 @@ async fn main() -> Result<()> {
                 .iter()
                 .zip(outcomes)
                 .map(|(request, outcome)| match outcome {
-                    Ok(data) => BatchItemResult::Success { data },
+                    Ok(data) => BatchItemResult::Success {
+                        data: Box::new(data),
+                    },
                     Err(error) => {
                         failed = true;
                         BatchItemResult::Error {

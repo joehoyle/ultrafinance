@@ -1,8 +1,10 @@
 //! Synchronous store on a dedicated worker: postgres owns a Tokio runtime and
 //! must never be constructed or dropped on the API/CLI's async runtime threads.
+use super::location_reference;
 use super::{
     Candidate, Merchant, MerchantPage, SourceRecord, excluded, normalize, rank_candidates, validate,
 };
+use crate::location::LocationRecord;
 use anyhow::{Context, Result, bail};
 use postgres::{Client, GenericClient, IsolationLevel, Transaction};
 use postgres_native_tls::MakeTlsConnector;
@@ -50,6 +52,7 @@ impl PostgresStore {
                     if !exists { tx.batch_execute(include_str!("../migrations/001_postgres.sql"))?; }
                     let version: i32 = tx.query_one("SELECT version FROM ultrafinance_schema", &[])?.get(0);
                     if version == 1 { tx.batch_execute(include_str!("../migrations/002_enrichment_log.sql"))?; }
+                    if version <= 2 { tx.batch_execute(include_str!("../migrations/003_locations.sql"))?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
@@ -125,6 +128,36 @@ impl PostgresStore {
             client.query("SELECT id,batch_id,status,merchant_id,created_at::text,finished_at::text,data FROM enrichment_log WHERE ($1::text IS NULL OR status=$1) AND ($2::text IS NULL OR merchant_id=$2) ORDER BY created_at DESC,id LIMIT $3 OFFSET $4", &[&status,&merchant,&(limit as i64),&(offset as i64)])?.into_iter().map(|r| {
                 Ok(serde_json::json!({"id":r.get::<_,String>(0),"batch_id":r.get::<_,String>(1),"status":r.get::<_,String>(2),"merchant_id":r.get::<_,Option<String>>(3),"created_at":r.get::<_,String>(4),"finished_at":r.get::<_,Option<String>>(5),"data":serde_json::from_str::<serde_json::Value>(&r.get::<_,String>(6))?}))
             }).collect()
+        })
+    }
+    pub fn import_locations(&self, records: &[LocationRecord]) -> Result<()> {
+        let records = records.to_vec();
+        self.run(move |client| {
+            let mut tx = client.transaction()?;
+            write_lock(&mut tx)?;
+            for record in records {
+                let existing: Option<String> = tx.query_opt("SELECT data FROM location_records WHERE source=$1 AND external_id=$2", &[&record.source,&record.external_id])?.map(|r| r.get(0));
+                if !record.manual_override && existing.as_deref().map(serde_json::from_str::<LocationRecord>).transpose()?.is_some_and(|r| r.manual_override) { continue; }
+                let (merchant_id, merchant_source, merchant_external) = location_reference(&record.merchant);
+                let exists: bool = if let Some(id) = merchant_id {
+                    tx.query_one("SELECT EXISTS(SELECT 1 FROM merchants WHERE id=$1)", &[&id])?.get(0)
+                } else {
+                    tx.query_one("SELECT EXISTS(SELECT 1 FROM source_records WHERE source=$1 AND external_id=$2)", &[&merchant_source,&merchant_external])?.get(0)
+                };
+                if !exists { bail!("outlet merchant reference is missing; import or link its merchant first"); }
+                let id: String = tx.query_opt("SELECT id FROM location_records WHERE source=$1 AND external_id=$2", &[&record.source,&record.external_id])?.map(|r| r.get(0)).unwrap_or_else(|| format!("loc_{}", uuid::Uuid::new_v4().simple()));
+                let mut stored = record.clone();
+                stored.location.id = Some(id.clone());
+                tx.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,data) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,data=excluded.data", &[&id,&record.source,&record.external_id,&merchant_id,&merchant_source,&merchant_external,&serde_json::to_string(&stored)?])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+    pub fn locations(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
+        let merchant_id = merchant_id.to_owned();
+        self.run(move |client| {
+            client.query("SELECT l.data FROM location_records l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=$1 ORDER BY l.id", &[&merchant_id])?.iter().map(|row| Ok(serde_json::from_str(row.get::<_, &str>(0))?)).collect()
         })
     }
     pub fn put(&self, merchant: &Merchant) -> Result<()> {
@@ -305,6 +338,7 @@ impl PostgresStore {
     }
     pub fn restore(
         &self,
+        locations: Vec<(String, String)>,
         merchants: Vec<(String, String)>,
         manual: Vec<(String, String)>,
         sources: Vec<(String, String)>,
@@ -313,7 +347,7 @@ impl PostgresStore {
         self.run(move |client| {
             let mut tx = client.transaction()?;
             write_lock(&mut tx)?;
-            let occupied: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM merchants) OR EXISTS(SELECT 1 FROM manual_merchants) OR EXISTS(SELECT 1 FROM source_records)",&[])?.get(0);
+            let occupied: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM merchants) OR EXISTS(SELECT 1 FROM manual_merchants) OR EXISTS(SELECT 1 FROM source_records) OR EXISTS(SELECT 1 FROM location_records)",&[])?.get(0);
             if occupied {
                 bail!("SQLite migration requires an empty PostgreSQL catalog");
             }
@@ -341,6 +375,13 @@ impl PostgresStore {
             }
             for (id,_) in merchants {
                 rebuild(&mut tx,&id)?;
+            }
+            for (id, data) in locations {
+                let record: LocationRecord = serde_json::from_str(&data)?;
+                record.validate()?;
+                if record.location.id.as_deref() != Some(&id) { bail!("SQLite location ID does not match its record"); }
+                let (merchant_id, merchant_source, merchant_external) = location_reference(&record.merchant);
+                tx.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,data) VALUES($1,$2,$3,$4,$5,$6,$7)", &[&id,&record.source,&record.external_id,&merchant_id,&merchant_source,&merchant_external,&data])?;
             }
             if fingerprint(&mut tx)? != expected_fingerprint {
                 bail!("migrated catalog differs from SQLite; transaction rolled back");
@@ -466,6 +507,7 @@ fn fingerprint(tx: &mut Transaction<'_>) -> Result<String> {
         "SELECT data FROM merchants ORDER BY id",
         "SELECT data FROM manual_merchants ORDER BY id",
         "SELECT data,merchant_id FROM source_records ORDER BY source,external_id",
+        "SELECT data FROM location_records ORDER BY source,external_id",
     ] {
         for row in tx.query(sql, &[])? {
             for column in 0..row.len() {
@@ -498,6 +540,13 @@ mod connection_tests {
         let url = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")?;
         let store = PostgresStore::connect(&url, true)?;
         let first_pid: i32 = store.run(|client| {
+            let version: i32 = client
+                .query_one("SELECT version FROM ultrafinance_schema", &[])?
+                .get(0);
+            assert_eq!(
+                version, 2,
+                "additive outlet migration must preserve older application compatibility"
+            );
             let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
             assert_eq!(idle, "1min");
             client.batch_execute("SET idle_session_timeout = '1s'")?;

@@ -49,7 +49,7 @@ curl -s http://127.0.0.1:3000/v1/enrich \
 ```
 
 ```json
-{"merchant":{"status":"unresolved","data":null}}
+{"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}}
 ```
 
 A supported match returns `merchant.status = "matched"` with the catalog merchant
@@ -155,6 +155,76 @@ Optionally install the binary for shorter commands:
 cargo install --path crates/ultrafinance-cli
 ultrafinance enrich 'LS' --country CA
 ```
+
+## Transaction locations
+
+Enrichment returns independent top-level `merchant` and `location` results.
+Location status is `matched` for a supported catalog outlet, `extracted` for
+partial geography or a store identifier, and `unresolved` with null data when
+there is insufficient evidence. A merchant can match without a location, and
+geography can be extracted without identifying a merchant. Successful responses
+always include `location`, including single, batch, and CLI enrichment.
+
+```json
+{
+  "merchant": {"status": "unresolved", "data": null},
+  "location": {
+    "status": "extracted",
+    "data": {
+      "id": null,
+      "precision": "city",
+      "address": null,
+      "city": "Hialeah",
+      "region": "FL",
+      "postal_code": null,
+      "country": "US",
+      "store_number": "10241"
+    }
+  }
+}
+```
+
+The initial descriptor extractor recognizes a small reviewed list of city/region
+suffixes in the US, Canada, and Australia. It preserves store identifiers such as
+`#0006` and `STORE R483`, ignores card/reference markers, and abstains on known
+billing/processor descriptions and truncated or ambiguous cities. It does not
+geocode descriptions, infer coordinates, or copy addresses from merchant records.
+Precision is `country`, `region`, `city`, `address`, or `outlet`; it is null when
+only a store number or postal code is known.
+
+Supply optional structured transaction evidence through request `location`, or
+through the CLI:
+
+```sh
+cargo run -- enrich 'CAFE PURCHASE' --location '{"city":"Bromont","country":"CA"}'
+```
+
+Structured evidence appears as `extracted` unless a unique outlet is identified.
+Conflicting descriptor geography is discarded rather than combined with caller
+fields. Existing top-level `country` remains a merchant retrieval hint and is
+never copied into the location result. Outlet matching requires a matched
+merchant plus a unique alias/pattern, store number, or street address, without
+contradictory location evidence. Merely knowing a city does not pick an outlet.
+Coordinates come only from reviewed outlet records and must be a valid pair.
+
+Reviewed outlets are imported explicitly with `locations import FILE` and
+inspected with `locations list MERCHANT_ID`. Records retain source identities,
+place IDs, attribution, and optional protected manual corrections. Reimports
+preserve service location IDs. Parent/child relationships and company addresses
+are not automatically treated as transaction locations. See the
+[starter catalog](data/locations/README.md) and separate location-only evaluation:
+
+```sh
+cargo run -- locations eval evals/location-smoke.json
+```
+
+SQLite adds outlet storage when opened. PostgreSQL requires migration 003 through
+`database init`. This additive migration preserves the version-2 merchant/log
+contract, so the previous application remains compatible and release rollback
+continues to work. Apply it before deploying the location-enabled application.
+The Lambda runtime role also needs `SELECT` on `location_records`;
+the import role needs `SELECT`, `INSERT`, and `UPDATE`. This change does not run
+migrations against production or modify infrastructure grants.
 
 ## Repeatable dataset imports
 
@@ -287,6 +357,8 @@ Set `ULTRAFINANCE_DATABASE_URL` securely in your environment. Production URLs
 should require TLS (`sslmode=require`) and use the provider's trusted certificate.
 The client validates certificates and hostnames. For a disposable local server,
 `postgresql://localhost/ultrafinance?sslmode=disable` is supported.
+The application image installs Canada Central's public RDS CA certificates from
+`deploy/rds-ca/` so Aurora's TLS certificate can be validated.
 
 Initialize with a schema administration role, then migrate the authoritative
 SQLite catalog with a write role:
@@ -333,18 +405,13 @@ Lambda's `live` alias. Tasks use the existing private subnets and NAT gateway
 without a public IP. The runner stops the task when the shell closes, including
 on connection failure or interruption; tasks also expire after one hour.
 
-Configure a separate database write role through a hidden prompt before opening
-a session that needs production database access:
-
-```sh
-python3 deploy/prod-cli.py --configure-database
-python3 deploy/prod-cli.py
-```
-
-The URL is injected from Secrets Manager, outside OpenTofu state and command
-arguments. An empty secret still permits opening a shell, with no database URL
-configured. Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a newer image
-before an initial PostgreSQL cutover. The shell filesystem is temporary.
+The shell automatically receives the same `ULTRAFINANCE_DATABASE_URL` as
+Lambda. Set `database_url` in the private infrastructure variables and apply
+once; OpenTofu populates the shared Secrets Manager URL used by ECS. Use a
+non-administrator application login with catalog read/write permissions so
+both the API and CLI can use it. Schema administration remains separate.
+Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a newer image before an
+initial PostgreSQL cutover. The shell filesystem is temporary.
 
 Imports validate the batch before writing and commit atomically. Writers use a
 transaction advisory lock to serialize imports, corrections, and links across
@@ -355,9 +422,9 @@ verified exact-match rules remain the same. Candidate ranking may differ from
 SQLite FTS, so compare held-out evaluations before production cutover.
 
 Schema creation is an explicit CLI operation, never an API startup side effect.
-Use a runtime role with `CONNECT`, schema `USAGE`, and `SELECT` on catalog tables
-plus `SELECT`, `INSERT`, and `UPDATE` on `enrichment_log` for Lambda. Use a separate import role with `SELECT`, `INSERT`, `UPDATE`, and
-`DELETE`, and an administration role that can install `pg_trgm` and run schema
+Use a shared application role with `CONNECT`, schema `USAGE`, and `SELECT`,
+`INSERT`, `UPDATE`, and `DELETE` on application tables for Lambda and the CLI.
+Use a separate administration role to install `pg_trgm` and run schema
 migrations. Configure managed database backups and a connection budget before
 cutover: each Lambda execution environment opens at most one connection on its
 first catalog operation. Static pages and health checks do not connect to the

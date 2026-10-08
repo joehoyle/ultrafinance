@@ -1,0 +1,17 @@
+[
+  {
+    "id": "04eb38e9-d678-4d44-90a9-1786f12effd6",
+    "name": "Apple",
+    "country": null,
+    "website": "https://apple.com",
+    "aliases": [
+      "APPLE STORE",
+      "APPLE RETAIL STORE",
+      "APPLE STORE R483 R483 CANBERRA",
+      "APPLE STORE R238 R238 SYDNEY"
+    ],
+    "sources": [
+      "https://github.com/steveharrison/openenrichment/blob/main/src/public/data/au/merchants.csv"
+    ]
+  }
+]

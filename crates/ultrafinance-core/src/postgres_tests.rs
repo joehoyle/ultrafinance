@@ -70,6 +70,17 @@ async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     manual.aliases = vec!["VERIFIED ALIAS".into()];
     sqlite.put(&manual)?;
     sqlite.link("test", "external-b", &id)?;
+    let mut outlets: Vec<crate::location::LocationRecord> = serde_json::from_str(include_str!(
+        "../../../data/locations/open-enrichment-au.json"
+    ))?;
+    for outlet in &mut outlets {
+        outlet.merchant = crate::location::MerchantReference::Source {
+            source: "test".into(),
+            external_id: "external-a".into(),
+        };
+    }
+    sqlite.import_locations(&outlets)?;
+    let original_locations = sqlite.locations(&id)?;
     let original = sqlite.fingerprint()?;
     // A bad derived SQLite row must roll back the entire destination, rather
     // than silently changing the catalog during migration.
@@ -92,11 +103,30 @@ async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     drop(raw);
     assert_eq!(pg.migrate_sqlite(&path)?, 1);
     assert_eq!(pg.fingerprint()?, original);
+    assert_eq!(
+        serde_json::to_value(pg.locations(&id)?)?,
+        serde_json::to_value(&original_locations)?
+    );
     assert_eq!(sqlite.fingerprint()?, original);
     assert!(pg.migrate_sqlite(&path).is_err());
     assert_eq!(pg.fingerprint()?, original);
     assert_eq!(pg.resolve_source("test", "external-a")?, Some(id.clone()));
     assert_eq!(pg.resolve_source("test", "external-b")?, Some(id.clone()));
+    pg.import_locations(&outlets)?;
+    assert_eq!(
+        serde_json::to_value(pg.locations(&id)?)?,
+        serde_json::to_value(&original_locations)?
+    );
+    let mut corrected = outlets[0].clone();
+    corrected.manual_override = true;
+    corrected.location.name = Some("Corrected outlet".into());
+    pg.import_locations(&[corrected])?;
+    pg.import_locations(&outlets)?;
+    assert!(
+        pg.locations(&id)?
+            .iter()
+            .any(|r| r.location.name.as_deref() == Some("Corrected outlet"))
+    );
     let verified = pg.search("verified alias", Some("CA"), 10)?;
     assert!(verified[0].trusted);
     assert_eq!(verified[0].merchant.logo_url, manual.logo_url);

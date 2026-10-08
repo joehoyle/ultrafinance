@@ -70,6 +70,7 @@ fn request(description: String) -> EnrichRequest {
         currency: None,
         date: None,
         country: None,
+        location: None,
         extra: Default::default(),
     }
 }

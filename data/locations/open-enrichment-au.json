@@ -1,0 +1,62 @@
+[
+  {
+    "source": "open-enrichment",
+    "external_id": "070e812f-5a24-4fef-a109-c602167d1afe",
+    "merchant": {
+      "source": "open-enrichment",
+      "external_id": "04eb38e9-d678-4d44-90a9-1786f12effd6"
+    },
+    "location": {
+      "id": null,
+      "name": "Apple - Canberra",
+      "precision": "outlet",
+      "address": "Canberra Centre, 148 Bunda St, Canberra ACT 2601, Australia",
+      "city": "Canberra",
+      "region": "ACT",
+      "postal_code": "2601",
+      "country": "AU",
+      "store_number": "R483",
+      "latitude": -35.2804193,
+      "longitude": 149.1337271
+    },
+    "aliases": [],
+    "transaction_pattern": "(?i)\\bAPPLE(?:\\s+(?:RETAIL\\s+)?STORE)?\\s+R483\\b",
+    "place_ids": {
+      "apple": "IB8B47855EF8471CC",
+      "google": "ChIJk98782VNFmsRhFJImhhraIQ"
+    },
+    "attribution": "Open Enrichment by Steve Harrison",
+    "license": "CC0-1.0",
+    "url": "https://github.com/steveharrison/openenrichment/blob/main/src/public/data/au/merchants.csv"
+  },
+  {
+    "source": "open-enrichment",
+    "external_id": "3700e092-c7d5-4cb3-b1b1-cfdf0aa9c6d8",
+    "merchant": {
+      "source": "open-enrichment",
+      "external_id": "04eb38e9-d678-4d44-90a9-1786f12effd6"
+    },
+    "location": {
+      "id": null,
+      "name": "Apple - Sydney",
+      "precision": "outlet",
+      "address": "367 George St, Sydney NSW 2000, Australia",
+      "city": "Sydney",
+      "region": "NSW",
+      "postal_code": "2000",
+      "country": "AU",
+      "store_number": "R238",
+      "latitude": -33.869036,
+      "longitude": 151.206669
+    },
+    "aliases": [],
+    "transaction_pattern": "(?i)\\bAPPLE(?:\\s+(?:RETAIL\\s+)?STORE)?\\s+R238\\b",
+    "place_ids": {
+      "apple": "I5941C35CB7716AAA",
+      "google": "ChIJAeHDcT-uEmsRTUNVCmZk3qg"
+    },
+    "attribution": "Open Enrichment by Steve Harrison",
+    "license": "CC0-1.0",
+    "url": "https://github.com/steveharrison/openenrichment/blob/main/src/public/data/au/merchants.csv"
+  }
+]

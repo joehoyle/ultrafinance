@@ -36,7 +36,7 @@ pub struct BatchEnrichResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum BatchItemResult {
-    Success { data: EnrichResponse },
+    Success { data: Box<EnrichResponse> },
     Error { code: String, message: String },
 }
 
@@ -210,7 +210,49 @@ impl Enricher {
                 })
                 .collect();
         }
-        let (results, answers) = self.process_candidates(inputs).await;
+        let requests: Vec<_> = inputs.iter().map(|(request, _)| request.clone()).collect();
+        let (mut results, answers) = self.process_candidates(inputs).await;
+        // Both the exact-match fast path and provider path finish here, so location
+        // enrichment is independent of how the merchant was identified.
+        let store = self.store.clone();
+        results = match tokio::task::spawn_blocking(move || {
+            let mut outlet_cache = std::collections::HashMap::new();
+            results
+                .into_iter()
+                .zip(requests)
+                .map(|(result, request)| {
+                    result.and_then(|mut response| {
+                        let merchant_id = match &response.merchant {
+                            MerchantResult::Matched { data } => Some(data.id.as_str()),
+                            MerchantResult::Unresolved { .. } => None,
+                        };
+                        let outlets = if let Some(id) = merchant_id {
+                            if !outlet_cache.contains_key(id) {
+                                outlet_cache.insert(id.to_owned(), store.locations(id)?);
+                            }
+                            outlet_cache.get(id).unwrap().as_slice()
+                        } else {
+                            &[]
+                        };
+                        let (location, credits) = crate::location::enrich(&request, outlets);
+                        response.location = location;
+                        for credit in credits {
+                            if !response.attributions.contains(&credit) {
+                                response.attributions.push(credit);
+                            }
+                        }
+                        Ok(response)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        {
+            Ok(results) => results,
+            Err(error) => (0..audit.len())
+                .map(|_| Err(anyhow::anyhow!("Location enrichment task failed: {error}")))
+                .collect(),
+        };
         for ((result, answer), (_, _, data)) in results.iter().zip(answers).zip(&mut audit) {
             data["provider_answer"] = answer;
             match result {
@@ -263,6 +305,7 @@ impl Enricher {
             }
             if exact_match(&request, &candidates) {
                 let response = EnrichResponse {
+                    location: LocationResult::default(),
                     merchant: MerchantResult::Matched {
                         data: candidates[0].merchant.clone(),
                     },
@@ -421,6 +464,24 @@ mod tests {
         }
         candidates
     }
+    #[tokio::test]
+    async fn provider_merchant_matches_also_enrich_locations() {
+        let mut enricher = enricher();
+        let rx = mock(&mut enricher, 1, 200, None);
+        let candidates = candidates(&enricher, "Alpha Cafe");
+        let result = enricher
+            .enrich_batch_candidates(vec![(request("Alpha Cafe TORONTO ON CA"), Ok(candidates))])
+            .await
+            .remove(0)
+            .unwrap();
+        assert!(matches!(result.merchant, MerchantResult::Matched { .. }));
+        let LocationResult::Extracted { data } = result.location else {
+            panic!("expected independent geography")
+        };
+        assert_eq!(data.city.as_deref(), Some("Toronto"));
+        rx.recv().unwrap();
+    }
+
     fn answer(choice: &str) -> Value {
         json!({"type":"choice","choice":choice,"confidence":0.99,"probabilities":{choice:0.99}})
     }

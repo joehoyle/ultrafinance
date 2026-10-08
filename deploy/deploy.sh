@@ -6,6 +6,7 @@ AWS_PROFILE="${AWS_PROFILE:-$(tofu -chdir=infra output -raw aws_profile)}"
 AWS_REGION="${AWS_REGION:-$(tofu -chdir=infra output -raw aws_region)}"
 LAMBDA_FUNCTION_NAME="${LAMBDA_FUNCTION_NAME:-$(tofu -chdir=infra output -raw function_name)}"
 export AWS_PROFILE AWS_REGION LAMBDA_FUNCTION_NAME
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
 if [[ -z "$LAMBDA_FUNCTION_NAME" || "$LAMBDA_FUNCTION_NAME" == "null" ]]; then
   echo "Bootstrap the Lambda application with OpenTofu before deploying releases." >&2
   exit 1

@@ -134,8 +134,9 @@ resource "aws_rds_cluster_parameter_group" "database" {
   name_prefix = "${var.name}-postgres-"
   family      = "aurora-postgresql17"
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 }
 

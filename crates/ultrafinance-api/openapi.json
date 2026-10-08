@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Ultrafinance API",
-    "description": "Synchronous merchant enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication.",
+    "description": "Synchronous merchant and location enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication.",
     "license": {
       "name": ""
     },
@@ -38,8 +38,8 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Enrich a transaction with a merchant from the catalog.",
-        "description": "Only description is required; unknown top-level fields are rejected. The JSON body\nis limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or\nambiguous candidates require provider evaluation. No candidates or insufficient\nevidence returns unresolved with null data, not an HTTP error. Transaction fields\nand candidate records are sent to TypeSafe when evaluation runs. The overall\nenrichment deadline is 25 seconds. Configuration, database and provider failures\nreturn 502 rather than unresolved.",
+        "summary": "Enrich a transaction with a merchant and independently supported location.",
+        "description": "Only description is required; unknown top-level fields are rejected. The JSON body\nis limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or\nambiguous candidates require provider evaluation. No candidates or insufficient\nevidence returns unresolved with null data, not an HTTP error. Transaction fields\nand candidate records are sent to TypeSafe when evaluation runs. The overall\nenrichment deadline is 55 seconds. Configuration, database and provider failures\nreturn 502 rather than unresolved.",
         "operationId": "enrich",
         "requestBody": {
           "content": {
@@ -65,15 +65,40 @@
         },
         "responses": {
           "200": {
-            "description": "Completed enrichment; matched or unresolved",
+            "description": "Completed merchant and location enrichment",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EnrichResponse"
                 },
                 "examples": {
+                  "extracted_location": {
+                    "value": {
+                      "location": {
+                        "data": {
+                          "address": null,
+                          "city": "Hialeah",
+                          "country": "US",
+                          "id": null,
+                          "postal_code": null,
+                          "precision": "city",
+                          "region": "FL",
+                          "store_number": "10241"
+                        },
+                        "status": "extracted"
+                      },
+                      "merchant": {
+                        "data": null,
+                        "status": "unresolved"
+                      }
+                    }
+                  },
                   "matched": {
                     "value": {
+                      "location": {
+                        "data": null,
+                        "status": "unresolved"
+                      },
                       "merchant": {
                         "data": {
                           "country": "CA",
@@ -86,6 +111,10 @@
                   },
                   "unresolved": {
                     "value": {
+                      "location": {
+                        "data": null,
+                        "status": "unresolved"
+                      },
                       "merchant": {
                         "data": null,
                         "status": "unresolved"
@@ -506,6 +535,17 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "location": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LocationHint",
+                "description": "Known transaction geography. Used as evidence, never as a merchant country restriction."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false
@@ -513,7 +553,8 @@
       "EnrichResponse": {
         "type": "object",
         "required": [
-          "merchant"
+          "merchant",
+          "location"
         ],
         "properties": {
           "attributions": {
@@ -521,7 +562,11 @@
             "items": {
               "type": "string"
             },
-            "description": "Source attribution for matched merchants. Omitted when empty."
+            "description": "Source attribution for matched merchants and outlets. Omitted when empty."
+          },
+          "location": {
+            "$ref": "#/components/schemas/LocationResult",
+            "description": "Independently extracted geography or a supported catalog outlet match."
           },
           "merchant": {
             "$ref": "#/components/schemas/MerchantResult"
@@ -556,6 +601,200 @@
             "example": "ok"
           }
         }
+      },
+      "LocationData": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service catalog ID; null for extracted geography."
+          },
+          "latitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "longitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "postal_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "precision": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LocationPrecision",
+                "description": "Null when only a store number or postal code is known."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "store_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "LocationHint": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO 3166-1 alpha-2 code, in uppercase."
+          },
+          "postal_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "State/province or other administrative region; not restricted to US codes."
+          },
+          "store_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Merchant-scoped string; preserves leading zeros and letters."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LocationPrecision": {
+        "type": "string",
+        "enum": [
+          "country",
+          "region",
+          "city",
+          "address",
+          "outlet"
+        ]
+      },
+      "LocationResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "status"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/LocationData"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "matched"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Geography supported by input or descriptor, without an identified outlet.",
+            "required": [
+              "data",
+              "status"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/LocationData"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "extracted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "status"
+            ],
+            "properties": {
+              "data": {
+                "type": "null"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "unresolved"
+                ]
+              }
+            }
+          }
+        ]
       },
       "Merchant": {
         "type": "object",
@@ -686,7 +925,7 @@
   "tags": [
     {
       "name": "Enrichment",
-      "description": "Resolve bank descriptions against the merchant catalog"
+      "description": "Resolve merchants and transaction geography"
     },
     {
       "name": "Merchants",

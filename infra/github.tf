@@ -64,8 +64,9 @@ resource "aws_iam_role_policy" "deploy" {
         Resource = aws_lambda_function.app[0].arn
       },
       {
-        Effect   = "Allow", Action = ["lambda:GetAlias", "lambda:UpdateAlias"]
-        Resource = "${aws_lambda_function.app[0].arn}:live"
+        Effect = "Allow", Action = ["lambda:GetAlias", "lambda:UpdateAlias"]
+        # Alias management APIs authorize against the unqualified function ARN.
+        Resource = aws_lambda_function.app[0].arn
       },
       {
         Effect   = "Allow", Action = ["lambda:InvokeFunction"]

@@ -2,7 +2,6 @@
 """Open an interactive shell in the Ultrafinance image on private Fargate."""
 
 import argparse
-import getpass
 import json
 import os
 from pathlib import Path
@@ -12,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import parse_qs, urlsplit
 import uuid
 
 
@@ -33,11 +31,12 @@ def output(name):
 class AWS:
     def __init__(self, profile, region):
         self.prefix = ["aws", "--profile", profile, "--region", region]
+        self.environment = {**os.environ, "AWS_PAGER": "", "AWS_REGION": region, "AWS_DEFAULT_REGION": region}
 
     def call(self, *args):
         result = subprocess.run(
             [*self.prefix, *args, "--output", "json"],
-            env={**os.environ, "AWS_PAGER": ""},
+            env=self.environment,
             capture_output=True, text=True, check=False,
         )
         if result.returncode:
@@ -64,27 +63,12 @@ def registration(definition, image):
     return request
 
 
-def configure_secret(aws, secret):
-    value = getpass.getpass("Production import-role PostgreSQL URL (hidden): ")
-    parsed = urlsplit(value)
-    if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname or parse_qs(parsed.query).get("sslmode") not in (["require"], ["verify-full"]):
-        raise ValueError("Supply a PostgreSQL URL with sslmode=require or sslmode=verify-full.")
-    with tempfile.TemporaryDirectory(prefix="ultrafinance-secret-") as directory:
-        path = Path(directory) / "url"
-        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as handle:
-            handle.write(value)
-        aws.call("secretsmanager", "put-secret-value", "--secret-id", secret, "--secret-string", f"file://{path}")
-    print("Import-role URL stored in Secrets Manager.")
-
-
 def run_shell(aws, config, image=None, timeout=300):
     job_id = uuid.uuid4().hex
     task = None
     revision = None
     launch_attempted = False
     try:
-        secret = aws.call("secretsmanager", "describe-secret", "--secret-id", config["database_secret"])
-        has_database = any("AWSCURRENT" in stages for stages in secret.get("VersionIdsToStages", {}).values())
         definition = aws.call("ecs", "describe-task-definition", "--task-definition", config["task_definition"])["taskDefinition"]
         chosen_image = image or aws.call(
             "lambda", "get-function", "--function-name", config["function_name"],
@@ -92,9 +76,7 @@ def run_shell(aws, config, image=None, timeout=300):
         )
         request = registration(definition, chosen_image)
         container = next(item for item in request["containerDefinitions"] if item["name"] == "cli")
-        # An empty import secret must not prevent opening a shell.
-        container["secrets"] = ([{"name": "ULTRAFINANCE_DATABASE_URL", "valueFrom": config["database_secret"]}]
-                                if has_database else [])
+        has_database = any(item["name"] == "ULTRAFINANCE_DATABASE_URL" for item in container.get("secrets", []))
         with tempfile.TemporaryDirectory(prefix="ultrafinance-shell-") as directory:
             path = Path(directory) / "task.json"
             path.write_text(json.dumps(request))
@@ -121,7 +103,7 @@ def run_shell(aws, config, image=None, timeout=300):
         print(f"Task: {task}", flush=True)
         print(f"Image: {chosen_image}", flush=True)
         if not has_database:
-            print("Database URL is not configured; use --configure-database before a future session to enable production database access.", flush=True)
+            print("Database URL is not configured; apply database_url in infrastructure to configure both Lambda and the shell.", flush=True)
         deadline = time.monotonic() + timeout
         while True:
             response = aws.call("ecs", "describe-tasks", "--cluster", config["cluster"], "--tasks", task)
@@ -144,7 +126,7 @@ def run_shell(aws, config, image=None, timeout=300):
         result = subprocess.run(
             [*aws.prefix, "ecs", "execute-command", "--cluster", config["cluster"],
              "--task", task, "--container", "cli", "--interactive", "--command", "/bin/sh"],
-            env={**os.environ, "AWS_PAGER": ""}, check=False,
+            env=aws.environment, check=False,
         )
         if result.returncode:
             raise RuntimeError("ECS Exec session failed.")
@@ -161,21 +143,16 @@ def run_shell(aws, config, image=None, timeout=300):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", help="Immutable ECR digest; defaults to Lambda's live image")
-    parser.add_argument("--configure-database", action="store_true", help="Securely store the import-role URL for shell sessions")
     args = parser.parse_args()
-    if not args.configure_database:
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            parser.error("Run this command in an interactive terminal.")
-        if not shutil.which("session-manager-plugin"):
-            parser.error("Install the AWS Session Manager plugin before opening a shell.")
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        parser.error("Run this command in an interactive terminal.")
+    if not shutil.which("session-manager-plugin"):
+        parser.error("Install the AWS Session Manager plugin before opening a shell.")
     config = output("cli_runner")
     if not config:
         raise RuntimeError("Apply the Aurora and application infrastructure first; CLI tasks are provisioned automatically.")
     aws = AWS(output("aws_profile"), output("aws_region"))
-    if args.configure_database:
-        configure_secret(aws, config["database_secret"])
-    else:
-        run_shell(aws, config, args.image)
+    run_shell(aws, config, args.image)
 
 
 if __name__ == "__main__":

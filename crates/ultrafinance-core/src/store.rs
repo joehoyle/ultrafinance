@@ -1,5 +1,8 @@
-use crate::Merchant;
 use crate::search_profile::{Stage, timed};
+use crate::{
+    Merchant,
+    location::{LocationRecord, MerchantReference},
+};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -169,6 +172,15 @@ impl MerchantStore {
             &transaction,
             "SELECT merchant_id,data FROM source_records ORDER BY source,external_id",
         )?;
+        let has_locations: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='location_records')", [], |r| r.get(0))?;
+        let locations = if has_locations {
+            read(
+                &transaction,
+                "SELECT id,data FROM location_records ORDER BY source,external_id",
+            )?
+        } else {
+            vec![]
+        };
         let mut contents = Vec::new();
         for (_, data) in merchants.iter().chain(manual.iter()) {
             contents.extend(data.bytes());
@@ -180,13 +192,101 @@ impl MerchantStore {
             contents.extend(id.bytes());
             contents.push(0);
         }
+        for (_, data) in &locations {
+            contents.extend(data.bytes());
+            contents.push(0);
+        }
         store.restore(
+            locations,
             merchants,
             manual,
             sources,
             crate::eval::fingerprint(&contents),
         )
     }
+    /// Import reviewed outlets atomically; reimports preserve catalog IDs.
+    pub fn import_locations(&self, records: &[LocationRecord]) -> Result<()> {
+        let mut keys = HashSet::new();
+        for record in records {
+            record.validate()?;
+            if !keys.insert((&record.source, &record.external_id)) {
+                bail!("duplicate outlet source/external ID");
+            }
+        }
+        match &self.0 {
+            Backend::Postgres(store) => store.import_locations(records),
+            Backend::Sqlite(store) => {
+                let mut connection = store
+                    .0
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+                let tx = connection.transaction()?;
+                for record in records {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT data FROM location_records WHERE source=?1 AND external_id=?2",
+                            params![record.source, record.external_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if !record.manual_override
+                        && existing
+                            .as_deref()
+                            .map(serde_json::from_str::<LocationRecord>)
+                            .transpose()?
+                            .is_some_and(|r| r.manual_override)
+                    {
+                        continue;
+                    }
+                    let (merchant_id, merchant_source, merchant_external) =
+                        location_reference(&record.merchant);
+                    let exists: bool = if let Some(id) = merchant_id {
+                        tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM merchants WHERE id=?1)",
+                            [id],
+                            |r| r.get(0),
+                        )?
+                    } else {
+                        tx.query_row("SELECT EXISTS(SELECT 1 FROM source_records WHERE source=?1 AND external_id=?2)", params![merchant_source,merchant_external], |r| r.get(0))?
+                    };
+                    if !exists {
+                        bail!(
+                            "outlet merchant reference is missing; import or link its merchant first"
+                        );
+                    }
+                    let id: String = tx
+                        .query_row(
+                            "SELECT id FROM location_records WHERE source=?1 AND external_id=?2",
+                            params![record.source, record.external_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or_else(|| format!("loc_{}", uuid::Uuid::new_v4().simple()));
+                    let mut record = record.clone();
+                    record.location.id = Some(id.clone());
+                    tx.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,data) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,data=excluded.data", params![id,record.source,record.external_id,merchant_id,merchant_source,merchant_external,serde_json::to_string(&record)?])?;
+                }
+                tx.commit()?;
+                Ok(())
+            }
+        }
+    }
+    /// Fetch outlets for a merchant, following source links at read time.
+    pub fn locations(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
+        match &self.0 {
+            Backend::Postgres(store) => store.locations(merchant_id),
+            Backend::Sqlite(store) => {
+                let connection = store
+                    .0
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+                let mut statement = connection.prepare("SELECT l.data FROM location_records l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=?1 ORDER BY l.id")?;
+                let rows = statement.query_map([merchant_id], |r| r.get::<_, String>(0))?;
+                rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+            }
+        }
+    }
+
     pub fn put(&self, merchant: &Merchant) -> Result<()> {
         match &self.0 {
             Backend::Sqlite(s) => s.put(merchant),
@@ -295,7 +395,10 @@ impl SqliteStore {
         let transaction = connection.transaction()?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS manual_merchants(id TEXT PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_records(source TEXT NOT NULL, external_id TEXT NOT NULL, merchant_id TEXT NOT NULL REFERENCES merchants(id), data TEXT NOT NULL, PRIMARY KEY(source,external_id));
-            CREATE INDEX IF NOT EXISTS source_records_merchant ON source_records(merchant_id);")?;
+            CREATE INDEX IF NOT EXISTS source_records_merchant ON source_records(merchant_id);
+            CREATE TABLE IF NOT EXISTS location_records(id TEXT PRIMARY KEY, source TEXT NOT NULL, external_id TEXT NOT NULL, merchant_id TEXT REFERENCES merchants(id), merchant_source TEXT, merchant_external_id TEXT, data TEXT NOT NULL, UNIQUE(source,external_id), FOREIGN KEY(merchant_source,merchant_external_id) REFERENCES source_records(source,external_id));
+            CREATE INDEX IF NOT EXISTS location_records_merchant ON location_records(merchant_id);
+            CREATE INDEX IF NOT EXISTS location_records_source_merchant ON location_records(merchant_source,merchant_external_id);")?;
         let version: i64 = transaction.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version == 0 {
             transaction.execute(
@@ -413,6 +516,7 @@ impl SqliteStore {
             "SELECT data FROM merchants ORDER BY id",
             "SELECT data FROM manual_merchants ORDER BY id",
             "SELECT data,merchant_id FROM source_records ORDER BY source,external_id",
+            "SELECT data FROM location_records ORDER BY source,external_id",
         ] {
             let mut statement = connection.prepare_cached(sql)?;
             for row in statement.query_map([], |r| {
@@ -1025,4 +1129,16 @@ mod postgres_tests;
 /// Aggregate SQLite search timings when ULTRAFINANCE_PROFILE_SEARCH=1.
 pub fn search_profile() -> Option<Value> {
     crate::search_profile::report()
+}
+
+pub(crate) fn location_reference(
+    reference: &MerchantReference,
+) -> (Option<&str>, Option<&str>, Option<&str>) {
+    match reference {
+        MerchantReference::Local { merchant_id } => (Some(merchant_id), None, None),
+        MerchantReference::Source {
+            source,
+            external_id,
+        } => (None, Some(source), Some(external_id)),
+    }
 }

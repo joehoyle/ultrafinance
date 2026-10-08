@@ -2,6 +2,8 @@ pub mod batch;
 pub mod datasets;
 pub mod eval;
 pub mod import;
+pub mod location;
+pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
 mod regex_rules;
 mod search_profile;
 mod search_score;
@@ -29,6 +31,9 @@ pub struct EnrichRequest {
     /// Two uppercase ASCII letters. Narrows merchant candidates, not the location of an outlet.
     #[cfg_attr(feature = "openapi", schema(pattern = "^[A-Z]{2}$"))]
     pub country: Option<String>,
+    /// Known transaction geography. Used as evidence, never as a merchant country restriction.
+    #[serde(default)]
+    pub location: Option<LocationHint>,
     /// Additional evidence as an object with arbitrary JSON values. Sent to the provider when evaluation runs.
     #[serde(default)]
     pub extra: Map<String, Value>,
@@ -36,6 +41,9 @@ pub struct EnrichRequest {
 
 impl EnrichRequest {
     pub fn validate(&self) -> Result<()> {
+        if let Some(location) = &self.location {
+            location.validate()?;
+        }
         if self.description.trim().is_empty() || self.description.len() > 4096 {
             bail!("description must contain 1 to 4096 bytes of nonblank text");
         }
@@ -102,7 +110,11 @@ fn null_schema() -> utoipa::openapi::schema::Object {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnrichResponse {
     pub merchant: MerchantResult,
-    /// Source attribution for matched merchants. Omitted when empty.
+    /// Independently extracted geography or a supported catalog outlet match.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
+    pub location: LocationResult,
+    /// Source attribution for matched merchants and outlets. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attributions: Vec<String>,
 }
@@ -200,6 +212,7 @@ impl Enricher {
 
 fn unresolved() -> EnrichResponse {
     EnrichResponse {
+        location: LocationResult::default(),
         attributions: vec![],
         merchant: MerchantResult::Unresolved { data: () },
     }
@@ -246,6 +259,7 @@ fn parse_choice_answer(
         return Ok(unresolved());
     }
     Ok(EnrichResponse {
+        location: LocationResult::default(),
         attributions: vec![],
         merchant: MerchantResult::Matched {
             data: candidate.clone(),
@@ -372,7 +386,7 @@ mod tests {
         assert!(parse_choice(&response, &candidates, 0.9).is_err());
         assert_eq!(
             serde_json::to_value(unresolved()).unwrap(),
-            json!({"merchant":{"status":"unresolved","data":null}})
+            json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}})
         );
     }
 }

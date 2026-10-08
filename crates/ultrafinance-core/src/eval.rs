@@ -292,7 +292,9 @@ pub async fn run_with_progress(
                 include_str!("regex_rules.rs"),
                 include_str!("search_profile.rs"),
                 include_str!("import.rs"),
-                include_str!("eval.rs")
+                include_str!("eval.rs"),
+                include_str!("location.rs"),
+                include_str!("../migrations/003_locations.sql")
             )
             .as_bytes(),
         ),

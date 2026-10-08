@@ -20,8 +20,8 @@ use utoipa_scalar::{Scalar, Servable};
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Ultrafinance API", description = "Synchronous merchant enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication."),
-    tags((name = "Enrichment", description = "Resolve bank descriptions against the merchant catalog"), (name = "Merchants", description = "Browse and search the merchant catalog"), (name = "Health", description = "Service liveness"))
+    info(title = "Ultrafinance API", description = "Synchronous merchant and location enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication."),
+    tags((name = "Enrichment", description = "Resolve merchants and transaction geography"), (name = "Merchants", description = "Browse and search the merchant catalog"), (name = "Health", description = "Service liveness"))
 )]
 struct ApiDoc;
 
@@ -229,22 +229,23 @@ async fn merchants(
     }
 }
 
-/// Enrich a transaction with a merchant from the catalog.
+/// Enrich a transaction with a merchant and independently supported location.
 ///
 /// Only description is required; unknown top-level fields are rejected. The JSON body
 /// is limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or
 /// ambiguous candidates require provider evaluation. No candidates or insufficient
 /// evidence returns unresolved with null data, not an HTTP error. Transaction fields
 /// and candidate records are sent to TypeSafe when evaluation runs. The overall
-/// enrichment deadline is 25 seconds. Configuration, database and provider failures
+/// enrichment deadline is 55 seconds. Configuration, database and provider failures
 /// return 502 rather than unresolved.
 #[utoipa::path(post, path = "/v1/enrich", tag = "Enrichment",
     request_body(content = EnrichRequest, example = json!({"description":"LS","amount":"142.97","currency":"CAD","country":"CA","extra":{"bank_category":["Food and Drink","Restaurants"]}})),
     responses(
-        (status = 200, description = "Completed enrichment; matched or unresolved", body = EnrichResponse,
+        (status = 200, description = "Completed merchant and location enrichment", body = EnrichResponse,
             examples(
-                ("unresolved" = (value = json!({"merchant":{"status":"unresolved","data":null}}))),
-                ("matched" = (value = json!({"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","country":"CA"}}})))
+                ("extracted_location" = (value = json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"extracted","data":{"id":null,"precision":"city","address":null,"city":"Hialeah","region":"FL","postal_code":null,"country":"US","store_number":"10241"}}}))),
+                ("unresolved" = (value = json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}}))),
+                ("matched" = (value = json!({"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","country":"CA"}},"location":{"status":"unresolved","data":null}})))
             )),
         (status = 400, description = "Malformed JSON", body = ApiError),
         (status = 413, description = "Request body exceeds 64 KiB", body = ApiError),
@@ -334,7 +335,9 @@ async fn enrich_batch(
                 .iter()
                 .zip(outcomes)
                 .map(|(request, outcome)| match outcome {
-                    Ok(data) => BatchItemResult::Success { data },
+                    Ok(data) => BatchItemResult::Success {
+                        data: Box::new(data),
+                    },
                     Err(error) => {
                         if let Err(validation) = request.validate() {
                             BatchItemResult::Error {
@@ -748,6 +751,56 @@ mod tests {
                 assert!(value["merchant"]["data"].is_null());
             } else {
                 assert_eq!(value["error"]["code"], "invalid_request");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn locations_are_independent_in_http_results_and_hints_are_validated() {
+        let app = router(Enricher::new(None, "jev-latest".into(), 0.95, vec![]).unwrap());
+        for (request, expected_status, expected_location) in [
+            (
+                json!({"description":"ZXQ #0006 HIALEAH FL"}),
+                StatusCode::OK,
+                Some("extracted"),
+            ),
+            (
+                json!({"description":"UNKNOWN","location":{"city":"Bromont","country":"CA"}}),
+                StatusCode::OK,
+                Some("extracted"),
+            ),
+            (
+                json!({"description":"UNKNOWN","country":"CA"}),
+                StatusCode::OK,
+                Some("unresolved"),
+            ),
+            (
+                json!({"description":"UNKNOWN","location":{"country":"ca"}}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                None,
+            ),
+            (
+                json!({"description":"UNKNOWN","location":{"city":" "}}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                None,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/enrich")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            if let Some(status) = expected_location {
+                assert_eq!(body["merchant"]["status"], "unresolved");
+                assert_eq!(body["location"]["status"], status);
             }
         }
     }

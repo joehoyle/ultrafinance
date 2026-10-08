@@ -17,6 +17,7 @@ CONFIG = {"cluster": "cluster", "task_definition": "definition", "database_secre
 
 class FakeAWS:
     prefix = ["aws", "--profile", "test", "--region", "ca-central-1"]
+    environment = {"AWS_PAGER": "", "AWS_REGION": "ca-central-1", "AWS_DEFAULT_REGION": "ca-central-1"}
 
     def __init__(self, has_secret=True, launch_error=False, ready=True, rejected=False):
         self.calls = []
@@ -29,10 +30,9 @@ class FakeAWS:
     def call(self, *args):
         self.calls.append(args)
         operation = args[:2]
-        if operation == ("secretsmanager", "describe-secret"):
-            return {"VersionIdsToStages": {"v1": ["AWSCURRENT"]} if self.has_secret else {}}
         if operation == ("ecs", "describe-task-definition"):
-            return {"taskDefinition": {"family": "cli", "containerDefinitions": [{"name": "cli", "image": IMAGE}]}}
+            return {"taskDefinition": {"family": "cli", "containerDefinitions": [{"name": "cli", "image": IMAGE,
+                "secrets": [{"name": "ULTRAFINANCE_DATABASE_URL", "valueFrom": "secret"}] if self.has_secret else []}]}}
         if operation == ("lambda", "get-function"):
             return IMAGE
         if operation == ("ecs", "register-task-definition"):

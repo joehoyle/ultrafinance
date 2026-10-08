@@ -88,6 +88,10 @@ fn strip_processors(mut text: &str) -> &str {
     }
 }
 
+pub(crate) fn valid_pattern(pattern: &str) -> bool {
+    compiled(pattern).is_some()
+}
+
 pub(crate) fn match_length(pattern: &str, description: &str) -> Option<usize> {
     let regex = compiled(pattern)?;
     // Try raw text first, as upstream does, then the processor-stripped form.

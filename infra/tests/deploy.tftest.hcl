@@ -36,6 +36,10 @@ run "aurora_cutover" {
     aurora_min_acu    = 0
   }
   assert {
+    condition     = aws_secretsmanager_secret_version.cli_database_url[0].secret_string == var.database_url && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].secrets[0].valueFrom == aws_secretsmanager_secret.cli_database_url[0].arn
+    error_message = "Lambda and Fargate must share the configured application URL via ECS secret injection."
+  }
+  assert {
     condition     = aws_lambda_function.app[0].vpc_config[0].subnet_ids == toset(aws_subnet.database[*].id) && aws_lambda_function.app[0].vpc_config[0].security_group_ids == toset([aws_security_group.database_client[0].id])
     error_message = "At cutover Lambda must use the private subnets and the authorized database-client security group."
   }
@@ -128,6 +132,15 @@ run "alias_and_oidc" {
     github_repository    = "joehoyle/ultrafinance"
     github_owner_id      = "161683"
     github_repository_id = "1410780058"
+  }
+  assert {
+    condition = alltrue([
+      for action in ["lambda:GetAlias", "lambda:UpdateAlias"] : anytrue([
+        for statement in jsondecode(aws_iam_role_policy.deploy[0].policy).Statement :
+        statement.Effect == "Allow" && contains(try(tolist(statement.Action), [statement.Action]), action) && statement.Resource == aws_lambda_function.app[0].arn
+      ])
+    ])
+    error_message = "Alias management must be authorized on the unqualified function ARN, as required by Lambda."
   }
   assert {
     condition     = aws_lambda_function_url.app[0].qualifier == "live" && aws_lambda_function_url.app[0].authorization_type == "NONE"

@@ -89,7 +89,7 @@ variable "github_oidc_provider_arn" {
 }
 
 variable "database_url" {
-  description = "PostgreSQL URL for Lambda. Use a TLS-enabled connection and a runtime database role; import/schema administration uses a separate role."
+  description = "Shared PostgreSQL URL for Lambda and the CLI shell. Use a TLS-enabled non-administrator application role with catalog read/write permissions."
   type        = string
   sensitive   = true
   default     = null
