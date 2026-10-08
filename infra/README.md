@@ -1,267 +1,86 @@
-# AWS hosting
+# AWS infrastructure
 
-CloudFront (AWS HTTPS hostname) → Lambda function URL → ARM64 Lambda container.
-The existing Axum server runs through [AWS Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter).
-The website, `/health`, and `/v1/enrich` are public through both CloudFront and
-the direct function URL. The function URL uses `NONE` authentication. No client
-token or application request throttle is configured.
+CloudFront serves the website and API through a public Lambda function URL.
+Lambda runs the ARM64 Rust image stored in ECR. SQLite is a read-only catalog
+bundled into the image and copied into each instance's `/tmp` directory.
 
-The region defaults to `ca-central-1` and AWS profile to `joehoyle`. Both are
-configurable. An optional custom domain is supported; a remote state backend can be added later.
-API responses are never cached. CloudFront forwards requests while replacing
-Host for the Lambda function URL. Origin signing is disabled, so standard JSON
-POSTs work unchanged.
+OpenTofu owns ECR, IAM, logging, Lambda runtime configuration, the function URL,
+CloudFront, Route 53, and the ACM certificate. Release tooling owns the Lambda
+image and the version selected by the `live` alias.
 
-## SQLite for now
+## Local configuration
 
-The API currently reads merchant records and does not persist request results or
-new discoveries. Keep the authoritative SQLite database locally and package a
-catalog snapshot with each release. The Docker build imports JSON using the CLI,
-creating SQLite and its FTS5 indexes on Linux. At startup the database is copied
-from the image into `/tmp`, because Lambda's image filesystem is read-only.
-Each Lambda instance has an independent copy. Changes to `/tmp` are disposable
-and are not shared across instances.
+Install OpenTofu, AWS CLI, and jq. Authenticate your AWS profile before running
+commands. The shell helper bridges AWS CLI login credentials to the provider;
+credentials stay in process memory.
 
-The default `deploy/catalog.json` is empty, so an initial deployment returns
-`unresolved` until a real catalog is included. Export an existing local database:
+For a new checkout, copy `terraform.tfvars.example` to `terraform.tfvars` and
+replace the account ID with your own. Keep the existing variable file when
+working with an already deployed installation.
 
-```sh
-python3 deploy/export-catalog.py data/ultrafinance.sqlite data/merchants.deploy.json
-```
-
-Use `--build-arg MERCHANT_CATALOG=data/merchants.deploy.json` when building below.
-You can also supply an existing verified JSON catalog. The selected catalog is
-intentionally included in the image; credentials, infrastructure state and live
-SQLite files are excluded from the Docker context. Only publish merchant data
-that belongs in this service.
-
-If the API starts writing shared data, revisit storage before deploying those
-writes. A managed Postgres database would require replacing the SQLite store and
-its FTS queries. EFS is not configured: SQLite locking over network filesystems
-needs care, and this read-only workload does not need a shared filesystem.
-
-## Prepare without AWS access
+Set `TYPESAFE_API_KEY` in the ignored root `.env` file. The helper passes it as
+the sensitive OpenTofu input `typesafe_api_key`. An explicit
+`TF_VAR_typesafe_api_key` takes precedence, followed by an exported
+`TYPESAFE_API_KEY`, then `.env`.
 
 From the repository root:
 
 ```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-tofu -chdir=infra init -backend=false
+./infra/tofu.sh init
+./infra/tofu.sh plan
+./infra/tofu.sh apply
+./infra/tofu.sh output -raw site_url
+```
+
+Use `./infra/tofu.sh --profile PROFILE plan` to select another AWS profile.
+AWS profile and region default to `joehoyle` and `ca-central-1`.
+
+## Bootstrap and releases
+
+With `image_uri = null`, the first apply creates ECR and the GitHub OIDC role.
+Build and push an image using the Dockerfile, then set `image_uri` to its immutable
+ECR digest and apply again to create the application. Keep this value configured:
+clearing it would plan deletion of the application resources.
+
+Routine image releases use `./deploy/deploy.sh` or the GitHub Actions workflow.
+They test the new Lambda version before moving `live`, with guarded rollback.
+A runtime configuration apply publishes a version but does not promote it;
+run a release afterwards to make the configuration live.
+
+GitHub uses OIDC restricted to the configured repository's `main` branch.
+Configure repository variables `AWS_DEPLOY_ROLE_ARN`, `ECR_REPOSITORY`,
+`AWS_REGION`, and `LAMBDA_FUNCTION_NAME` using the corresponding OpenTofu outputs.
+The CI role cannot change IAM or Lambda environment configuration.
+
+## Domain
+
+Set `domain_name` to the existing public Route 53 zone's name, then import that
+zone before applying:
+
+```sh
+./infra/tofu.sh import 'aws_route53_zone.site[0]' YOUR_HOSTED_ZONE_ID
+./infra/tofu.sh plan
+./infra/tofu.sh apply
+```
+
+The configuration protects the zone against deletion, preserves unmanaged
+records, and adds apex A/AAAA aliases to CloudFront. ACM DNS validation uses a
+certificate in `us-east-1`. Lambda stays in the configured application region.
+
+## Private local files
+
+`terraform.tfstate` and its backup are the records of the live deployment.
+They contain the provider key. Keep them private and backed up; never delete
+state as part of a directory cleanup. `terraform.tfvars`, `.env`, saved plans,
+the provider lock file, and the generated `.terraform` directory are ignored.
+The provider version is pinned in `versions.tf`. Run `init` again after removing
+the provider cache. No remote state backend is configured yet.
+
+Check infrastructure configuration with:
+
+```sh
+tofu -chdir=infra fmt -check -recursive
 tofu -chdir=infra validate
-docker buildx build --platform linux/arm64 --provenance=false --load \
-  -t ultrafinance:lambda .
-```
-
-Local container check (adapter activates on Lambda):
-
-```sh
-docker run --rm -p 8080:8080 --read-only --tmpfs /tmp ultrafinance:lambda
-curl --fail http://localhost:8080/health
-```
-
-## Deploy after login
-
-Install OpenTofu, AWS CLI and Docker with Buildx. Authenticate with `joehoyle`
-using whatever login method that profile is configured for, then verify the account:
-
-```sh
-aws sts get-caller-identity --profile joehoyle
-cp infra/terraform.tfvars.example infra/terraform.tfvars
-tofu -chdir=infra init
-```
-
-The example configuration uses `aws_use_cli_credentials = true` for the
-`joehoyle` profile's AWS CLI login chain. `deploy/tofu.py` exports short-lived
-credentials into the OpenTofu process environment without writing them to disk.
-Set `aws_account_id` to your account ID; the provider checks it before operating. If using a profile
-that the provider supports directly, set `aws_use_cli_credentials = false` and
-use plain `tofu -chdir=infra` commands instead.
-
-The first apply creates ECR and, if `github_repository` is configured, the GitHub
-OIDC deployment role. It creates no application while `image_uri` is null. This avoids
-requiring a container image before its repository exists:
-
-```sh
-python3 deploy/tofu.py plan
-python3 deploy/tofu.py apply
-```
-
-Build and push a uniquely tagged image (repository tags are immutable):
-
-```sh
-repository=$(tofu -chdir=infra output -raw repository_url)
-registry=${repository%%/*}
-release=$(date -u +%Y%m%dT%H%M%SZ)
-aws ecr get-login-password --profile joehoyle --region ca-central-1 \
-  | docker login --username AWS --password-stdin "$registry"
-docker buildx build --platform linux/arm64 --provenance=false \
-  --build-arg MERCHANT_CATALOG=deploy/catalog.json \
-  --tag "$repository:$release" --push .
-aws ecr describe-images --profile joehoyle --region ca-central-1 \
-  --repository-name ultrafinance --image-ids "imageTag=$release" \
-  --query 'imageDetails[0].imageDigest' --output text
-```
-
-If you changed region or name, use those values in the commands. Save
-`image_uri = "<repository_url>@<returned sha256 digest>"` in `infra/terraform.tfvars`.
-This digest bootstraps the first published version and `live` alias. Routine
-releases use the deployment command below.
-Keep this setting after deployment: removing it would plan deletion of the app resources.
-
-Copy `.env.example` to `.env` in the repository root and set `TYPESAFE_API_KEY`.
-The ignored `.env` file is the local credential store. `deploy/tofu.py` forwards
-that key to the sensitive `typesafe_api_key` variable on each invocation, so future
-applies retain it. An explicit `TF_VAR_typesafe_api_key` overrides the environment
-and `.env`; an exported `TYPESAFE_API_KEY` overrides `.env`.
-
-Apply the provider configuration:
-
-```sh
-python3 deploy/tofu.py plan
-python3 deploy/tofu.py apply
-tofu -chdir=infra output -raw site_url
-```
-
-An unset provider key permits exact merchant matches and empty-catalog requests;
-fuzzy evaluation requires a valid TypeSafe key. The key is a sensitive OpenTofu
-input, stored in local state and Lambda environment configuration. Keep state
-private and backed up; do not commit it or saved plan files. Before sharing this
-infrastructure among operators, configure an encrypted remote backend with locking.
-For local CLI/API commands, load `.env` with `set -a; source .env; set +a`.
-The Rust processes read environment variables directly.
-After changing Lambda environment settings, promote the newly published version
-through the routine release command so the `live` alias receives the updated key.
-
-Verify the resulting site:
-
-```sh
-site=$(tofu -chdir=infra output -raw site_url)
-curl --fail "$site/health"
-curl --fail "$site/v1/enrich" \
-  -H 'Content-Type: application/json' \
-  -d '{"description":"LS","country":"CA"}'
-```
-
-CloudWatch retains application logs for 14 days. Lambda has 1024 MiB memory and a
-30-second timeout; the app's enrichment deadline is 25 seconds. Lambda runs outside
-a VPC, avoiding NAT infrastructure for outbound provider calls.
-
-
-## Routine releases
-
-After the initial application apply, run this from the repository root:
-
-```sh
-./deploy/deploy.sh
-# Or export the current SQLite catalog and include it in the next release:
-python3 deploy/export-catalog.py data/ultrafinance.sqlite data/merchants.deploy.json
-MERCHANT_CATALOG=data/merchants.deploy.json ./deploy/deploy.sh
-```
-
-The command reads profile, region, ECR repository and function name from local
-OpenTofu outputs. It builds and tests the ARM64 image, pushes a unique immutable
-tag, updates unpublished Lambda code, waits for readiness, and publishes a version
-(or reuses an unchanged published snapshot).
-It invokes `/health`, `/`, and an invalid enrichment request on that specific
-version before promoting `live`. Invalid input exercises the API without a paid
-provider call. Failed candidate checks leave `live` unchanged. Failed checks after
-promotion attempt to restore the previous version, using a revision guard so they
-cannot overwrite another deployment. The old release continues serving while the
-new one builds and is checked. Alias promotion does not prewarm all future Lambda
-instances, so cold starts can still occur.
-
-The function URL and its public permissions target `live`; CloudFront's origin
-stays stable. OpenTofu ignores changes to the function image and the alias's
-version/routing configuration because release tooling owns those values. It still
-owns runtime configuration, IAM, and endpoints. A runtime configuration apply can
-publish another version but does not promote it; run a release afterwards to make
-that configuration live. Keep the bootstrap `image_uri` set: clearing it would
-still plan deletion of application resources.
-
-The Dockerfile uses cargo-chef to cache compiled dependencies separately from app
-source and includes Rust tests and Clippy in the image build. Local builds reuse
-Docker layers; Actions stores intermediate layers in its build cache. Catalog
-changes do not invalidate dependency compilation.
-
-## GitHub Actions and OIDC
-
-The example variables restrict the deployment role to `joehoyle/ultrafinance` on
-`main`. They include the repository's verified numeric IDs so the trust policy
-also supports GitHub's immutable OIDC subject format. Existing name-based subjects
-remain limited to that exact repository and branch. No wildcard repository or
-branch trust is granted. If the AWS account already has a GitHub OIDC provider,
-set `github_oidc_provider_arn` to reuse it instead of creating a duplicate.
-
-After applying infrastructure, add these **repository variables**, not secrets,
-in GitHub Settings → Secrets and variables → Actions → Variables:
-
-| Variable | OpenTofu output |
-| --- | --- |
-| `AWS_DEPLOY_ROLE_ARN` | `deploy_role_arn` |
-| `ECR_REPOSITORY` | `repository_url` |
-| `AWS_REGION` | `aws_region` (default `ca-central-1`) |
-| `LAMBDA_FUNCTION_NAME` | `function_name` (default `ultrafinance`) |
-
-For example, after the application and CI role exist:
-
-```sh
-gh variable set AWS_DEPLOY_ROLE_ARN --repo joehoyle/ultrafinance --body "$(tofu -chdir=infra output -raw deploy_role_arn)"
-gh variable set ECR_REPOSITORY --repo joehoyle/ultrafinance --body "$(tofu -chdir=infra output -raw repository_url)"
-gh variable set AWS_REGION --repo joehoyle/ultrafinance --body "$(tofu -chdir=infra output -raw aws_region)"
-gh variable set LAMBDA_FUNCTION_NAME --repo joehoyle/ultrafinance --body "$(tofu -chdir=infra output -raw function_name)"
-```
-
-The workflow runs on relevant pushes to `main` or a manual dispatch from `main`.
-It skips deployment until `AWS_DEPLOY_ROLE_ARN` and `ECR_REPOSITORY` are configured.
-It uses a native ARM64 runner, pinned actions, persistent Docker build caching,
-and OIDC credentials. It has no AWS access key or access to infrastructure state.
-The role can push to this ECR repository, publish versions of this function,
-invoke candidate versions, and promote/roll back `live`. It cannot update Lambda
-environment configuration or IAM. Deployments are serialized with
-`cancel-in-progress: false`; revision guards also detect local/CI races.
-
-CI uses the committed `deploy/catalog.json` by default. Local ignored catalogs
-are not available on GitHub runners. Commit the intended deployable merchant
-catalog there if CI releases should include it.
-
-The release output and Actions summary record the previous version. For a manual
-rollback, replace `PREVIOUS_VERSION` with that version number and use your profile:
-
-```sh
-aws lambda update-alias --profile joehoyle --region ca-central-1 \
-  --function-name ultrafinance --name live --function-version PREVIOUS_VERSION
-```
-
-Local checks without AWS access:
-
-```sh
-python3 -m unittest discover -s deploy -p 'test_*.py'
-shellcheck deploy/*.sh
-actionlint .github/workflows/deploy.yml
 tofu -chdir=infra test
+shellcheck infra/tofu.sh
 ```
-
-Infrastructure tests use a mocked AWS provider; release tests exercise candidate
-failure, alias conflicts and guarded rollback without contacting AWS. Actual AWS
-version publication, IAM/OIDC authentication and HTTP routing still need a first
-live deployment after login.
-
-## Custom domain
-
-Set `domain_name = "ultrafinance.app"` in `infra/terraform.tfvars`, then import
-its existing public hosted zone before planning the change:
-
-```sh
-python3 deploy/tofu.py import 'aws_route53_zone.site[0]' YOUR_HOSTED_ZONE_ID
-python3 deploy/tofu.py plan
-python3 deploy/tofu.py apply
-```
-
-The configuration manages the zone, an ACM DNS validation record, and apex A/AAAA
-aliases to CloudFront. It preserves existing email and other unmanaged records.
-The zone is protected with `prevent_destroy`. The certificate is issued in
-`us-east-1` for CloudFront; the Lambda function stays in the configured region.
-`site_url` returns the custom domain once configured.
-
-Infrastructure state, plans, real variable files, and the provider lock file stay local and are ignored. The AWS provider version is pinned in `versions.tf`.

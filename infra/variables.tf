@@ -8,7 +8,7 @@ variable "domain_name" {
   default     = null
 }
 variable "aws_use_cli_credentials" {
-  description = "Use temporary credentials exported by deploy/tofu.py for AWS CLI login profiles."
+  description = "Use temporary credentials exported by infra/tofu.sh for AWS CLI login profiles."
   type        = bool
   default     = false
 }

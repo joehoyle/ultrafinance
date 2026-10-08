@@ -12,7 +12,7 @@ github_repository_id = "1410780058"
 # If this AWS account already has a GitHub OIDC provider, reuse its ARN:
 # github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
 
-# CLI login credentials are exported in memory by deploy/tofu.py.
+# CLI login credentials are exported in memory by infra/tofu.sh.
 aws_use_cli_credentials = true
 aws_account_id          = "123456789012"
 
