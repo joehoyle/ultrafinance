@@ -169,3 +169,145 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     assert_eq!(result["merchant"]["data"]["id"], merchant["id"]);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn dataset_import_apply_and_refresh_preserve_merchant_ids() {
+    let root = std::env::temp_dir().join(format!("ultra-import-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("source.csv");
+    std::fs::write(&input, "id,name,parent_id,website_url,transaction_text_examples,transaction_text_regexp\nadidas,Adidas,,https://adidas.com,[`ADIDAS`],ADIDAS\n").unwrap();
+    let db = root.join("catalog.sqlite");
+    let args = [
+        "datasets",
+        "import",
+        "--source",
+        "open-enrichment",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        root.to_str().unwrap(),
+    ];
+    let output = run(&args, None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let prepared: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let knowledge = std::path::Path::new(prepared["path"].as_str().unwrap()).join("knowledge.json");
+    assert!(run(&args, None).status.success());
+    let apply = [
+        "--database",
+        db.to_str().unwrap(),
+        "datasets",
+        "apply",
+        knowledge.to_str().unwrap(),
+    ];
+    assert!(run(&apply, None).status.success());
+    let list = [
+        "--database",
+        db.to_str().unwrap(),
+        "merchants",
+        "list",
+        "--json",
+    ];
+    let before = run(&list, None);
+    assert!(before.status.success());
+    assert!(run(&apply, None).status.success());
+    let after = run(&list, None);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&before.stdout).unwrap(),
+        serde_json::from_slice::<Value>(&after.stdout).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_eval_uses_latest_holdouts_and_summarizes_unlabeled_cases() {
+    let root = std::env::temp_dir().join(format!("ultra-eval-all-{}", uuid::Uuid::new_v4()));
+    let suites = root.join("suites");
+    let datasets = root.join("datasets");
+    std::fs::create_dir_all(&suites).unwrap();
+    std::fs::write(suites.join("smoke.json"), r#"{"version":1,"name":"smoke","cases":[{"id":"known-unresolved","request":{"description":"ZZQQXX"},"expected":{"status":"unresolved"}}]}"#).unwrap();
+    for (version, seconds) in [("old", 100), ("new", 200)] {
+        let path = datasets.join("demo").join(version);
+        std::fs::create_dir_all(&path).unwrap();
+        let manifest = path.join("manifest.json");
+        std::fs::write(&manifest, r#"{"holdout_samples":2,"region":"global"}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&manifest)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+            )
+            .unwrap();
+        let samples = if version == "old" {
+            "invalid old snapshot".to_string()
+        } else {
+            ["ZZQQXX", "WWVVZZ"].iter().enumerate().map(|(id, description)| serde_json::to_string(&json!({"id":id.to_string(),"request":{"description":description},"expected":null,"category":null,"source":"demo","label_origin":"unlabeled"})).unwrap()).collect::<Vec<_>>().join("\n")
+        };
+        std::fs::write(path.join("holdout.jsonl"), samples).unwrap();
+        std::fs::write(path.join("development.jsonl"), "not an eval input").unwrap();
+    }
+    let reports = root.join("reports");
+    let database = root.join("catalog.sqlite");
+    let args = [
+        "--database",
+        database.to_str().unwrap(),
+        "eval",
+        "--all",
+        "--mode",
+        "enrich",
+        "--datasets-dir",
+        datasets.to_str().unwrap(),
+        "--suites-dir",
+        suites.to_str().unwrap(),
+        "--output",
+        reports.to_str().unwrap(),
+    ];
+    let output = run(&args, None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let table = String::from_utf8(output.stdout).unwrap();
+    for label in [
+        "suite/smoke",
+        "dataset/demo",
+        "Total",
+        "Match rate",
+        "Accuracy",
+    ] {
+        assert!(table.contains(label), "{table}");
+    }
+    let folder = std::fs::read_dir(&reports)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let summary: Value =
+        serde_json::from_str(&std::fs::read_to_string(folder.join("summary.json")).unwrap())
+            .unwrap();
+    assert_eq!(summary["suites"].as_array().unwrap().len(), 2);
+    assert_eq!(summary["metrics"]["cases"], 3);
+    assert_eq!(summary["metrics"]["unlabeled"], 2);
+    assert_eq!(summary["metrics"]["accuracy"], 1.0);
+    assert_eq!(summary["metrics"]["unresolved"], 3);
+    assert!(
+        summary["suites"][1]["input"]
+            .as_str()
+            .unwrap()
+            .contains("new/holdout.jsonl")
+    );
+    assert!(!run(&["eval", "--all", "--samples"], None).status.success());
+    assert!(
+        !run(&["eval", "evals/smoke.json", "--all"], None)
+            .status
+            .success()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

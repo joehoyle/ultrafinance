@@ -1,3 +1,4 @@
+mod batch;
 mod output;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -34,9 +35,23 @@ struct Cli {
 enum Command {
     /// Enrich a description or a complete JSON request without starting the API.
     Enrich(Box<EnrichArgs>),
-    /// Benchmark labeled cases. Search mode is offline; enrich mode may call Jev.
+    /// Benchmark labeled suites or measure coverage of dataset samples.
     Eval {
-        file: PathBuf,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        file: Option<PathBuf>,
+        /// Run all suites and the latest holdout snapshot from each dataset.
+        #[arg(long, conflicts_with = "samples")]
+        all: bool,
+        #[arg(long, default_value = "data/datasets", requires = "all")]
+        datasets_dir: PathBuf,
+        #[arg(long, default_value = "evals", requires = "all")]
+        suites_dir: PathBuf,
+        /// Read dataset JSONL samples, including ones without merchant labels.
+        #[arg(long)]
+        samples: bool,
+        /// Evaluate only the first N cases (useful before a provider-backed run).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
         #[arg(long, value_enum, default_value = "search")]
         mode: EvalMode,
         #[arg(long)]
@@ -46,11 +61,48 @@ enum Command {
         #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.95")]
         threshold: f64,
     },
+    /// Prepare repeatable dataset snapshots, development data, and evals.
+    Datasets {
+        #[command(subcommand)]
+        command: DatasetCommand,
+    },
     /// Maintain and search the local merchant database.
     Merchants {
         #[command(subcommand)]
         command: MerchantCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum DatasetCommand {
+    /// Convert a downloaded dataset; applying knowledge is an explicit separate command.
+    Import {
+        #[arg(long, value_enum)]
+        source: DatasetSource,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        examples: Option<PathBuf>,
+        #[arg(long, default_value = "global")]
+        region: String,
+        #[arg(long, default_value = "data/datasets")]
+        output: PathBuf,
+    },
+    /// Apply a prepared knowledge.json batch to the merchant database.
+    Apply { file: PathBuf },
+    /// Export manually labeled JSONL samples into a merchant eval suite.
+    ExportEval {
+        file: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+#[derive(Clone, clap::ValueEnum)]
+enum DatasetSource {
+    MerchantStudio,
+    OpenEnrichment,
+    Dodatathings,
+    Moneyvis,
 }
 
 #[derive(Subcommand)]
@@ -63,6 +115,12 @@ enum MerchantCommand {
         country: Option<String>,
         #[arg(long)]
         website: Option<String>,
+        /// Public HTTP(S) URL of a verified merchant brand logo.
+        #[arg(long)]
+        logo_url: Option<String>,
+        /// Logo origin, such as an official website or dataset name.
+        #[arg(long, requires = "logo_url")]
+        logo_source: Option<String>,
         #[arg(long = "alias")]
         aliases: Vec<String>,
         #[arg(long = "source")]
@@ -207,19 +265,97 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Datasets { command } => match command {
+            DatasetCommand::Import {
+                source,
+                input,
+                examples,
+                region,
+                output,
+            } => {
+                let source = match source {
+                    DatasetSource::MerchantStudio => {
+                        ultrafinance_core::datasets::Source::MerchantStudio
+                    }
+                    DatasetSource::OpenEnrichment => {
+                        ultrafinance_core::datasets::Source::OpenEnrichment
+                    }
+                    DatasetSource::Dodatathings => {
+                        ultrafinance_core::datasets::Source::DoDataThings
+                    }
+                    DatasetSource::Moneyvis => ultrafinance_core::datasets::Source::MoneyVis,
+                };
+                let contents = std::fs::read_to_string(&input)?;
+                let examples = examples.map(std::fs::read_to_string).transpose()?;
+                let bundle = ultrafinance_core::datasets::prepare(
+                    source,
+                    &contents,
+                    examples.as_deref(),
+                    &region,
+                )?;
+                let path = bundle.save(&output)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"path":path,"manifest":bundle.manifest})
+                );
+            }
+            DatasetCommand::Apply { file } => {
+                let records: Vec<ultrafinance_core::store::SourceRecord> =
+                    serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                MerchantStore::open(&cli.database)?.import(&records)?;
+                println!("{}", serde_json::json!({"imported":records.len()}));
+            }
+            DatasetCommand::ExportEval { file, output } => {
+                let contents = std::fs::read_to_string(file)?;
+                let samples: Vec<ultrafinance_core::datasets::Sample> = contents
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(serde_json::from_str)
+                    .collect::<std::result::Result<_, _>>()?;
+                if !samples.iter().any(|s| s.expected.is_some()) {
+                    bail!("no merchant labels; add expected labels before export");
+                }
+                let suite = ultrafinance_core::datasets::eval_suite("manually-labeled", &samples);
+                let _: ultrafinance_core::eval::Suite = serde_json::from_value(suite.clone())?;
+                std::fs::write(output, serde_json::to_string_pretty(&suite)?)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"cases":suite["cases"].as_array().unwrap().len()})
+                );
+            }
+        },
         Command::Eval {
             file,
+            all,
+            datasets_dir,
+            suites_dir,
+            samples,
+            limit,
             mode,
             output,
             model,
             threshold,
         } => {
-            let contents = std::fs::read_to_string(&file)
-                .with_context(|| format!("cannot read {}", file.display()))?;
             let mode = match mode {
                 EvalMode::Search => ultrafinance_core::eval::Mode::Search,
                 EvalMode::Enrich => ultrafinance_core::eval::Mode::Enrich,
             };
+            if all {
+                batch::run(batch::Options {
+                    datasets_dir,
+                    suites_dir,
+                    output: output.unwrap_or_else(|| PathBuf::from("evals/reports/all")),
+                    database: cli.database,
+                    mode,
+                    limit,
+                    model,
+                    threshold,
+                })
+                .await?;
+                return Ok(());
+            }
+            let file = file.context("eval requires a file or --all")?;
+            let contents = batch::contents(&file, samples, limit)?;
             let report = ultrafinance_core::eval::run(
                 &contents,
                 MerchantStore::open(&cli.database)?,
@@ -239,13 +375,36 @@ async fn main() -> Result<()> {
             } else {
                 println!("{json}");
             }
-            eprintln!(
-                "{} cases: retrieved expected merchant for {}/{} known cases; {} errors",
-                report.metrics.cases,
-                report.metrics.retrieval_hits,
-                report.metrics.labeled_merchants,
-                report.metrics.errors
-            );
+            if report.metrics.labeled_merchants > 0 {
+                eprintln!(
+                    "{} cases: retrieved expected merchant for {}/{} known cases; {} errors",
+                    report.metrics.cases,
+                    report.metrics.retrieval_hits,
+                    report.metrics.labeled_merchants,
+                    report.metrics.errors
+                );
+            } else {
+                eprintln!(
+                    "{} cases; {} errors",
+                    report.metrics.cases, report.metrics.errors
+                );
+            }
+            if report.metrics.unlabeled > 0 {
+                eprintln!(
+                    "{} unlabeled cases; candidate coverage {:.1}%",
+                    report.metrics.unlabeled,
+                    report.metrics.candidate_coverage.unwrap_or(0.0) * 100.0
+                );
+            }
+            if let Some(rate) = report.metrics.match_rate {
+                eprintln!(
+                    "Match rate {:.1}% · {} matched · {} unresolved · {} errors",
+                    rate * 100.0,
+                    report.metrics.matches.unwrap_or(0),
+                    report.metrics.unresolved.unwrap_or(0),
+                    report.metrics.errors
+                );
+            }
             if let Some(accuracy) = report.metrics.accuracy {
                 eprintln!(
                     "Accuracy {:.1}% · match rate {:.1}% · match precision {}",
@@ -292,6 +451,8 @@ async fn main() -> Result<()> {
                     name,
                     country,
                     website,
+                    logo_url,
+                    logo_source,
                     aliases,
                     sources,
                     id,
@@ -301,6 +462,9 @@ async fn main() -> Result<()> {
                         name,
                         country,
                         website,
+                        logo_source: logo_source
+                            .or_else(|| logo_url.as_ref().map(|_| "manual".into())),
+                        logo_url,
                         aliases,
                         sources,
                     };

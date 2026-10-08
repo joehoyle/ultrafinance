@@ -26,6 +26,7 @@ pub struct Case {
 pub enum Expected {
     Matched { merchant: MerchantRef },
     Unresolved,
+    Unlabeled,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -54,11 +55,13 @@ pub enum Mode {
 #[derive(Debug, Serialize)]
 pub struct CaseResult {
     pub id: String,
+    pub description: String,
     pub expected: Expected,
     pub expected_local_id: Option<String>,
     pub candidate_ids: Vec<String>,
     pub expected_rank: Option<usize>,
     pub predicted_id: Option<String>,
+    pub matched: Option<bool>,
     pub correct: Option<bool>,
     pub error: Option<String>,
     pub latency_ms: f64,
@@ -68,6 +71,9 @@ pub struct Metrics {
     pub cases: usize,
     pub labeled_merchants: usize,
     pub labeled_unresolved: usize,
+    pub unlabeled: usize,
+    pub candidate_coverage: Option<f64>,
+    pub unresolved: Option<usize>,
     pub missing_source_references: usize,
     pub retrieval_hits: usize,
     pub candidate_recall: Option<f64>,
@@ -112,14 +118,8 @@ pub fn fingerprint(bytes: &[u8]) -> String {
     format!("fnv1a64:{value:016x}")
 }
 
-pub async fn run(
-    contents: &str,
-    store: MerchantStore,
-    mode: Mode,
-    api_key: Option<String>,
-    model: String,
-    threshold: f64,
-) -> Result<Report> {
+/// Validate a suite before starting retrieval or provider calls.
+pub fn parse_suite(contents: &str) -> Result<Suite> {
     let suite: Suite = serde_json::from_str(contents)?;
     if suite.version != 1 || suite.name.trim().is_empty() || suite.cases.is_empty() {
         bail!("eval suite must have version 1, a name, and at least one case");
@@ -147,6 +147,18 @@ pub async fn run(
             }
         }
     }
+    Ok(suite)
+}
+
+pub async fn run(
+    contents: &str,
+    store: MerchantStore,
+    mode: Mode,
+    api_key: Option<String>,
+    model: String,
+    threshold: f64,
+) -> Result<Report> {
+    let suite = parse_suite(contents)?;
     let database_fingerprint = store.fingerprint()?;
     let started_at_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let enricher = if mode == Mode::Enrich {
@@ -163,7 +175,7 @@ pub async fn run(
     for case in suite.cases {
         let started = Instant::now();
         let expected_local_id = match &case.expected {
-            Expected::Unresolved => None,
+            Expected::Unresolved | Expected::Unlabeled => None,
             Expected::Matched {
                 merchant: MerchantRef::Local(r),
             } => Some(r.merchant_id.clone()),
@@ -184,11 +196,13 @@ pub async fn run(
             .map(|r| r + 1);
         let mut result = CaseResult {
             id: case.id,
+            description: case.request.description.clone(),
             expected: case.expected,
             expected_local_id,
             candidate_ids,
             expected_rank,
             predicted_id: None,
+            matched: None,
             correct: None,
             error: None,
             latency_ms: 0.0,
@@ -202,13 +216,15 @@ pub async fn run(
                         MerchantResult::Matched { data } => Some(data.id),
                         MerchantResult::Unresolved { .. } => None,
                     };
-                    result.correct = Some(match &result.expected {
-                        Expected::Unresolved => result.predicted_id.is_none(),
-                        Expected::Matched { .. } => {
+                    result.matched = Some(result.predicted_id.is_some());
+                    result.correct = match &result.expected {
+                        Expected::Unresolved => Some(result.predicted_id.is_none()),
+                        Expected::Unlabeled => None,
+                        Expected::Matched { .. } => Some(
                             result.expected_local_id.is_some()
-                                && result.predicted_id == result.expected_local_id
-                        }
-                    });
+                                && result.predicted_id == result.expected_local_id,
+                        ),
+                    };
                 }
                 Ok(Err(error)) => result.error = Some(error.to_string()),
                 Err(_) => result.error = Some("enrichment timed out".into()),
@@ -248,10 +264,19 @@ pub async fn run(
 fn ratio(n: usize, d: usize) -> Option<f64> {
     (d > 0).then(|| n as f64 / d as f64)
 }
-fn summarize(results: &[CaseResult], mode: Mode) -> Metrics {
+pub fn summarize(results: &[CaseResult], mode: Mode) -> Metrics {
     let known = results
         .iter()
         .filter(|r| matches!(r.expected, Expected::Matched { .. }))
+        .count();
+    let labeled_unresolved = results
+        .iter()
+        .filter(|r| matches!(r.expected, Expected::Unresolved))
+        .count();
+    let labeled = known + labeled_unresolved;
+    let labeled_matches = results
+        .iter()
+        .filter(|r| r.predicted_id.is_some() && !matches!(r.expected, Expected::Unlabeled))
         .count();
     let hits = results.iter().filter(|r| r.expected_rank.is_some()).count();
     let matches = results.iter().filter(|r| r.predicted_id.is_some()).count();
@@ -269,7 +294,21 @@ fn summarize(results: &[CaseResult], mode: Mode) -> Metrics {
     Metrics {
         cases: results.len(),
         labeled_merchants: known,
-        labeled_unresolved: results.len() - known,
+        labeled_unresolved,
+        unlabeled: results.len() - labeled,
+        candidate_coverage: ratio(
+            results
+                .iter()
+                .filter(|r| !r.candidate_ids.is_empty())
+                .count(),
+            results.len(),
+        ),
+        unresolved: enrich.then_some(
+            results
+                .iter()
+                .filter(|r| r.predicted_id.is_none() && r.error.is_none())
+                .count(),
+        ),
         missing_source_references: results
             .iter()
             .filter(|r| {
@@ -296,13 +335,15 @@ fn summarize(results: &[CaseResult], mode: Mode) -> Metrics {
             .count(),
         errors: results.iter().filter(|r| r.error.is_some()).count(),
         matches: enrich.then_some(matches),
-        correct_matches: enrich.then_some(correct_matches),
-        false_matches: enrich.then_some(matches - correct_matches),
-        correct_unresolved: enrich.then_some(correct_unresolved),
+        correct_matches: (enrich && labeled > 0).then_some(correct_matches),
+        false_matches: (enrich && labeled > 0).then_some(labeled_matches - correct_matches),
+        correct_unresolved: (enrich && labeled > 0).then_some(correct_unresolved),
         accuracy: enrich
-            .then(|| ratio(correct_matches + correct_unresolved, results.len()))
+            .then(|| ratio(correct_matches + correct_unresolved, labeled))
             .flatten(),
-        match_precision: enrich.then(|| ratio(correct_matches, matches)).flatten(),
+        match_precision: enrich
+            .then(|| ratio(correct_matches, labeled_matches))
+            .flatten(),
         merchant_recall: enrich.then(|| ratio(correct_matches, known)).flatten(),
         match_rate: enrich.then(|| ratio(matches, results.len())).flatten(),
         median_latency_ms: latencies[latencies.len() / 2],
@@ -321,6 +362,8 @@ mod tests {
             name: "Julius Café".into(),
             country: Some("CA".into()),
             website: None,
+            logo_url: None,
+            logo_source: None,
             aliases: vec![],
             sources: vec![],
         })
@@ -355,6 +398,8 @@ mod tests {
             name: "Julius Café".into(),
             country: None,
             website: None,
+            logo_url: None,
+            logo_source: None,
             aliases: vec![],
             sources: vec![],
         })
@@ -377,6 +422,75 @@ mod tests {
         assert_eq!(report.results[0].correct, None);
     }
 
+    #[tokio::test]
+    async fn unlabeled_outcomes_measure_coverage_without_claiming_accuracy() {
+        let db = MerchantStore::memory().unwrap();
+        db.put(&crate::Merchant {
+            id: "a".into(),
+            name: "Julius Cafe".into(),
+            country: None,
+            website: None,
+            logo_url: None,
+            logo_source: None,
+            aliases: vec![],
+            sources: vec![],
+        })
+        .unwrap();
+        let suite = r#"{"version":1,"name":"unlabeled","cases":[
+            {"id":"match","request":{"description":"Julius Cafe"},"expected":{"status":"unlabeled"}},
+            {"id":"none","request":{"description":"ZZQQXX"},"expected":{"status":"unlabeled"}},
+            {"id":"error","request":{"description":"Julus cafe"},"expected":{"status":"unlabeled"}}
+        ]}"#;
+        let report = run(suite, db, Mode::Enrich, None, "jev-latest".into(), 0.95)
+            .await
+            .unwrap();
+        assert_eq!(report.metrics.unlabeled, 3);
+        assert_eq!(report.metrics.matches, Some(1));
+        assert_eq!(report.metrics.unresolved, Some(1));
+        assert_eq!(report.metrics.errors, 1);
+        assert_eq!(report.metrics.match_rate, Some(1.0 / 3.0));
+        assert_eq!(report.metrics.accuracy, None);
+        assert_eq!(report.metrics.match_precision, None);
+        assert_eq!(report.metrics.false_matches, None);
+        assert_eq!(report.results[0].matched, Some(true));
+        assert_eq!(report.results[1].matched, Some(false));
+        assert_eq!(report.results[2].matched, None);
+        assert!(report.results.iter().all(|r| r.correct.is_none()));
+        let mixed = [
+            CaseResult {
+                id: "labeled".into(),
+                description: "Labeled case".into(),
+                expected: Expected::Unresolved,
+                expected_local_id: None,
+                candidate_ids: vec![],
+                expected_rank: None,
+                predicted_id: None,
+                matched: Some(false),
+                correct: Some(true),
+                error: None,
+                latency_ms: 1.0,
+            },
+            CaseResult {
+                id: "unlabeled".into(),
+                description: "Unlabeled case".into(),
+                expected: Expected::Unlabeled,
+                expected_local_id: None,
+                candidate_ids: vec!["a".into()],
+                expected_rank: None,
+                predicted_id: Some("a".into()),
+                matched: Some(true),
+                correct: None,
+                error: None,
+                latency_ms: 1.0,
+            },
+        ];
+        let metrics = summarize(&mixed, Mode::Enrich);
+        assert_eq!(metrics.accuracy, Some(1.0));
+        assert_eq!(metrics.match_precision, None);
+        assert_eq!(metrics.false_matches, Some(0));
+        assert_eq!(metrics.match_rate, Some(0.5));
+    }
+
     #[test]
     fn missing_labels_are_rejected_and_wrong_matches_are_penalized() {
         assert!(
@@ -387,11 +501,13 @@ mod tests {
         );
         let wrong = CaseResult {
             id: "x".into(),
+            description: "LS".into(),
             expected: Expected::Unresolved,
             expected_local_id: None,
             candidate_ids: vec!["a".into()],
             expected_rank: None,
             predicted_id: Some("a".into()),
+            matched: Some(true),
             correct: Some(false),
             error: None,
             latency_ms: 1.0,

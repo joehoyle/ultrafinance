@@ -1,0 +1,399 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ultrafinance API",
+    "description": "Synchronous merchant enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication.",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Check whether the HTTP service is running.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Service is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/enrich": {
+      "post": {
+        "tags": [
+          "Enrichment"
+        ],
+        "summary": "Enrich a transaction with a merchant from the catalog.",
+        "description": "Only description is required; unknown top-level fields are rejected. The JSON body\nis limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or\nambiguous candidates require provider evaluation. No candidates or insufficient\nevidence returns unresolved with null data, not an HTTP error. Transaction fields\nand candidate records are sent to TypeSafe when evaluation runs. The overall\nenrichment deadline is 25 seconds. Configuration, database and provider failures\nreturn 502 rather than unresolved.",
+        "operationId": "enrich",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichRequest"
+              },
+              "example": {
+                "amount": "142.97",
+                "country": "CA",
+                "currency": "CAD",
+                "description": "LS",
+                "extra": {
+                  "bank_category": [
+                    "Food and Drink",
+                    "Restaurants"
+                  ]
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Completed enrichment; matched or unresolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrichResponse"
+                },
+                "examples": {
+                  "matched": {
+                    "value": {
+                      "merchant": {
+                        "data": {
+                          "country": "CA",
+                          "id": "mer_example",
+                          "name": "Example Café"
+                        },
+                        "status": "matched"
+                      }
+                    }
+                  },
+                  "unresolved": {
+                    "value": {
+                      "merchant": {
+                        "data": null,
+                        "status": "unresolved"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds 64 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Missing or unsupported JSON content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid fields, unknown fields, or failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "example": {
+                  "error": {
+                    "code": "invalid_request",
+                    "message": "country must be a two-letter uppercase code"
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Enrichment failed, including configuration or provider errors",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "example": {
+                  "error": {
+                    "code": "enrichment_failed",
+                    "message": "Merchant evaluation failed"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Enrichment exceeded the 25-second deadline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "example": {
+                  "error": {
+                    "code": "enrichment_timeout",
+                    "message": "Merchant evaluation timed out"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        }
+      },
+      "EnrichRequest": {
+        "type": "object",
+        "required": [
+          "description"
+        ],
+        "properties": {
+          "amount": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Decimal amount as a string. The service does not validate its numeric format."
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Two uppercase ASCII letters. Narrows merchant candidates, not the location of an outlet.",
+            "pattern": "^[A-Z]{2}$"
+          },
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Three uppercase ASCII letters, for example CAD.",
+            "pattern": "^[A-Z]{3}$"
+          },
+          "date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Transaction date, conventionally YYYY-MM-DD. The service does not validate its format."
+          },
+          "description": {
+            "type": "string",
+            "description": "Bank transaction description. Must contain nonblank text and be at most 4096 UTF-8 bytes."
+          },
+          "extra": {
+            "type": "object",
+            "description": "Additional evidence as an object with arbitrary JSON values. Sent to the provider when evaluation runs.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "EnrichResponse": {
+        "type": "object",
+        "required": [
+          "merchant"
+        ],
+        "properties": {
+          "attributions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Source attribution for matched merchants. Omitted when empty."
+          },
+          "merchant": {
+            "$ref": "#/components/schemas/MerchantResult"
+          }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "invalid_request, enrichment_failed, or enrichment_timeout."
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Service liveness indicator. Does not check the database or upstream provider.",
+            "example": "ok"
+          }
+        }
+      },
+      "Merchant": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable ID in this service's merchant catalog."
+          },
+          "logo_source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "website": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "MerchantResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A supported catalog match, with its merchant record.",
+            "required": [
+              "data",
+              "status"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/Merchant"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "matched"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Insufficient evidence or no candidates. The data field is always null.",
+            "required": [
+              "data",
+              "status"
+            ],
+            "properties": {
+              "data": {
+                "type": "null"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "unresolved"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Enrichment",
+      "description": "Resolve bank descriptions against the merchant catalog"
+    },
+    {
+      "name": "Health",
+      "description": "Service liveness"
+    }
+  ]
+}

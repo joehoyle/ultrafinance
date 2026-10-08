@@ -22,6 +22,19 @@ live lookups.
 The standalone page lives in `website/index.html` and can also be hosted by any
 static web server, without a frontend build step.
 
+The website's canonical URL is `https://ultrafinance.app/`. Search metadata,
+Open Graph and Twitter cards, and JSON-LD are in the initial HTML. A branded
+1200×630 share image and favicon files live in `website/assets/`. The API embeds
+and serves these assets alongside `/robots.txt` and `/sitemap.xml`; they require
+no writable filesystem at runtime. Health and enrichment responses carry
+`X-Robots-Tag: noindex`, while the landing page is indexable.
+
+Validate metadata with `python3 website/check_metadata.py`. Regenerate brand
+assets with `python3 website/generate_assets.py` (requires Pillow and Arial or
+DejaVu fonts). When changing the public domain, update the HTML, robots file,
+sitemap, and share image together. After deploying, verify the domain in Google
+Search Console and submit `https://ultrafinance.app/sitemap.xml`.
+
 Add verified merchants using the CLI commands below. Set `TYPESAFE_API_KEY` in
 your environment to evaluate fuzzy candidates. The API sees database updates on
 subsequent requests. For an isolated JSON catalog, set `ULTRAFINANCE_MERCHANTS`
@@ -49,6 +62,29 @@ string), `currency`, `date` (ISO date string), and `country`. `extra` is a JSON
 object accepting nested evidence and free text. Unknown top-level fields are
 rejected so spelling errors cannot silently disappear. Input is limited to 64 KiB.
 Service or provider failures return HTTP errors, rather than `unresolved`.
+
+## API documentation
+
+Open `/docs` for the interactive Scalar reference, including request examples and
+an API client. `/openapi.json` serves the generated OpenAPI document. Both are
+served by the API on the same origin; static website hosting also needs to proxy
+these paths. Scalar's browser JavaScript loads from jsDelivr.
+
+Schemas come from the core request and response types using the optional `openapi`
+feature. Register HTTP API handlers with `utoipa_axum::routes!` in `api_router()`
+so serving the handler also includes it in the document. Add descriptions,
+examples and error responses alongside the handler and field definitions.
+
+The committed `crates/ultrafinance-api/openapi.json` is a generated review snapshot.
+The API tests compare it with the served document, and CI runs those checks for
+pull requests. Contract changes require an explicit snapshot update, so reviewers
+can inspect changes to endpoints and schemas. Export it without opening a database
+or calling a provider:
+
+```sh
+cargo run -p ultrafinance-api -- --print-openapi > crates/ultrafinance-api/openapi.json
+cargo test -p ultrafinance-api
+```
 
 ## Local CLI
 
@@ -88,6 +124,90 @@ Optionally install the binary for shorter commands:
 cargo install --path crates/ultrafinance-cli
 ultrafinance enrich 'LS' --country CA
 ```
+
+## Repeatable dataset imports
+
+Prepare a local download with a source-specific adapter:
+
+```sh
+cargo run -- datasets import --source merchant-studio \
+  --input data/imports/merchant-studio.json \
+  --examples data/imports/merchant-studio-tests.json
+cargo run -- datasets import --source open-enrichment \
+  --input data/imports/open-enrichment-global.csv --region global
+cargo run -- datasets import --source dodatathings --input data/imports/dodatathings.csv
+cargo run -- datasets import --source moneyvis --input data/imports/moneyvis.csv
+```
+
+Download Merchant Studio's `merchant_aliases.json` and
+`sample_test_descriptors.json` from its [public data directory](https://jtvargas.github.io/merchant-studio/data/index.json).
+Other adapters accept the native CSV exports from
+[Open Enrichment](https://github.com/steveharrison/openenrichment),
+[DoDataThings](https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2),
+and [MoneyData / MoneyVis](https://data.mendeley.com/datasets/dnxtg6n4rv/1).
+Importing is offline and does not call Jev or change the merchant database.
+
+Each command prints a versioned bundle path under `data/datasets/`. Its manifest
+records attribution, license, input fingerprints, adapter version, and counts.
+Bundles contain `knowledge.json`, `development.jsonl`, and `holdout.jsonl`, plus
+`*.eval.json` suites when merchant labels are available. The fixed split assigns
+approximately 80% of normalized descriptions to development and 20% to holdout.
+Duplicates share a split across sources; input ordering does not affect it.
+New downloads produce new bundles. Identical downloads reuse the existing bundle
+and preserve any labels you have edited. Raw downloads and prepared data are Git-ignored.
+
+Apply the printed bundle's merchant knowledge explicitly, then benchmark retrieval:
+
+```sh
+cargo run -- datasets apply <BUNDLE>/knowledge.json
+cargo run -- eval <BUNDLE>/holdout.eval.json --mode search \
+  --output evals/reports/source-holdout.json
+```
+
+Refreshes preserve local merchant IDs and manual overrides. Existing merchants
+from different sources remain distinct until explicitly linked with `merchants link`.
+Held-out descriptions are excluded from that bundle's imported aliases and raw
+example evidence. Merchant names and other independent source knowledge remain
+available, so these source-derived suites measure consistency, not independent
+real-world accuracy. Keep a separately labeled real-world holdout for that.
+
+Merchant Studio and Open Enrichment provide merchant labels. A missing merchant
+label is retained as unlabeled, never assumed to mean `unresolved`. Open Enrichment
+child places are retained as unlabeled examples but excluded from the brand catalog;
+its icons are not imported. DoDataThings is synthetic category-labeled data;
+MoneyVis has real descriptions without merchant labels. MoneyVis account numbers,
+sort codes, and balances are discarded. Repeated descriptions are deduplicated,
+so output counts differ from transaction row counts.
+
+For manual labeling, set a sample's `expected` to either
+`{"status":"matched","merchant":{"source":"merchant-studio","external_id":"ID"}}`
+or `{"status":"unresolved"}`, then export the labeled subset:
+
+```sh
+cargo run -- datasets export-eval <BUNDLE>/holdout.jsonl --output evals/private/labeled.json
+```
+
+To measure coverage without merchant labels, evaluate the JSONL samples directly:
+
+```sh
+cargo run -- eval <BUNDLE>/holdout.jsonl --samples --mode search \
+  --output evals/reports/coverage-search.json
+cargo run -- eval <BUNDLE>/holdout.jsonl --samples --mode enrich --limit 100 \
+  --output evals/reports/coverage-enrich.json
+```
+
+Search mode reports **candidate coverage**, the proportion with at least one
+retrieved candidate. Enrich mode runs the actual matcher (including Jev when needed)
+and reports matched, unresolved, errors, and **match rate** over all cases. Each
+result has `matched: true/false`; it is `null` for search-only runs or errors.
+Unlabeled results have `correct: null` and never contribute to accuracy or match
+precision. Labeled cases in a mixed sample file still contribute to those metrics.
+Errors remain in the match-rate denominator and are counted separately from unresolved.
+Use `--limit` to try a smaller run before evaluating the full dataset with provider calls.
+Coverage does not establish whether predicted merchants are correct.
+
+Unlabeled samples are omitted by `datasets export-eval`. Development samples can be used for matching rules
+or future training; this importer does not train a model.
 
 ## Configuration
 
@@ -137,6 +257,25 @@ A unique exact match of at least three normalized characters resolves locally;
 ambiguous exact aliases and fuzzy results go to Jev. Country narrows retrieval
 while records with unknown country remain eligible.
 
+## Merchant logos
+
+Merchants optionally include `logo_url` and `logo_source`. Add a verified brand
+logo URL manually:
+
+```sh
+cargo run -- merchants add --name 'Example Café' --country CA \
+  --logo-url 'https://example.com/logo.png' --logo-source 'official website'
+```
+
+The source defaults to `manual`. Native imports accept the same optional fields,
+with the import namespace as the default logo source. Manual records and imported
+source records keep their logo fields independently, so an import refresh cannot
+overwrite a manually set logo. Existing records without logos remain valid.
+Logos appear in JSON records and enrichment responses, not as images in the
+terminal table. URLs are validated as HTTP(S); the service does not download or
+verify the image. Merchant Studio's `iconSlug` remains source evidence and does
+not become a guessed logo URL. Automatic discovery is not implemented yet.
+
 ## External datasets
 
 Merchant Studio has a dedicated adapter. Download its `merchant_aliases.json`
@@ -176,6 +315,30 @@ local IDs. The downloaded snapshot and local SQLite database are ignored by Git.
 The dataset's own confidence values are evidence, not our measured accuracy.
 
 ## Evaluations
+
+Run the top-level suites in `evals/` and each prepared dataset's latest holdout
+(snapshot manifest modification time, separately for each region) together:
+
+```sh
+cargo run -- eval --all
+cargo run -- eval --all --mode enrich --limit 100
+```
+
+The default search run is offline. Enrich mode runs actual matching and may call
+Jev; `--limit` applies to each suite. The CLI shows suite progress and a summary
+table with case counts, labels, candidate coverage, retrieval recall, match rate,
+accuracy, and errors. Totals are calculated across cases, not averaged across
+suites. Unlabeled cases contribute to coverage and match rate; accuracy uses only
+labeled cases. Search mode leaves matching metrics unmeasured.
+
+Every run saves individual reports and `summary.json` in a unique directory under
+`evals/reports/all/`. Use `--output DIR` to change the batch report directory,
+`--datasets-dir DIR` to change snapshot discovery, or `--suites-dir DIR` for suite
+files. Batch discovery excludes development files, older snapshots, nested report
+directories, and temporary preparations. All inputs are validated before provider
+calls. Suite failures are displayed, remaining suites continue, and the command
+exits nonzero if any suite or case errors. Reports identify the exact input paths.
+
 
 Maintain a labeled JSON suite: each case contains a transaction request and an
 explicit expected merchant or `unresolved`. Missing labels are rejected. See

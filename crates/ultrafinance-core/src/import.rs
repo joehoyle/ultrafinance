@@ -48,6 +48,8 @@ pub fn merchant_studio(contents: &str) -> Result<Vec<SourceRecord>> {
                         format!("https://{s}")
                     }
                 }),
+                logo_url: None,
+                logo_source: None,
                 aliases: entry.aliases,
                 sources: vec![STUDIO_URL.into()],
             };
@@ -74,7 +76,10 @@ pub fn catalog(contents: &str, source: &str) -> Result<Vec<SourceRecord>> {
         serde_json::from_str(contents).context("invalid merchant catalog")?;
     merchants
         .into_iter()
-        .map(|merchant| {
+        .map(|mut merchant| {
+            if merchant.logo_url.is_some() && merchant.logo_source.is_none() {
+                merchant.logo_source = Some(source.into());
+            }
             Ok(SourceRecord {
                 source: source.into(),
                 external_id: merchant.id.clone(),

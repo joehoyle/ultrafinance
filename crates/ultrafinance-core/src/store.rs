@@ -355,6 +355,17 @@ fn validate(merchant: &Merchant) -> Result<()> {
     {
         bail!("country must be a two-letter uppercase code");
     }
+    if let Some(logo) = &merchant.logo_url {
+        let url = reqwest::Url::parse(logo)
+            .map_err(|_| anyhow::anyhow!("logo_url must be an absolute HTTP(S) URL"))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            bail!("logo_url must be an absolute HTTP(S) URL without credentials");
+        }
+    }
     if merchant.aliases.iter().any(|a| normalize(a).is_empty()) {
         bail!("aliases must be nonblank");
     }
@@ -475,6 +486,8 @@ mod tests {
             name: name.into(),
             country: Some(country.into()),
             website: None,
+            logo_url: None,
+            logo_source: None,
             aliases: vec![],
             sources: vec![],
         }

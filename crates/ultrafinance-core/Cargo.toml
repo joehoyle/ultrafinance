@@ -3,6 +3,9 @@ name = "ultrafinance-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+openapi = ["dep:utoipa"]
+
 [dependencies]
 anyhow.workspace = true
 reqwest.workspace = true
@@ -13,3 +16,5 @@ unicode-normalization.workspace = true
 strsim.workspace = true
 uuid.workspace = true
 tokio.workspace = true
+csv.workspace = true
+utoipa = { workspace = true, optional = true }

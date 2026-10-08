@@ -1,3 +1,4 @@
+pub mod datasets;
 pub mod eval;
 pub mod import;
 pub mod store;
@@ -7,13 +8,22 @@ use serde_json::{Map, Value, json};
 use std::{collections::HashSet, time::Duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EnrichRequest {
+    /// Bank transaction description. Must contain nonblank text and be at most 4096 UTF-8 bytes.
     pub description: String,
+    /// Decimal amount as a string. The service does not validate its numeric format.
     pub amount: Option<String>,
+    /// Three uppercase ASCII letters, for example CAD.
+    #[cfg_attr(feature = "openapi", schema(pattern = "^[A-Z]{3}$"))]
     pub currency: Option<String>,
+    /// Transaction date, conventionally YYYY-MM-DD. The service does not validate its format.
     pub date: Option<String>,
+    /// Two uppercase ASCII letters. Narrows merchant candidates, not the location of an outlet.
+    #[cfg_attr(feature = "openapi", schema(pattern = "^[A-Z]{2}$"))]
     pub country: Option<String>,
+    /// Additional evidence as an object with arbitrary JSON values. Sent to the provider when evaluation runs.
     #[serde(default)]
     pub extra: Map<String, Value>,
 }
@@ -42,13 +52,19 @@ impl EnrichRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Merchant {
+    /// Stable ID in this service's merchant catalog.
     pub id: String,
     pub name: String,
     pub country: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -57,15 +73,30 @@ pub struct Merchant {
 
 // Internally tagged variants ensure status and data cannot disagree.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum MerchantResult {
+    /// A supported catalog match, with its merchant record.
     Matched { data: Merchant },
-    Unresolved { data: () },
+    /// Insufficient evidence or no candidates. The data field is always null.
+    Unresolved {
+        #[cfg_attr(feature = "openapi", schema(schema_with = null_schema))]
+        data: (),
+    },
+}
+
+#[cfg(feature = "openapi")]
+fn null_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::Null)
+        .build()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnrichResponse {
     pub merchant: MerchantResult,
+    /// Source attribution for matched merchants. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attributions: Vec<String>,
 }
@@ -316,6 +347,8 @@ mod tests {
                 name: format!("Merchant {index}"),
                 country: Some("CA".into()),
                 website: None,
+                logo_url: None,
+                logo_source: None,
                 aliases: vec![],
                 sources: vec![],
             })

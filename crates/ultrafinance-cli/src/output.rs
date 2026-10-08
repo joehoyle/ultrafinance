@@ -3,7 +3,7 @@ use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use std::io::{self, IsTerminal, Write};
 use ultrafinance_core::store::MerchantPage;
 
-fn text(value: &str) -> String {
+pub(crate) fn text(value: &str) -> String {
     // Imported data is display text, never terminal escape sequences.
     value
         .chars()

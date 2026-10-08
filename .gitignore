@@ -22,6 +22,8 @@ crash.log
 __pycache__/
 *.pyc
 
+/data/datasets/
+
 # Local infrastructure metadata and authentication configuration.
 **/.terraform.lock.hcl
 *.tfvars.json

@@ -1,0 +1,24 @@
+name: Check
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.98 --profile minimal --component clippy --component rustfmt
+      - name: Check formatting
+        run: cargo +1.98 fmt --all -- --check
+      - name: Test API contract and workspace
+        run: cargo +1.98 test --locked --workspace
+      - name: Lint
+        run: cargo +1.98 clippy --locked --workspace --all-targets -- -D warnings
