@@ -33,6 +33,30 @@ async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
     let url = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")?;
     let pg = MerchantStore::initialize_postgres(&url)?;
     MerchantStore::initialize_postgres(&url)?; // migrations are repeatable
+    let log_id = uuid::Uuid::new_v4().to_string();
+    pg.write_log(
+        &log_id,
+        "test-batch",
+        "started",
+        None,
+        &serde_json::json!({"request":{"description":"test"}}),
+    )?;
+    assert!(
+        pg.enrichment_logs(Some("started"), None, 10, 0)?
+            .iter()
+            .any(|r| r["id"] == log_id && r["finished_at"].is_null())
+    );
+    pg.write_log(
+        &log_id,
+        "test-batch",
+        "matched",
+        Some("snapshot-merchant"),
+        &serde_json::json!({"response":{"merchant":{"data":{"id":"snapshot-merchant"}}}}),
+    )?;
+    let logs = pg.enrichment_logs(Some("matched"), Some("snapshot-merchant"), 10, 0)?;
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0]["finished_at"].is_string());
+
     let directory =
         std::env::temp_dir().join(format!("ultrafinance-migration-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory)?;

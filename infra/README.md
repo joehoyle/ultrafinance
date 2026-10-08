@@ -83,40 +83,45 @@ Use `./infra/tofu.sh` from the repository root for infrastructure commands.
 Never print plans or state containing credentials. An old image rollback still serves its bundled
 SQLite snapshot; it does not reflect subsequent PostgreSQL edits.
 
-## On-demand CLI tasks
+## On-demand CLI shell
 
-CLI tasks are included automatically whenever Aurora and an immutable application
-image are configured. Apply with `./infra/tofu.sh apply`. This adds an ECS
-cluster and ARM64 Fargate task definition, execution/task IAM roles, a private
-S3 input bucket, a CloudWatch log group, and an empty Secrets Manager secret.
-There is no ECS service or continuously running task. The tasks reuse the
-existing database client security group, private subnets, and NAT gateway.
+CLI resources are included automatically whenever Aurora and an immutable
+application image are configured. Apply with `./infra/tofu.sh apply`. This adds
+an ECS cluster and ARM64 Fargate task definition, execution/task IAM roles,
+a CloudWatch log group, and an empty Secrets Manager secret. There is no ECS
+service or continuously running task. Tasks use the existing database client
+security group, private subnets, and NAT gateway.
 
-`python3 deploy/prod-cli.py --configure-database` prompts for the import-role
-PostgreSQL URL and writes it directly to Secrets Manager, outside OpenTofu.
-The task execution role can read only that secret and the application's ECR
-repository; the task role can read only the staging bucket's `jobs/` objects.
-The CLI container receives the URL through ECS secret injection. Lambda keeps
-its independently configured runtime credentials.
+Run `python3 deploy/prod-cli.py` in a terminal to launch the existing application
+image and open `/bin/sh` through ECS Exec. Install the AWS CLI and Session Manager
+plugin locally first. The container runs a bounded sleep process with init
+process support while the Exec session is active. The runner waits for the
+ExecuteCommandAgent to be ready and stops the task when the session ends or
+fails. A task also exits after one hour, bounding costs after a lost connection.
 
-See the root README for import/migration commands. The runner chooses the
-immutable image behind Lambda's `live` alias at each invocation, registering
-a temporary task definition revision when it differs from the infrastructure
-image. `--image` can select a newer image during initial database cutover.
-Completed runs deregister temporary revisions and remove their staged input.
-Interrupted or uncertain runs preserve both; inspect their ECS status before
-retrying. Input files expire after seven days, and logs after fourteen days.
-Fargate compute is charged only while tasks run; S3, logs, and the secret have
-their normal storage/request charges.
+`python3 deploy/prod-cli.py --configure-database` prompts for a TLS-enabled
+import-role PostgreSQL URL and writes it directly to Secrets Manager, outside
+OpenTofu. If configured, the runner injects the URL into shell tasks; an empty
+secret permits a shell without database access. Lambda retains its independent
+runtime credentials. The execution role can read only this secret and the
+application ECR repository. The task role has the four `ssmmessages` channel
+permissions required for ECS Exec.
+
+The runner selects the immutable image behind Lambda's `live` alias and
+registers a temporary task definition revision for the session. `--image`
+can select a newer image during initial database cutover. The runner stops
+known tasks and deregisters their temporary revisions on exit. If launching
+has an uncertain outcome, inspect ECS tasks using the printed session ID;
+the task's one-hour lifetime still applies. The filesystem is ephemeral.
 
 The operator's AWS profile needs `ecs:DescribeTaskDefinition`,
 `ecs:RegisterTaskDefinition`, `ecs:DeregisterTaskDefinition`, `ecs:RunTask`,
-and `ecs:DescribeTasks`, plus `iam:PassRole` for the two CLI roles. It also
-needs staging-bucket upload/delete permissions, `logs:FilterLogEvents`,
-`lambda:GetFunction`, and `secretsmanager:DescribeSecret` on the CLI secret.
-Configuring the URL additionally requires `secretsmanager:PutSecretValue`.
-Tasks do not inherit the operator's credentials. No provider credentials are
-injected, so enrichment/evaluation jobs are not offered by this runner.
+`ecs:DescribeTasks`, `ecs:ExecuteCommand`, and `ecs:StopTask`, plus
+`iam:PassRole` for the two CLI roles, `lambda:GetFunction`, and
+`secretsmanager:DescribeSecret` on the CLI secret. Configuring the URL also
+requires `secretsmanager:PutSecretValue`. Tasks do not inherit the operator's
+credentials. Fargate compute is charged while the task runs; logs and the
+secret have their normal charges.
 
 OpenTofu owns ECR, IAM, logging, Lambda runtime configuration, the function URL,
 CloudFront, Route 53, and the ACM certificate in `us-east-1`. It preserves

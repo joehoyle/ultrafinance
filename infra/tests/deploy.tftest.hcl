@@ -63,20 +63,20 @@ run "cli_tasks" {
     error_message = "CLI tasks must run as ARM64 Fargate tasks inside the VPC."
   }
   assert {
-    condition     = jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[1].image == var.image_uri && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[1].entryPoint == ["/usr/local/bin/ultrafinance"]
-    error_message = "The CLI must reuse the immutable application image and bypass the Lambda entrypoint."
+    condition     = length(jsondecode(aws_ecs_task_definition.cli[0].container_definitions)) == 1 && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].image == var.image_uri && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].entryPoint == ["/bin/sh", "-c"]
+    error_message = "The shell must reuse only the application image and bypass the Lambda entrypoint."
   }
   assert {
-    condition     = jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[1].dependsOn[0].condition == "SUCCESS" && !jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].essential
-    error_message = "The CLI must wait for a successful download; the input helper must be nonessential."
+    condition     = jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].linuxParameters.initProcessEnabled && !jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].readonlyRootFilesystem && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].command == ["exec sleep 3600"]
+    error_message = "ECS Exec needs init support, a writable filesystem, and a bounded task lifetime."
   }
   assert {
-    condition     = jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[1].secrets[0].valueFrom == aws_secretsmanager_secret.cli_database_url[0].arn && length(aws_lambda_function.app[0].vpc_config) == 0
-    error_message = "Import credentials must come from their own secret, without cutting over Lambda."
+    condition     = toset(jsondecode(aws_iam_role_policy.cli_task[0].policy).Statement[0].Action) == toset(["ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel", "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"])
+    error_message = "Shell task permissions must enable ECS Exec channels."
   }
   assert {
-    condition     = aws_s3_bucket_public_access_block.cli_inputs[0].block_public_acls && aws_s3_bucket_public_access_block.cli_inputs[0].block_public_policy && aws_s3_bucket_public_access_block.cli_inputs[0].ignore_public_acls && aws_s3_bucket_public_access_block.cli_inputs[0].restrict_public_buckets
-    error_message = "Staged catalog inputs must stay private."
+    condition     = length(aws_lambda_function.app[0].vpc_config) == 0
+    error_message = "Provisioning shell resources must not cut over Lambda."
   }
 }
 

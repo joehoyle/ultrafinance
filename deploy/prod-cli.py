@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the existing Ultrafinance binary as a one-off private Fargate task."""
+"""Open an interactive shell in the Ultrafinance image on private Fargate."""
 
 import argparse
 import getpass
@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
-import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,22 +50,6 @@ class AWS:
         return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
-def validate_command(command, has_input):
-    if not command:
-        raise ValueError("Supply a CLI command after --.")
-    if any(arg.startswith("--database-url") or "postgres://" in arg or "postgresql://" in arg for arg in command):
-        raise ValueError("Database credentials must come from the import secret, not command arguments.")
-    uses_input = "@input" in command
-    if uses_input != has_input:
-        raise ValueError("Use --input FILE and an @input command argument together.")
-    # This runner supports shared-catalog operations, not local-only files or provider credentials.
-    if command[0] not in ("merchants", "database", "datasets"):
-        raise ValueError("Production runner supports merchants, database, and datasets apply commands.")
-    if command[0] == "datasets" and command[1:2] != ["apply"]:
-        raise ValueError("Prepare datasets locally, then run datasets apply in production.")
-    return ["/input/source" if arg == "@input" else arg for arg in command]
-
-
 def registration(definition, image):
     if not DIGEST.fullmatch(image):
         raise ValueError("Use an immutable ECR image digest, not a tag.")
@@ -93,86 +77,41 @@ def configure_secret(aws, secret):
     print("Import-role URL stored in Secrets Manager.")
 
 
-def snapshot_sqlite(source, destination):
-    # SQLite backup includes committed WAL contents without altering the local catalog.
-    connection = sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)
-    try:
-        with sqlite3.connect(destination) as backup:
-            connection.backup(backup)
-    finally:
-        connection.close()
-
-
-def print_logs(aws, config, task):
-    task_id = task.rsplit("/", 1)[-1]
-    for container in ("input", "cli"):
-        token = None
-        while True:
-            args = ["logs", "filter-log-events", "--log-group-name", config["log_group"],
-                    "--log-stream-names", f"cli/{container}/{task_id}"]
-            if token:
-                args.extend(["--next-token", token])
-            response = aws.call(*args)
-            for event in response.get("events", []):
-                print(event["message"])
-            next_token = response.get("nextToken")
-            if not next_token or next_token == token:
-                break
-            token = next_token
-
-
-def run_job(aws, config, command, source, image, timeout):
+def run_shell(aws, config, image=None, timeout=300):
     job_id = uuid.uuid4().hex
     task = None
-    staged_key = None
     revision = None
-    stopped = False
     launch_attempted = False
     try:
-        # Validate the secret exists, without retrieving its value to this machine.
         secret = aws.call("secretsmanager", "describe-secret", "--secret-id", config["database_secret"])
-        if not any("AWSCURRENT" in stages for stages in secret.get("VersionIdsToStages", {}).values()):
-            raise RuntimeError("Import secret has no value; run --configure-database first.")
+        has_database = any("AWSCURRENT" in stages for stages in secret.get("VersionIdsToStages", {}).values())
         definition = aws.call("ecs", "describe-task-definition", "--task-definition", config["task_definition"])["taskDefinition"]
-        cli = next(container for container in definition["containerDefinitions"] if container["name"] == "cli")
         chosen_image = image or aws.call(
             "lambda", "get-function", "--function-name", config["function_name"],
             "--qualifier", "live", "--query", "Code.ResolvedImageUri",
         )
-        if not DIGEST.fullmatch(chosen_image):
-            raise ValueError("The task must use an immutable ECR image digest.")
-        task_definition = config["task_definition"]
-        if chosen_image != cli["image"]:
-            with tempfile.TemporaryDirectory(prefix="ultrafinance-task-") as directory:
-                path = Path(directory) / "task.json"
-                path.write_text(json.dumps(registration(definition, chosen_image)))
-                revision = aws.call("ecs", "register-task-definition", "--cli-input-json", f"file://{path}")["taskDefinition"]["taskDefinitionArn"]
-            task_definition = revision
-        if source:
-            staged_key = f"jobs/{job_id}/source"
-            with tempfile.TemporaryDirectory(prefix="ultrafinance-input-") as directory:
-                upload = source
-                if command[:2] == ["database", "migrate-sqlite"]:
-                    upload = Path(directory) / "catalog.sqlite"
-                    snapshot_sqlite(source, upload)
-                aws.call("s3", "cp", str(upload), f"s3://{config['input_bucket']}/{staged_key}", "--only-show-errors", "--sse", "AES256")
-        overrides = {"containerOverrides": [
-            {"name": "cli", "command": command},
-            {"name": "input", "environment": [{"name": "INPUT_KEY", "value": staged_key or ""}]},
-        ]}
+        request = registration(definition, chosen_image)
+        container = next(item for item in request["containerDefinitions"] if item["name"] == "cli")
+        # An empty import secret must not prevent opening a shell.
+        container["secrets"] = ([{"name": "ULTRAFINANCE_DATABASE_URL", "valueFrom": config["database_secret"]}]
+                                if has_database else [])
+        with tempfile.TemporaryDirectory(prefix="ultrafinance-shell-") as directory:
+            path = Path(directory) / "task.json"
+            path.write_text(json.dumps(request))
+            revision = aws.call("ecs", "register-task-definition", "--cli-input-json", f"file://{path}")["taskDefinition"]["taskDefinitionArn"]
         network = {"awsvpcConfiguration": {
             "subnets": config["subnets"], "securityGroups": config["security_groups"], "assignPublicIp": "DISABLED",
         }}
-        print(f"Job: {job_id}", flush=True)
+        print(f"Session: {job_id}", flush=True)
         launch_attempted = True
         try:
             result = aws.call("ecs", "run-task", "--cluster", config["cluster"],
-                              "--task-definition", task_definition, "--launch-type", "FARGATE",
+                              "--task-definition", revision, "--launch-type", "FARGATE",
                               "--platform-version", "1.4.0", "--count", "1", "--client-token", job_id,
-                              "--started-by", job_id,
-                              "--network-configuration", json.dumps(network), "--overrides", json.dumps(overrides))
+                              "--started-by", job_id, "--enable-execute-command",
+                              "--network-configuration", json.dumps(network))
         except RuntimeError as error:
-            raise RuntimeError(f"{error}. Launch outcome is uncertain; check ECS tasks started by {job_id} before retrying.") from error
+            raise RuntimeError(f"{error}. Launch outcome is uncertain; check ECS tasks started by {job_id}.") from error
         tasks = result.get("tasks", [])
         if not tasks:
             launch_attempted = False
@@ -181,58 +120,54 @@ def run_job(aws, config, command, source, image, timeout):
         task = tasks[0]["taskArn"]
         print(f"Task: {task}", flush=True)
         print(f"Image: {chosen_image}", flush=True)
-        print(f"Logs: {config['log_group']}", flush=True)
+        if not has_database:
+            print("Database URL is not configured; use --configure-database before a future session to enable production database access.", flush=True)
         deadline = time.monotonic() + timeout
         while True:
             response = aws.call("ecs", "describe-tasks", "--cluster", config["cluster"], "--tasks", task)
             if response.get("failures") or not response.get("tasks"):
-                raise RuntimeError(f"Unable to inspect task {task}; check ECS before retrying the import.")
+                raise RuntimeError(f"Unable to inspect task {task}.")
             status = response["tasks"][0]
             if status["lastStatus"] == "STOPPED":
-                stopped = True
+                raise RuntimeError(f"Shell task stopped before connecting ({status.get('stopCode', 'unknown')}); inspect ECS and {config['log_group']}.")
+            ready = any(
+                agent.get("name") == "ExecuteCommandAgent" and agent.get("lastStatus") == "RUNNING"
+                for item in status.get("containers", []) if item["name"] == "cli"
+                for agent in item.get("managedAgents", [])
+            )
+            if status["lastStatus"] == "RUNNING" and ready:
                 break
             if time.monotonic() >= deadline:
-                raise RuntimeError(f"Wait timed out; task {task} continues running. Check ECS before retrying.")
+                raise RuntimeError("Timed out waiting for the ECS Exec agent.")
             time.sleep(5)
-        # Allow the final log batch to reach CloudWatch.
-        time.sleep(3)
-        try:
-            print_logs(aws, config, task)
-        except RuntimeError as error:
-            raise RuntimeError(f"{error}. Task {task} stopped, but logs could not be read; verify its exit status before retrying.") from error
-        containers = {container["name"]: container for container in status.get("containers", [])}
-        cli_exit = containers.get("cli", {}).get("exitCode")
-        input_exit = containers.get("input", {}).get("exitCode")
-        if status.get("stopCode") != "EssentialContainerExited" or cli_exit != 0 or input_exit != 0:
-            raise RuntimeError(f"Task failed ({status.get('stopCode', 'unknown')}): input exit={input_exit}, CLI exit={cli_exit}. Check the ECS task and logs.")
-        print("Production CLI completed successfully.")
+        print("Opening shell. Run ultrafinance commands here; exiting stops the task. The task expires after one hour.", flush=True)
+        result = subprocess.run(
+            [*aws.prefix, "ecs", "execute-command", "--cluster", config["cluster"],
+             "--task", task, "--container", "cli", "--interactive", "--command", "/bin/sh"],
+            env={**os.environ, "AWS_PAGER": ""}, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError("ECS Exec session failed.")
     finally:
-        # On interrupted/uncertain runs leave resources intact: never retry writes automatically.
-        if not launch_attempted or stopped:
-            if staged_key:
-                aws.call("s3", "rm", f"s3://{config['input_bucket']}/{staged_key}", "--only-show-errors")
-            if revision:
-                aws.call("ecs", "deregister-task-definition", "--task-definition", revision)
+        # Known tasks are stopped on exit, startup failure, timeout, or Ctrl-C.
+        # An uncertain launch is bounded by the task's one-hour lifetime.
+        if task:
+            aws.call("ecs", "stop-task", "--cluster", config["cluster"], "--task", task,
+                     "--reason", "Interactive shell session ended")
+        if revision and (task or not launch_attempted):
+            aws.call("ecs", "deregister-task-definition", "--task-definition", revision)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, help="Local input file; use @input in the CLI command")
-    parser.add_argument("--image", help="Optional immutable ECR digest; defaults to the image deployed to Lambda's live alias")
-    parser.add_argument("--timeout", type=int, default=3600, help="Seconds to wait; a timeout leaves the task running")
-    parser.add_argument("--configure-database", action="store_true", help="Securely prompt for and store the import-role URL")
-    parser.add_argument("command", nargs=argparse.REMAINDER, help="CLI arguments after --")
+    parser.add_argument("--image", help="Immutable ECR digest; defaults to Lambda's live image")
+    parser.add_argument("--configure-database", action="store_true", help="Securely store the import-role URL for shell sessions")
     args = parser.parse_args()
-    command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    if args.configure_database:
-        if command or args.input or args.image:
-            parser.error("--configure-database cannot be combined with a job.")
-    else:
-        command = validate_command(command, args.input is not None)
-        if args.input and not args.input.is_file():
-            parser.error("Input file does not exist.")
-        if args.timeout <= 0:
-            parser.error("Timeout must be positive.")
+    if not args.configure_database:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            parser.error("Run this command in an interactive terminal.")
+        if not shutil.which("session-manager-plugin"):
+            parser.error("Install the AWS Session Manager plugin before opening a shell.")
     config = output("cli_runner")
     if not config:
         raise RuntimeError("Apply the Aurora and application infrastructure first; CLI tasks are provisioned automatically.")
@@ -240,15 +175,15 @@ def main():
     if args.configure_database:
         configure_secret(aws, config["database_secret"])
     else:
-        run_job(aws, config, command, args.input, args.image, args.timeout)
+        run_shell(aws, config, args.image)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+    except (RuntimeError, ValueError, OSError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("Stopped waiting. A started task continues running; check ECS before retrying.", file=sys.stderr)
+        print("Shell interrupted; a known task is stopped automatically.", file=sys.stderr)
         sys.exit(130)

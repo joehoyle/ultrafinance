@@ -48,11 +48,13 @@ impl PostgresStore {
                     write_lock(&mut tx)?;
                     let exists: bool = tx.query_one("SELECT to_regclass('public.ultrafinance_schema') IS NOT NULL", &[])?.get(0);
                     if !exists { tx.batch_execute(include_str!("../migrations/001_postgres.sql"))?; }
+                    let version: i32 = tx.query_one("SELECT version FROM ultrafinance_schema", &[])?.get(0);
+                    if version == 1 { tx.batch_execute(include_str!("../migrations/002_enrichment_log.sql"))?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 1 { bail!("unsupported PostgreSQL schema version {version}"); }
+                if version != 2 { bail!("unsupported PostgreSQL schema version {version}"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -90,6 +92,40 @@ impl PostgresStore {
             }))
             .map_err(|_| anyhow::anyhow!("PostgreSQL worker stopped"))?;
         receiver.recv().context("PostgreSQL worker stopped")?
+    }
+    pub fn write_log(
+        &self,
+        id: &str,
+        batch: &str,
+        status: &str,
+        merchant: Option<&str>,
+        data: &str,
+    ) -> Result<()> {
+        let (id, batch, status, merchant, data) = (
+            id.to_owned(),
+            batch.to_owned(),
+            status.to_owned(),
+            merchant.map(str::to_owned),
+            data.to_owned(),
+        );
+        self.run(move |client| {
+            client.execute("INSERT INTO enrichment_log(id,batch_id,status,merchant_id,data,finished_at) VALUES($1,$2,$3,$4,$5,CASE WHEN $3='started' THEN NULL ELSE clock_timestamp() END) ON CONFLICT(id) DO UPDATE SET status=excluded.status,merchant_id=excluded.merchant_id,data=excluded.data,finished_at=excluded.finished_at", &[&id,&batch,&status,&merchant,&data])?;
+            Ok(())
+        })
+    }
+    pub fn logs(
+        &self,
+        status: Option<&str>,
+        merchant: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let (status, merchant) = (status.map(str::to_owned), merchant.map(str::to_owned));
+        self.run(move |client| {
+            client.query("SELECT id,batch_id,status,merchant_id,created_at::text,finished_at::text,data FROM enrichment_log WHERE ($1::text IS NULL OR status=$1) AND ($2::text IS NULL OR merchant_id=$2) ORDER BY created_at DESC,id LIMIT $3 OFFSET $4", &[&status,&merchant,&(limit as i64),&(offset as i64)])?.into_iter().map(|r| {
+                Ok(serde_json::json!({"id":r.get::<_,String>(0),"batch_id":r.get::<_,String>(1),"status":r.get::<_,String>(2),"merchant_id":r.get::<_,Option<String>>(3),"created_at":r.get::<_,String>(4),"finished_at":r.get::<_,Option<String>>(5),"data":serde_json::from_str::<serde_json::Value>(&r.get::<_,String>(6))?}))
+            }).collect()
+        })
     }
     pub fn put(&self, merchant: &Merchant) -> Result<()> {
         validate(merchant)?;

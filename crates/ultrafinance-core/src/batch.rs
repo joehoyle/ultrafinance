@@ -80,6 +80,12 @@ fn attributed(mut response: EnrichResponse, candidates: &[store::Candidate]) -> 
     }
     response
 }
+fn exact_match(request: &EnrichRequest, candidates: &[store::Candidate]) -> bool {
+    candidates.iter().filter(|c| c.exact).count() == 1
+        && candidates[0].exact
+        && candidates[0].trusted
+        && store::normalize(&request.description).chars().count() >= 3
+}
 impl Enricher {
     /// Bounded catalog retrieval and provider evaluation. Every input has one result,
     /// in input order; invalid rows and upstream failures do not discard other rows.
@@ -94,6 +100,15 @@ impl Enricher {
                 })
                 .collect();
         }
+        let audit = match self.start_audit(requests).await {
+            Ok(audit) => audit,
+            Err(error) => {
+                return requests
+                    .iter()
+                    .map(|_| Err(anyhow::anyhow!("Could not start enrichment log: {error:#}")))
+                    .collect();
+            }
+        };
         let mut prepared = Vec::with_capacity(requests.len());
         for request in requests {
             let candidates = match request.validate() {
@@ -113,7 +128,7 @@ impl Enricher {
             };
             prepared.push((request.clone(), candidates));
         }
-        self.enrich_batch_candidates(prepared).await
+        self.audit_candidates(prepared, audit).await
     }
 
     /// Reuse evaluation shortlists without querying the database a second time.
@@ -121,6 +136,115 @@ impl Enricher {
         &self,
         inputs: Vec<(EnrichRequest, Result<Vec<store::Candidate>>)>,
     ) -> Vec<Result<EnrichResponse>> {
+        let requests: Vec<_> = inputs.iter().map(|(r, _)| r.clone()).collect();
+        let audit = match self.start_audit(&requests).await {
+            Ok(audit) => audit,
+            Err(error) => {
+                return requests
+                    .iter()
+                    .map(|_| Err(anyhow::anyhow!("Could not start enrichment log: {error:#}")))
+                    .collect();
+            }
+        };
+        self.audit_candidates(inputs, audit).await
+    }
+
+    async fn start_audit(
+        &self,
+        requests: &[EnrichRequest],
+    ) -> Result<Vec<(String, String, Value)>> {
+        let batch = uuid::Uuid::new_v4().to_string();
+        let entries: Vec<_> = requests.iter().enumerate().map(|(index, request)| (
+            uuid::Uuid::new_v4().to_string(), batch.clone(),
+            json!({"request":request,"batch_index":index,"model":self.model,"threshold":self.threshold})
+        )).collect();
+        self.persist_audit(entries.clone(), false).await?;
+        Ok(entries)
+    }
+
+    async fn persist_audit(
+        &self,
+        entries: Vec<(String, String, Value)>,
+        finished: bool,
+    ) -> Result<()> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            for (id, batch, data) in entries {
+                let status = if finished {
+                    data["status"].as_str().unwrap()
+                } else {
+                    "started"
+                };
+                let merchant = data["response"]["merchant"]["data"]["id"].as_str();
+                store.write_log(&id, &batch, status, merchant, &data)?;
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn audit_candidates(
+        &self,
+        inputs: Vec<(EnrichRequest, Result<Vec<store::Candidate>>)>,
+        mut audit: Vec<(String, String, Value)>,
+    ) -> Vec<Result<EnrichResponse>> {
+        for ((request, candidates), (_, _, data)) in inputs.iter().zip(&mut audit) {
+            data["method"] = json!(match candidates {
+                _ if request.validate().is_err() => "invalid_request",
+                Err(_) => "retrieval_error",
+                Ok(c) if c.is_empty() => "no_candidates",
+                Ok(c) if exact_match(request, c) => "exact",
+                Ok(_) => "provider",
+            });
+            if let Ok(candidates) = candidates {
+                data["candidates"] = json!(candidates);
+            }
+        }
+        if let Err(error) = self.persist_audit(audit.clone(), false).await {
+            return inputs
+                .iter()
+                .map(|_| {
+                    Err(anyhow::anyhow!(
+                        "Could not record enrichment evidence: {error:#}"
+                    ))
+                })
+                .collect();
+        }
+        let (results, answers) = self.process_candidates(inputs).await;
+        for ((result, answer), (_, _, data)) in results.iter().zip(answers).zip(&mut audit) {
+            data["provider_answer"] = answer;
+            match result {
+                Ok(response) => {
+                    data["status"] = json!(match response.merchant {
+                        MerchantResult::Matched { .. } => "matched",
+                        MerchantResult::Unresolved { .. } => "unresolved",
+                    });
+                    data["response"] = json!(response);
+                }
+                Err(error) => {
+                    data["status"] = json!("error");
+                    data["error"] = json!(format!("{error:#}"));
+                }
+            }
+        }
+        if let Err(error) = self.persist_audit(audit, true).await {
+            return results
+                .into_iter()
+                .map(|_| {
+                    Err(anyhow::anyhow!(
+                        "Could not finish enrichment log: {error:#}"
+                    ))
+                })
+                .collect();
+        }
+        results
+    }
+
+    async fn process_candidates(
+        &self,
+        inputs: Vec<(EnrichRequest, Result<Vec<store::Candidate>>)>,
+    ) -> (Vec<Result<EnrichResponse>>, Vec<Value>) {
+        let mut answers = vec![Value::Null; inputs.len()];
         let mut results: Vec<Option<Result<EnrichResponse>>> =
             (0..inputs.len()).map(|_| None).collect();
         let mut chunks = Vec::new();
@@ -137,11 +261,7 @@ impl Enricher {
                 results[index] = Some(Ok(unresolved()));
                 continue;
             }
-            if candidates.iter().filter(|c| c.exact).count() == 1
-                && candidates[0].exact
-                && candidates[0].trusted
-                && store::normalize(&request.description).chars().count() >= 3
-            {
+            if exact_match(&request, &candidates) {
                 let response = EnrichResponse {
                     merchant: MerchantResult::Matched {
                         data: candidates[0].merchant.clone(),
@@ -195,28 +315,36 @@ impl Enricher {
             let enricher = self.clone();
             tasks.spawn(async move { enricher.evaluate_chunk(chunk).await });
             if tasks.len() == MAX_IN_FLIGHT {
-                for (index, result) in tasks
+                for (index, result, answer) in tasks
                     .join_next()
                     .await
                     .unwrap()
                     .expect("provider task panicked")
                 {
+                    answers[index] = answer;
                     results[index] = Some(result);
                 }
             }
         }
         while let Some(result) = tasks.join_next().await {
-            for (index, result) in result.expect("provider task panicked") {
+            for (index, result, answer) in result.expect("provider task panicked") {
+                answers[index] = answer;
                 results[index] = Some(result);
             }
         }
-        results
-            .into_iter()
-            .map(|r| r.expect("every transaction has a result"))
-            .collect()
+        (
+            results
+                .into_iter()
+                .map(|r| r.expect("every transaction has a result"))
+                .collect(),
+            answers,
+        )
     }
 
-    async fn evaluate_chunk(&self, chunk: Vec<Pending>) -> Vec<(usize, Result<EnrichResponse>)> {
+    async fn evaluate_chunk(
+        &self,
+        chunk: Vec<Pending>,
+    ) -> Vec<(usize, Result<EnrichResponse>, Value)> {
         let response: Result<Value> = async {
             let response = self
                 .client
@@ -251,7 +379,12 @@ impl Enricher {
                         .map(|r| attributed(r, &pending.candidates))
                     }
                 };
-                (pending.index, result)
+                let answer = response
+                    .as_ref()
+                    .ok()
+                    .map(|r| r["answers"][format!("transaction_{}", pending.index)].clone())
+                    .unwrap_or(Value::Null);
+                (pending.index, result, answer)
             })
             .collect()
     }
@@ -349,6 +482,35 @@ mod tests {
         rx
     }
     #[tokio::test]
+    async fn history_survives_reopen_and_retains_unfinished_attempts() {
+        let path =
+            std::env::temp_dir().join(format!("ultrafinance-log-{}.sqlite", uuid::Uuid::new_v4()));
+        let store = store::MerchantStore::open(&path).unwrap();
+        let enricher =
+            Enricher::with_store(None, "test-model".into(), 0.95, store.clone()).unwrap();
+        enricher
+            .start_audit(&[request("interrupted")])
+            .await
+            .unwrap();
+        enricher.enrich(&request("unknown merchant")).await.unwrap();
+        drop(enricher);
+        drop(store);
+        let store = store::MerchantStore::open(&path).unwrap();
+        let started = store.enrichment_logs(Some("started"), None, 50, 0).unwrap();
+        assert_eq!(started.len(), 1);
+        assert!(started[0]["finished_at"].is_null());
+        assert_eq!(started[0]["data"]["request"]["description"], "interrupted");
+        let completed = store
+            .enrichment_logs(Some("unresolved"), None, 50, 0)
+            .unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["data"]["model"], "test-model");
+        assert!(completed[0]["finished_at"].is_string());
+        assert_eq!(store.enrichment_logs(None, None, 1, 1).unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[tokio::test]
     async fn batches_isolate_evidence_and_preserve_order_with_local_and_invalid_items() {
         let mut enricher = enricher();
         let alpha = candidates(&enricher, "Alpha Cafe");
@@ -377,6 +539,28 @@ mod tests {
                 ..
             })
         ));
+        let logs = enricher.store.enrichment_logs(None, None, 50, 0).unwrap();
+        assert_eq!(logs.len(), 5);
+        let mut logs = logs;
+        logs.sort_by_key(|row| row["data"]["batch_index"].as_u64().unwrap());
+        assert!(logs.iter().all(|row| row["batch_id"] == logs[0]["batch_id"] && row["finished_at"].is_string()));
+        assert_eq!(logs[0]["data"]["method"], "provider");
+        assert_eq!(logs[0]["data"]["provider_answer"]["confidence"], 0.99);
+        assert_eq!(logs[0]["data"]["candidates"][0]["merchant"]["id"], "alpha");
+        assert_eq!(logs[1]["status"], "error");
+        assert!(logs[1]["data"]["error"].is_string());
+        assert_eq!(logs[2]["status"], "unresolved");
+        assert_eq!(logs[2]["data"]["method"], "no_candidates");
+        assert_eq!(logs[3]["data"]["method"], "exact");
+        assert!(logs[3]["data"]["provider_answer"].is_null());
+        assert_eq!(
+            enricher
+                .store
+                .enrichment_logs(Some("matched"), Some("alpha"), 50, 0)
+                .unwrap()
+                .len(),
+            2
+        );
         let body = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(body["state"], json!({}));
         let questions = body["questions"].as_object().unwrap();

@@ -105,12 +105,6 @@ variable "enable_aurora" {
   default     = false
 }
 
-variable "cli_download_image" {
-  description = "Official multi-architecture AWS CLI image used only to download staged inputs."
-  type        = string
-  default     = "public.ecr.aws/aws-cli/aws-cli@sha256:3dacc5db57c923c4223e949795f538ecf1f2212b2b7d5a028b47b97f91564c0d"
-}
-
 variable "aurora_engine_version" {
   description = "Supported Aurora PostgreSQL 17 version in the selected region."
   type        = string

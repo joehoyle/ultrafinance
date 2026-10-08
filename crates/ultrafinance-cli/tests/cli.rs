@@ -168,6 +168,32 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     let result: Value = serde_json::from_slice(&enriched.stdout).unwrap();
     assert_eq!(result["merchant"]["status"], "matched");
     assert_eq!(result["merchant"]["data"]["id"], merchant["id"]);
+    let history = run(
+        &[
+            "--database",
+            db,
+            "logs",
+            "--status",
+            "matched",
+            "--merchant-id",
+            merchant["id"].as_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        history.status.success(),
+        "{}",
+        String::from_utf8_lossy(&history.stderr)
+    );
+    let logs: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(logs.as_array().unwrap().len(), 1);
+    assert_eq!(logs[0]["data"]["method"], "exact");
+    assert_eq!(
+        logs[0]["data"]["request"]["description"],
+        "julius café bromont"
+    );
+    assert_eq!(logs[0]["data"]["response"], result);
+
     std::fs::remove_dir_all(directory).unwrap();
 }
 

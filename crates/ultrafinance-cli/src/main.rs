@@ -47,6 +47,17 @@ enum Command {
         #[command(subcommand)]
         command: DatabaseCommand,
     },
+    /// Inspect private enrichment history as JSON (newest first).
+    Logs {
+        #[arg(long, value_parser = ["started", "matched", "unresolved", "error"])]
+        status: Option<String>,
+        #[arg(long)]
+        merchant_id: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
     /// Enrich a description or a complete JSON request without starting the API.
     Enrich(Box<EnrichArgs>),
     /// Enrich up to 100 transactions using shared provider batches.
@@ -321,6 +332,23 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Logs {
+            status,
+            merchant_id,
+            limit,
+            offset,
+        } => {
+            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&store.enrichment_logs(
+                    status.as_deref(),
+                    merchant_id.as_deref(),
+                    limit,
+                    offset
+                )?)?
+            );
+        }
         Command::Database { command } => {
             let url = cli
                 .database_url

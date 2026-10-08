@@ -57,6 +57,65 @@ enum Backend {
 }
 
 impl MerchantStore {
+    pub(crate) fn write_log(
+        &self,
+        id: &str,
+        batch: &str,
+        status: &str,
+        merchant: Option<&str>,
+        data: &Value,
+    ) -> Result<()> {
+        let data = serde_json::to_string(data)?;
+        match &self.0 {
+            Backend::Postgres(s) => s.write_log(id, batch, status, merchant, &data),
+            Backend::Sqlite(s) => {
+                let connection =
+                    s.0.lock()
+                        .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+                connection.execute("INSERT INTO enrichment_log(id,batch_id,status,merchant_id,data,finished_at) VALUES(?1,?2,?3,?4,?5,CASE WHEN ?3='started' THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END) ON CONFLICT(id) DO UPDATE SET status=excluded.status,merchant_id=excluded.merchant_id,data=excluded.data,finished_at=excluded.finished_at", params![id,batch,status,merchant,data])?;
+                Ok(())
+            }
+        }
+    }
+    /// Inspect private enrichment history, newest first. No provider call is made.
+    pub fn enrichment_logs(
+        &self,
+        status: Option<&str>,
+        merchant: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Value>> {
+        if status.is_some_and(|s| !["started", "matched", "unresolved", "error"].contains(&s)) {
+            bail!("unknown enrichment log status");
+        }
+        if limit == 0 || limit > 1000 || offset > i64::MAX as usize {
+            bail!("log limit must be 1..1000 and offset must fit an integer");
+        }
+        match &self.0 {
+            Backend::Postgres(s) => s.logs(status, merchant, limit, offset),
+            Backend::Sqlite(s) => {
+                let connection =
+                    s.0.lock()
+                        .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+                let mut stmt = connection.prepare("SELECT id,batch_id,status,merchant_id,created_at,finished_at,data FROM enrichment_log WHERE (?1 IS NULL OR status=?1) AND (?2 IS NULL OR merchant_id=?2) ORDER BY created_at DESC,id LIMIT ?3 OFFSET ?4")?;
+                let rows = stmt.query_map(
+                    params![status, merchant, limit as i64, offset as i64],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                            r.get::<_, String>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                            r.get::<_, String>(6)?,
+                        ))
+                    },
+                )?;
+                rows.map(|r| { let (id,batch,status,merchant,created,finished,data) = r?; Ok(serde_json::json!({"id":id,"batch_id":batch,"status":status,"merchant_id":merchant,"created_at":created,"finished_at":finished,"data":serde_json::from_str::<Value>(&data)?})) }).collect()
+            }
+        }
+    }
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self(Backend::Sqlite(SqliteStore::open(path)?)))
     }
@@ -224,6 +283,10 @@ impl SqliteStore {
     fn initialize(mut connection: Connection) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(3))?;
         connection.execute_batch("PRAGMA foreign_keys=ON;
+            CREATE TABLE IF NOT EXISTS enrichment_log(id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('started','matched','unresolved','error')), merchant_id TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), finished_at TEXT, data TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS enrichment_log_created ON enrichment_log(created_at DESC,id);
+            CREATE INDEX IF NOT EXISTS enrichment_log_status ON enrichment_log(status,created_at DESC);
+            CREATE INDEX IF NOT EXISTS enrichment_log_merchant ON enrichment_log(merchant_id,created_at DESC);
             CREATE TABLE IF NOT EXISTS merchants(id TEXT PRIMARY KEY, country TEXT, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS aliases(merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE, normalized TEXT NOT NULL, PRIMARY KEY(merchant_id, normalized));
             CREATE INDEX IF NOT EXISTS aliases_normalized ON aliases(normalized);

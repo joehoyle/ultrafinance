@@ -42,7 +42,6 @@ output "cli_runner" {
   value = local.cli_enabled ? {
     cluster         = aws_ecs_cluster.cli[0].arn
     task_definition = aws_ecs_task_definition.cli[0].arn
-    input_bucket    = aws_s3_bucket.cli_inputs[0].id
     database_secret = aws_secretsmanager_secret.cli_database_url[0].arn
     subnets         = aws_subnet.database[*].id
     security_groups = [aws_security_group.database_client[0].id]

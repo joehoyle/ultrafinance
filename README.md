@@ -314,49 +314,37 @@ cargo run -- merchants add --id mer_EXISTING --name 'Corrected merchant' --count
 cargo run -- merchants link --source merchant-studio --external-id SOURCE_ID --merchant-id mer_EXISTING
 ```
 
-For private Aurora access without a management instance, run the same CLI binary
-as an on-demand ARM64 Fargate task. CLI infrastructure is provisioned automatically
-with Aurora and the application image when you apply with `./infra/tofu.sh`.
-Store a TLS-enabled URL for a separate database write role using a hidden prompt:
+For private Aurora access without a management instance, open an interactive
+shell in the existing Ultrafinance image on an on-demand ARM64 Fargate task:
+
+```sh
+python3 deploy/prod-cli.py
+# Inside the container:
+ultrafinance merchants list --json
+exit
+```
+
+CLI infrastructure is provisioned automatically with Aurora and the application
+image when you apply with `./infra/tofu.sh`. Install the AWS CLI and
+[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+on your machine, and run the shell command in an interactive terminal.
+The runner uses ECS Exec to open `/bin/sh` in the immutable image behind
+Lambda's `live` alias. Tasks use the existing private subnets and NAT gateway
+without a public IP. The runner stops the task when the shell closes, including
+on connection failure or interruption; tasks also expire after one hour.
+
+Configure a separate database write role through a hidden prompt before opening
+a session that needs production database access:
 
 ```sh
 python3 deploy/prod-cli.py --configure-database
-python3 deploy/prod-cli.py -- merchants list --json
-python3 deploy/prod-cli.py --input data/datasets/YOUR_BUNDLE/knowledge.json -- datasets apply @input
-python3 deploy/prod-cli.py --input data/imports/merchant-studio.json -- merchants import @input --format merchant-studio
+python3 deploy/prod-cli.py
 ```
 
-The runner reuses the immutable ECR image deployed to Lambda's `live` alias,
-overriding its entrypoint with `/usr/local/bin/ultrafinance`. Use `--image
-ECR_REPOSITORY@sha256:DIGEST` before a PostgreSQL cutover or to select another
-release explicitly. A short-lived AWS CLI helper downloads the staged input
-into a shared volume before the application container starts; the application
-image needs no additional tools or changes. Tasks use the existing private
-subnets and NAT gateway, run without a public IP, and stop after the command.
-The runner prints CloudWatch logs and fails on task startup or command errors.
-
-For initial migration, use a schema administration URL with `database init`,
-then configure the import-role URL and migrate the catalog:
-
-```sh
-python3 deploy/prod-cli.py -- database init
-python3 deploy/prod-cli.py --configure-database
-python3 deploy/prod-cli.py --input data/ultrafinance.sqlite -- database migrate-sqlite @input
-```
-
-Configure the administration URL through the same hidden prompt before the first
-command; keep the secret on the import role afterwards. Use `--image` for these
-commands if `live` still runs a pre-PostgreSQL release. The SQLite upload uses
-SQLite's backup API to include committed WAL data and leave the local database
-untouched. Migration still requires an empty destination catalog.
-
-Files are staged in a private encrypted S3 bucket and removed after a completed
-task; leftover files expire after seven days. If waiting times out or is
-interrupted, the task continues and its input is preserved. Check the printed
-task ARN before retrying a write: the runner never retries an import itself.
-Secret values stay out of OpenTofu state, command arguments, and runner output.
-Commands that prepare datasets remain local; this runner supports shared-catalog
-merchant operations, database commands, and `datasets apply`.
+The URL is injected from Secrets Manager, outside OpenTofu state and command
+arguments. An empty secret still permits opening a shell, with no database URL
+configured. Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a newer image
+before an initial PostgreSQL cutover. The shell filesystem is temporary.
 
 Imports validate the batch before writing and commit atomically. Writers use a
 transaction advisory lock to serialize imports, corrections, and links across
@@ -368,7 +356,7 @@ SQLite FTS, so compare held-out evaluations before production cutover.
 
 Schema creation is an explicit CLI operation, never an API startup side effect.
 Use a runtime role with `CONNECT`, schema `USAGE`, and `SELECT` on catalog tables
-for Lambda. Use a separate import role with `SELECT`, `INSERT`, `UPDATE`, and
+plus `SELECT`, `INSERT`, and `UPDATE` on `enrichment_log` for Lambda. Use a separate import role with `SELECT`, `INSERT`, `UPDATE`, and
 `DELETE`, and an administration role that can install `pg_trgm` and run schema
 migrations. Configure managed database backups and a connection budget before
 cutover: each Lambda execution environment opens at most one connection on its
@@ -587,6 +575,36 @@ Evaluation fails if the database changes during the run. No aliases or links are
 learned or modified by evaluation. `evals/private/` and `evals/reports/` are ignored
 by Git; reports still contain labels and merchant identifiers.
 
+## Enrichment history
+
+Every transaction submitted to the enrichment core is recorded in `enrichment_log`
+for API, CLI, batch, and enrichment evaluations. Entries include the full input,
+ranked candidate snapshots with scores and provenance, exact/provider/no-candidate
+method, model and threshold, the individual provider answer (including confidence),
+and final response or error. Each attempt has its own ID, batch ID and input index,
+with UTC start and completion timestamps. Repeated transactions keep separate entries.
+A `started` row without a completion timestamp indicates an interrupted or still
+running attempt, including an API deadline. Requests rejected before reaching the
+core, dry runs, and search-only evaluations do not create entries.
+
+```sh
+cargo run -- logs --limit 50
+cargo run -- logs --status unresolved
+cargo run -- logs --status error
+cargo run -- logs --merchant-id mer_example --limit 100 --offset 0
+```
+
+Output is JSON, newest first; limit is 1–1000. Inspection uses the configured
+SQLite or PostgreSQL database and is available through the CLI, with no public
+history endpoint. Input `extra` and candidate evidence are retained as supplied.
+History has no automatic expiry. A log write failure fails enrichment so a result
+is never reported as successfully completed without its history being saved.
+
+Existing SQLite databases gain the table when opened. For PostgreSQL, run
+`cargo run -- database init` with the schema administration role to apply migration
+002 before running the updated application. The runtime role also needs `SELECT`,
+`INSERT`, and `UPDATE` on `enrichment_log`. This migration preserves the catalog.
+
 ## Current scope
 
 This version stores merchants and aliases in PostgreSQL (or local SQLite) and evaluates retrieved
@@ -598,8 +616,7 @@ Jev key produce a configuration error. The server defaults to a local binding.
 The API is public without client authentication. The function URL setup has no
 application request throttle.
 Provider requests have a 20-second timeout,
-and enrichment has a 55-second overall deadline, including database resume. No provider response bodies or
-credentials are logged. Store operations during API enrichment run on Tokio's
+and enrichment has a 55-second overall deadline, including database resume. Enrichment history retains each transaction’s provider answer in the database; credentials are never included by the logging code. Store operations during API enrichment run on Tokio's
 blocking thread pool.
 
 ```sh
