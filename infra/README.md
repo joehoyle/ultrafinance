@@ -71,13 +71,20 @@ cp infra/terraform.tfvars.example infra/terraform.tfvars
 tofu -chdir=infra init
 ```
 
+The example configuration uses `aws_use_cli_credentials = true` for the
+`joehoyle` profile's AWS CLI login chain. `deploy/tofu.py` exports short-lived
+credentials into the OpenTofu process environment without writing them to disk.
+The provider checks account `123456789012` before operating. If using a profile
+that the provider supports directly, set `aws_use_cli_credentials = false` and
+use plain `tofu -chdir=infra` commands instead.
+
 The first apply creates ECR and, if `github_repository` is configured, the GitHub
 OIDC deployment role. It creates no application while `image_uri` is null. This avoids
 requiring a container image before its repository exists:
 
 ```sh
-tofu -chdir=infra plan
-tofu -chdir=infra apply
+python3 deploy/tofu.py plan
+python3 deploy/tofu.py apply
 ```
 
 Build and push a uniquely tagged image (repository tags are immutable):
@@ -107,8 +114,8 @@ Supply your provider key without putting it in source files:
 ```sh
 read -r -s TF_VAR_typesafe_api_key
 export TF_VAR_typesafe_api_key
-tofu -chdir=infra plan
-tofu -chdir=infra apply
+python3 deploy/tofu.py plan
+python3 deploy/tofu.py apply
 tofu -chdir=infra output -raw site_url
 ```
 

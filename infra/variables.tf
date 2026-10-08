@@ -2,6 +2,20 @@ variable "aws_profile" {
   type    = string
   default = "joehoyle"
 }
+variable "aws_use_cli_credentials" {
+  description = "Use temporary credentials exported by deploy/tofu.py for AWS CLI login profiles."
+  type        = bool
+  default     = false
+}
+variable "aws_account_id" {
+  description = "Optional AWS account guard for infrastructure operations."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.aws_account_id == null ? true : can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "AWS account ID must contain 12 digits."
+  }
+}
 variable "aws_region" {
   type    = string
   default = "ca-central-1"
