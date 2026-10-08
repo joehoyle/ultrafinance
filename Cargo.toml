@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/ultrafinance-core", "crates/ultrafinance-api", "crates/ultrafinance-cli"]
+default-members = ["crates/ultrafinance-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+unicode-normalization = "0.1"
+strsim = "0.11"
+uuid = { version = "1", features = ["v4"] }

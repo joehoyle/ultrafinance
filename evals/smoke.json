@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "merchant-studio-smoke",
+  "cases": [
+    {"id":"amazon-alias", "request":{"description":"amzn mktp","country":"CA"}, "expected":{"status":"matched","merchant":{"source":"merchant-studio","external_id":"amazon"}}},
+    {"id":"amazon-typo", "request":{"description":"amazn marketplace","country":"CA"}, "expected":{"status":"matched","merchant":{"source":"merchant-studio","external_id":"amazon"}}},
+    {"id":"aws-not-amazon", "request":{"description":"amazon web services","country":"US"}, "expected":{"status":"matched","merchant":{"source":"merchant-studio","external_id":"aws"}}},
+    {"id":"unidentifiable-abbreviation", "request":{"description":"LS","country":"CA"}, "expected":{"status":"unresolved"}}
+  ]
+}

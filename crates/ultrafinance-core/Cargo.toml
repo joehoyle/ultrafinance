@@ -1,0 +1,15 @@
+[package]
+name = "ultrafinance-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+unicode-normalization.workspace = true
+strsim.workspace = true
+uuid.workspace = true
+tokio.workspace = true

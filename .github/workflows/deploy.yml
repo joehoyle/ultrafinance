@@ -1,0 +1,73 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'website/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'deploy/**'
+      - 'data/merchants.example.json'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Let an in-progress promotion finish before starting another release.
+concurrency:
+  group: ultrafinance-live
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != '' && vars.ECR_REPOSITORY != ''
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ca-central-1' }}
+      LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME || 'ultrafinance' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Verify release tooling
+        run: python3 -m unittest discover -s deploy -p 'test_*.py'
+      - name: Check repository configuration
+        env:
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          test -n "$DEPLOY_ROLE" || { echo 'Set AWS_DEPLOY_ROLE_ARN after applying infrastructure.'; exit 1; }
+          test -n "$ECR_REPOSITORY" || { echo 'Set ECR_REPOSITORY after applying infrastructure.'; exit 1; }
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ultrafinance-${{ github.run_id }}
+      - name: Login to ECR
+        run: |
+          registry=${ECR_REPOSITORY%%/*}
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-from: type=gha,scope=ultrafinance-arm64
+          cache-to: type=gha,scope=ultrafinance-arm64,mode=max
+      - name: Publish, check and promote
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: python3 deploy/release.py "$ECR_REPOSITORY@$IMAGE_DIGEST"

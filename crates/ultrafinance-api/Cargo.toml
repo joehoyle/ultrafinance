@@ -1,0 +1,14 @@
+[package]
+name = "ultrafinance-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+ultrafinance-core = { path = "../ultrafinance-core" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

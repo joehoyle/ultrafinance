@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8f2">
+  <meta name="description" content="Ultrafinance is an open-source merchant enrichment service. Turn messy transaction descriptions into structured merchant data with one API request.">
+  <title>Ultrafinance · Make sense of the spend.</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%23d5f86b'/%3E%3Cpath d='M23 6 10 23h10l-3 11 13-17H20z' fill='%23191e16'/%3E%3C/svg%3E">
+  <style>
+    :root { color-scheme: light; --paper: #f7f8f2; --ink: #20251b; --muted: #73786b; --line: #dde1d3; --lime: #d5f86b; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; }
+    a:focus-visible, button:focus-visible { outline: 3px solid #58761c; outline-offset: 5px; }
+    .wrap { max-width: 1200px; margin: auto; padding: 0 48px; }
+    nav { height: 112px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }
+    .brand { display: inline-flex; align-items: center; gap: 11px; font-size: 21px; font-weight: 750; letter-spacing: -.8px; }
+    .mark { width: 33px; height: 33px; background: var(--lime); border-radius: 9px; display: grid; place-items: center; }
+    .mark svg { width: 20px; height: 24px; }
+    .github { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; }
+    .github svg { width: 19px; height: 19px; }
+    .arrow { margin-left: 5px; font-size: 17px; }
+    main { padding: 86px 0 72px; }
+    .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 52px; align-items: center; }
+    .eyebrow { display: flex; align-items: center; gap: 9px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1.2px; text-transform: uppercase; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #66872c; box-shadow: 0 0 0 4px #eaf0df; }
+    h1 { font-size: clamp(48px, 5.5vw, 72px); line-height: 1.04; font-weight: 650; letter-spacing: -4px; margin: 27px 0 25px; }
+    h1 span { display: inline-block; background: var(--lime); padding: 0 7px 5px; margin-left: -7px; transform: rotate(-1.5deg); }
+    .intro { max-width: 390px; color: #646b5c; font-size: 17px; line-height: 1.7; margin: 0; }
+    .actions { display: flex; gap: 23px; align-items: center; margin-top: 31px; }
+    .primary { background: var(--ink); color: #fff; padding: 15px 19px; border-radius: 7px; transition: background .15s, transform .15s; }
+    .primary:hover { background: #3a452c; transform: translateY(-2px); }
+    .secondary { font-size: 13px; border-bottom: 1px solid #a7ad9b; padding: 5px 0; }
+    .meta { margin-top: 24px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); }
+    .demo { background: #fff; border: 1px solid var(--line); border-radius: 13px; overflow: hidden; box-shadow: 0 12px 40px #27321a08; }
+    .demo-head { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 15px 20px; }
+    .tabs { display: flex; gap: 5px; }
+    .tab { border: 0; background: transparent; color: #626957; padding: 7px 11px; border-radius: 5px; cursor: pointer; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .tab[aria-selected="true"] { background: #edf1e6; color: var(--ink); font-weight: 600; }
+    .copy { border: 0; background: transparent; color: #626957; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 11px; padding: 7px; }
+    .copy svg { width: 14px; height: 14px; }
+    .code-area { padding: 25px 24px 28px; min-height: 236px; }
+    .label { color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 17px; }
+    pre { margin: 0; font: 12px/1.9 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; overflow-x: auto; tab-size: 2; }
+    .cmd { color: #6b822f; } .string { color: #7e583d; } .key { color: #52617e; } .dim { color: #747d69; }
+    .response { background: #f0f3e9; border-top: 1px solid var(--line); padding: 21px 24px 23px; }
+    .response .label { display: flex; justify-content: space-between; margin-bottom: 13px; }
+    .status { color: #58712e; letter-spacing: 0; }
+    .note { font-size: 11px; line-height: 1.6; color: #657058; margin: 13px 0 0; }
+    .details { display: grid; grid-template-columns: repeat(3, 1fr); gap: 35px; margin-top: 78px; padding-top: 29px; border-top: 1px solid var(--line); }
+    .number { font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; color: #7b846d; }
+    .lookup { margin-top: 64px; scroll-margin-top: 24px; }
+    .lookup-heading { font-size: 28px; letter-spacing: -1px; margin-bottom: 12px; }
+    .lookup-intro { color: #6a725f; font-size: 14px; line-height: 1.7; margin: 0 0 25px; }
+    .lookup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+    .lookup-form { display: grid; gap: 16px; align-content: start; }
+    .field { display: grid; gap: 8px; font-size: 12px; font-weight: 600; }
+    .field input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 12px; font: inherit; font-size: 14px; color: var(--ink); }
+    .field input:focus-visible { outline: 2px solid #58761c; outline-offset: 2px; }
+    .optional { font-weight: 400; color: var(--muted); }
+    .context-fields { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .credentials summary { cursor: pointer; font-size: 12px; color: #646b5c; }
+    .credentials .field { margin-top: 12px; }
+    .lookup-form .primary { border: 0; cursor: pointer; font-size: 13px; font-weight: 600; justify-self: start; }
+    .lookup-form .primary:disabled { opacity: .6; cursor: wait; transform: none; }
+    .lookup-result { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: #f0f3e9; padding: 23px; }
+    .lookup-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; }
+    .lookup-result[data-state="error"] { background: #fff4ef; border-color: #e7cbbd; }
+    .lookup-result[data-state="matched"] { background: #edf5df; }
+    #lookup-status { font-size: 16px; font-weight: 600; margin: 16px 0 10px; }
+    #lookup-message { color: #657058; font-size: 13px; line-height: 1.6; margin: 0 0 18px; }
+    @media (max-width: 720px) { .lookup-grid { grid-template-columns: 1fr; gap: 24px; } .lookup { margin-top: 46px; } }
+    h2 { margin: 13px 0 9px; font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
+    .details p { color: #6a725f; font-size: 13px; line-height: 1.7; margin: 0; max-width: 290px; }
+    footer { border-top: 1px solid var(--line); padding: 24px 0 30px; display: flex; justify-content: space-between; gap: 20px; color: #78806d; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    footer a:hover, .secondary:hover { color: var(--ink); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    [hidden] { display: none !important; }
+    @media (min-width: 1400px) { main { padding-top: 110px; } }
+    @media (max-width: 900px) { .wrap { padding: 0 28px; } .hero { gap: 28px; } h1 { font-size: 56px; letter-spacing: -3px; } pre { font-size: 11px; } .code-area, .response { padding-left: 18px; padding-right: 18px; } }
+    @media (max-width: 720px) { nav { height: 85px; } main { padding: 52px 0 46px; } .hero { grid-template-columns: 1fr; gap: 40px; } h1 { font-size: clamp(49px, 9vw, 66px); } .intro { max-width: 440px; } .details { margin-top: 45px; gap: 22px; } pre { font-size: 12px; } }
+    @media (max-width: 460px) { .wrap { padding: 0 22px; } .brand { font-size: 19px; } nav .github .nav-label { display: none; } .details { grid-template-columns: 1fr; gap: 24px; } .details p { max-width: none; } .details h2 { margin-top: 7px; } footer { font-size: 10px; } .actions { gap: 18px; } pre { font-size: 11px; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .primary { transition: none; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" style="display:none"><symbol id="github-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M12 .8a11.2 11.2 0 0 0-3.54 21.83c.56.1.77-.24.77-.54v-2.1c-3.12.68-3.78-1.33-3.78-1.33-.51-1.3-1.24-1.65-1.24-1.65-1.02-.7.08-.69.08-.69 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.94.1-.73.39-1.22.71-1.5-2.49-.28-5.1-1.25-5.1-5.54 0-1.22.43-2.22 1.15-3-.12-.29-.5-1.42.11-2.96 0 0 .94-.3 3.08 1.15a10.76 10.76 0 0 1 5.6 0c2.14-1.45 3.08-1.15 3.08-1.15.61 1.54.23 2.67.11 2.96.72.78 1.15 1.78 1.15 3 0 4.3-2.62 5.25-5.11 5.53.4.35.76 1.03.76 2.08v3.1c0 .3.2.65.77.54A11.2 11.2 0 0 0 12 .8Z"/></symbol></svg>
+  <div class="wrap">
+    <nav aria-label="Main navigation">
+      <a class="brand" href="./" aria-label="Ultrafinance home"><span class="mark"><svg viewBox="0 0 24 28" aria-hidden="true"><path fill="currentColor" d="M14 1 3 16h9L9 27l12-16h-9z"/></svg></span>Ultrafinance</a>
+      <a class="github" data-repo href="https://github.com/" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#github-icon"/></svg><span class="nav-label">View on GitHub</span><span class="arrow" aria-hidden="true">↗</span></a>
+    </nav>
+    <main>
+      <section class="hero" aria-labelledby="headline">
+        <div>
+          <div class="eyebrow"><span class="dot" aria-hidden="true"></span>Merchant enrichment for developers</div>
+          <h1 id="headline">Make sense<br>of the <span>spend.</span></h1>
+          <p class="intro">Messy transaction descriptions in. Structured merchant data out. One simple API for your app, with open source at its core.</p>
+          <div class="actions">
+            <a class="github primary" href="#try-it">Try it<span class="arrow" aria-hidden="true">↓</span></a>
+            <a class="github secondary" data-repo href="https://github.com/" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#github-icon"/></svg>Open source <span aria-hidden="true">↗</span></a>
+          </div>
+          <p class="meta">ultrafinance.app &nbsp; / &nbsp; Built in Rust</p>
+        </div>
+        <div class="demo" id="example" aria-label="Usage example">
+          <div class="demo-head">
+            <div class="tabs" role="tablist" aria-label="Example interface">
+              <button class="tab" id="api-tab" role="tab" aria-selected="true" aria-controls="api-example" tabindex="0">Hosted API</button>
+              <button class="tab" id="cli-tab" role="tab" aria-selected="false" aria-controls="cli-example" tabindex="-1">Self-hosted</button>
+            </div>
+            <button class="copy" id="copy" aria-label="Copy example command"><svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M12 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h2"/></svg><span id="copy-label">Copy</span></button>
+          </div>
+          <div class="code-area">
+            <div class="label">01 / Example request</div>
+            <pre id="api-example" role="tabpanel" aria-labelledby="api-tab" tabindex="0"><code><span class="cmd">curl</span> https://ultrafinance.app/v1/enrich \
+  -H <span class="string">'Content-Type: application/json'</span> \
+  -d <span class="string">'{
+    "description": "LS",
+    "amount": "142.97",
+    "currency": "CAD",
+    "country": "CA"
+  }'</span></code></pre>
+            <pre id="cli-example" role="tabpanel" aria-labelledby="cli-tab" tabindex="0" hidden><code><span class="dim"># No HTTP server needed</span>
+<span class="cmd">cargo run</span> -- enrich <span class="string">'LS'</span> \
+  --amount <span class="string">142.97</span> \
+  --currency <span class="string">CAD</span> \
+  --country <span class="string">CA</span></code></pre>
+          </div>
+          <div class="response">
+            <div class="label"><span>02 / Example response</span><span class="status">200 OK</span></div>
+            <pre><code>{
+  <span class="key">"merchant"</span>: { <span class="key">"status"</span>: <span class="string">"unresolved"</span>, <span class="key">"data"</span>: null }
+}</code></pre>
+            <p class="note">Not enough evidence? The API can return unresolved. Hosted endpoint shown for illustration.</p>
+          </div>
+        </div>
+      </section>
+      <section class="lookup" id="try-it" aria-labelledby="lookup-heading">
+        <div class="eyebrow"><span class="dot" aria-hidden="true"></span>Try a real lookup</div>
+        <h2 class="lookup-heading" id="lookup-heading">What’s behind the transaction?</h2>
+        <p class="lookup-intro">Enter a transaction description. Add a little context, and see what the API returns.</p>
+        <div class="lookup-grid">
+          <form class="lookup-form" id="lookup-form">
+            <label class="field" for="description"><span>Transaction description</span><input id="description" name="description" placeholder="e.g. LS" required maxlength="4096" autocomplete="off" aria-describedby="lookup-privacy"></label>
+            <div class="context-fields">
+              <label class="field" for="amount"><span>Amount <span class="optional">optional</span></span><input id="amount" name="amount" placeholder="142.97" inputmode="decimal" pattern="-?[0-9]+([.][0-9]+)?" title="Enter a decimal amount, such as 142.97."></label>
+              <label class="field" for="currency"><span>Currency <span class="optional">optional</span></span><input id="currency" name="currency" placeholder="CAD" maxlength="3" pattern="[A-Za-z]{3}" title="Use a three-letter currency code, such as CAD."></label>
+              <label class="field" for="country"><span>Country <span class="optional">optional</span></span><input id="country" name="country" placeholder="CA" maxlength="2" pattern="[A-Za-z]{2}" title="Use a two-letter country code, such as CA."></label>
+            </div>
+            <p class="note" id="lookup-privacy">Your input is sent to the service and may be evaluated by its AI provider. Use a sample description without personal information.</p>
+            <button class="primary" id="lookup-submit" type="submit">Look up merchant <span aria-hidden="true">↗</span></button>
+            <noscript><p class="note">Enable JavaScript for interactive lookup, or use the HTTP example above.</p></noscript>
+          </form>
+          <div class="lookup-result" id="lookup-result" data-state="idle" aria-busy="false">
+            <div class="label">Live API response</div>
+            <div role="status" aria-live="polite" aria-atomic="true"><p id="lookup-status">Ready when you are.</p><p id="lookup-message">Your lookup result will appear here. Uncertain matches can stay unresolved.</p></div>
+            <pre id="lookup-json" tabindex="0" aria-label="Lookup response JSON" hidden></pre>
+          </div>
+        </div>
+      </section>
+      <section class="details" aria-label="How it works">
+        <div><span class="number">01 / INPUT</span><h2>Start with what you have.</h2><p>Only a description is required. Add amount, currency, country, or extra context when you have it.</p></div>
+        <div><span class="number">02 / EVALUATE</span><h2>Clear results. Honest uncertainty.</h2><p>Get a merchant match when the evidence supports it. Ambiguous transactions can stay unresolved.</p></div>
+        <div><span class="number">03 / BUILD</span><h2>Hosted convenience. Open source.</h2><p>Build against the hosted API, or run the Rust service yourself. The code is yours to explore.</p></div>
+      </section>
+    </main>
+    <footer><span>Ultrafinance <span aria-hidden="true">/</span> ultrafinance.app</span><a data-readme href="https://github.com/" target="_blank" rel="noopener noreferrer">Source on GitHub <span aria-hidden="true">↗</span></a></footer>
+    <span class="sr-only" id="announcement" role="status" aria-live="polite"></span>
+  </div>
+  <script>
+    const lookupForm = document.getElementById('lookup-form');
+    const lookupResult = document.getElementById('lookup-result');
+    const lookupSubmit = document.getElementById('lookup-submit');
+    const lookupJson = document.getElementById('lookup-json');
+    const lookupStatus = document.getElementById('lookup-status');
+    const lookupMessage = document.getElementById('lookup-message');
+    document.getElementById('description').addEventListener('input', event => event.target.setCustomValidity(''));
+    lookupForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (lookupSubmit.disabled) return;
+      const description = document.getElementById('description');
+      if (!description.value.trim()) {
+        description.setCustomValidity('Enter a transaction description.');
+        description.reportValidity();
+        return;
+      }
+      const request = { description: description.value.trim() };
+      for (const field of ['amount', 'currency', 'country']) {
+        const value = document.getElementById(field).value.trim();
+        if (value) request[field] = field === 'amount' ? value : value.toUpperCase();
+      }
+      const headers = { 'Content-Type': 'application/json' };
+      lookupSubmit.disabled = true;
+      lookupSubmit.textContent = 'Looking up…';
+      lookupResult.dataset.state = 'loading';
+      lookupResult.setAttribute('aria-busy', 'true');
+      lookupStatus.textContent = 'Finding the merchant…';
+      lookupMessage.textContent = 'Evaluating the description and available evidence.';
+      lookupJson.hidden = true;
+      lookupJson.textContent = '';
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      try {
+        const response = await fetch('/v1/enrich', {
+          method: 'POST', headers, body: JSON.stringify(request), signal: controller.signal,
+          credentials: 'omit', redirect: 'error', cache: 'no-store',
+        });
+        let result;
+        try { result = await response.json(); }
+        catch { throw new Error('The service returned an unreadable response. Please try again.'); }
+        if (!response.ok) {
+          lookupResult.dataset.state = 'error';
+          lookupStatus.textContent = `Lookup failed · HTTP ${response.status}`;
+          lookupMessage.textContent = typeof result?.error?.message === 'string'
+            ? result.error.message
+            : 'The service could not complete this lookup. Please try again.';
+        } else if (result?.merchant?.status === 'matched' && typeof result.merchant.data?.name === 'string') {
+          lookupResult.dataset.state = 'matched';
+          lookupStatus.textContent = result.merchant.data.name;
+          lookupMessage.textContent = 'Merchant matched. The complete response is below.';
+        } else if (result?.merchant?.status === 'unresolved') {
+          lookupResult.dataset.state = 'unresolved';
+          lookupStatus.textContent = 'No confident match yet.';
+          lookupMessage.textContent = 'There wasn’t enough evidence to identify a merchant. Try a clearer description or add country and currency. An empty merchant catalog also returns unresolved.';
+        } else {
+          throw new Error('The service returned an unexpected result. Please try again.');
+        }
+        lookupJson.textContent = JSON.stringify(result, null, 2);
+        lookupJson.hidden = false;
+      } catch (error) {
+        lookupResult.dataset.state = 'error';
+        lookupStatus.textContent = 'Couldn’t complete the lookup.';
+        lookupMessage.textContent = error.name === 'AbortError'
+          ? 'The lookup timed out. Please try again.'
+          : error instanceof TypeError
+            ? 'Couldn’t connect to the API. Check your connection and make sure this page is served by the Ultrafinance service.'
+            : error.message;
+      } finally {
+        clearTimeout(timeout);
+        lookupSubmit.disabled = false;
+        lookupSubmit.textContent = 'Look up merchant ↗';
+        lookupResult.setAttribute('aria-busy', 'false');
+      }
+    });
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
+    function selectTab(tab) {
+      tabs.forEach(item => {
+        const selected = item === tab;
+        item.setAttribute('aria-selected', String(selected));
+        item.tabIndex = selected ? 0 : -1;
+        document.getElementById(item.getAttribute('aria-controls')).hidden = !selected;
+      });
+      document.getElementById('copy-label').textContent = 'Copy';
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => selectTab(tab));
+      tab.addEventListener('keydown', event => {
+        let next;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') next = tabs[(index + 1) % tabs.length];
+        if (event.key === 'Home') next = tabs[0];
+        if (event.key === 'End') next = tabs[tabs.length - 1];
+        if (next) { event.preventDefault(); selectTab(next); next.focus(); }
+      });
+    });
+    let copyTimer;
+    document.getElementById('copy').addEventListener('click', async () => {
+      const panel = document.querySelector('[role="tabpanel"]:not([hidden])');
+      try {
+        await navigator.clipboard.writeText(panel.textContent);
+        document.getElementById('copy-label').textContent = 'Copied!';
+        document.getElementById('announcement').textContent = 'Example command copied.';
+      } catch {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(panel);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.getElementById('copy-label').textContent = 'Select + copy';
+        document.getElementById('announcement').textContent = 'Command selected. Press Control C or Command C to copy.';
+      }
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { document.getElementById('copy-label').textContent = 'Copy'; }, 2200);
+    });
+  </script>
+</body>
+</html>

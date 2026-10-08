@@ -1,0 +1,18 @@
+[package]
+name = "ultrafinance-cli"
+default-run = "ultrafinance"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ultrafinance"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+ultrafinance-core = { path = "../ultrafinance-core" }
+uuid.workspace = true
+comfy-table = "8"
