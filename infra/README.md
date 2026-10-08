@@ -109,11 +109,15 @@ This digest bootstraps the first published version and `live` alias. Routine
 releases use the deployment command below.
 Keep this setting after deployment: removing it would plan deletion of the app resources.
 
-Supply your provider key without putting it in source files:
+Copy `.env.example` to `.env` in the repository root and set `TYPESAFE_API_KEY`.
+The ignored `.env` file is the local credential store. `deploy/tofu.py` forwards
+that key to the sensitive `typesafe_api_key` variable on each invocation, so future
+applies retain it. An explicit `TF_VAR_typesafe_api_key` overrides the environment
+and `.env`; an exported `TYPESAFE_API_KEY` overrides `.env`.
+
+Apply the provider configuration:
 
 ```sh
-read -r -s TF_VAR_typesafe_api_key
-export TF_VAR_typesafe_api_key
 python3 deploy/tofu.py plan
 python3 deploy/tofu.py apply
 tofu -chdir=infra output -raw site_url
@@ -124,7 +128,10 @@ fuzzy evaluation requires a valid TypeSafe key. The key is a sensitive OpenTofu
 input, stored in local state and Lambda environment configuration. Keep state
 private and backed up; do not commit it or saved plan files. Before sharing this
 infrastructure among operators, configure an encrypted remote backend with locking.
-Future applies must supply the provider key to keep it configured.
+For local CLI/API commands, load `.env` with `set -a; source .env; set +a`.
+The Rust processes read environment variables directly.
+After changing Lambda environment settings, promote the newly published version
+through the routine release command so the `live` alias receives the updated key.
 
 Verify the resulting site:
 
