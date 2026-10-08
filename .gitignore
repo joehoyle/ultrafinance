@@ -21,3 +21,15 @@ crash.log
 
 __pycache__/
 *.pyc
+
+# Local infrastructure metadata and authentication configuration.
+**/.terraform.lock.hcl
+*.tfvars.json
+*.tfbackend
+*.plan
+.terraformrc
+terraform.rc
+credentials.tfrc.json
+.aws/
+.codex/
+.agents/

@@ -74,7 +74,7 @@ tofu -chdir=infra init
 The example configuration uses `aws_use_cli_credentials = true` for the
 `joehoyle` profile's AWS CLI login chain. `deploy/tofu.py` exports short-lived
 credentials into the OpenTofu process environment without writing them to disk.
-The provider checks account `123456789012` before operating. If using a profile
+Set `aws_account_id` to your account ID; the provider checks it before operating. If using a profile
 that the provider supports directly, set `aws_use_cli_credentials = false` and
 use plain `tofu -chdir=infra` commands instead.
 
@@ -256,3 +256,5 @@ aliases to CloudFront. It preserves existing email and other unmanaged records.
 The zone is protected with `prevent_destroy`. The certificate is issued in
 `us-east-1` for CloudFront; the Lambda function stays in the configured region.
 `site_url` returns the custom domain once configured.
+
+Infrastructure state, plans, real variable files, and the provider lock file stay local and are ignored. The AWS provider version is pinned in `versions.tf`.
