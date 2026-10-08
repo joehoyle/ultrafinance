@@ -21,7 +21,11 @@ pub struct InfraArgs {
 #[derive(Subcommand)]
 enum InfraCommand {
     /// Build an ARM64 image, check a published version, and promote live.
-    Deploy,
+    Deploy {
+        /// Release an already-pushed immutable ECR digest without rebuilding.
+        #[arg(long)]
+        image: Option<String>,
+    },
     /// Open the interactive production CLI shell using ECS Exec.
     #[command(alias = "shell")]
     Cli {
@@ -79,6 +83,22 @@ fn checked(command: &mut Command) -> Result<()> {
 }
 
 fn output(root: &Path, name: &str) -> Result<String> {
+    let variable = match name {
+        "aws_profile" => Some("AWS_PROFILE"),
+        "aws_region" => Some("AWS_REGION"),
+        "function_name" => Some("LAMBDA_FUNCTION_NAME"),
+        "repository_url" => Some("ECR_REPOSITORY"),
+        "site_url" => Some("ULTRAFINANCE_SITE_URL"),
+        _ => None,
+    };
+    if let Some(variable) = variable
+        && let Ok(value) = std::env::var(variable)
+    {
+        if value.is_empty() && name != "aws_profile" {
+            bail!("{variable} must not be empty");
+        }
+        return Ok(value);
+    }
     let result = Command::new("tofu")
         .current_dir(root)
         .args(["-chdir=infra", "output", "-raw", name])
@@ -100,7 +120,7 @@ fn output(root: &Path, name: &str) -> Result<String> {
 pub fn run(args: InfraArgs) -> Result<()> {
     let root = workspace(args.workspace)?;
     match args.command {
-        InfraCommand::Deploy => release::deploy(&root),
+        InfraCommand::Deploy { image } => release::deploy(&root, image.as_deref()),
         InfraCommand::Cli { image, latest } => {
             let selection = if latest {
                 shell::ImageSelection::Latest

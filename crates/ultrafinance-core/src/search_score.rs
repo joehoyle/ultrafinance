@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 /// Reuse query tokenization and edit distances within one search.
 pub(crate) struct Scorer<'a> {
+    query: &'a str,
     query_comparator: BatchComparator<char>,
     query_len: usize,
     tokens: Vec<&'a str>,
@@ -20,6 +21,7 @@ impl<'a> Scorer<'a> {
             .collect();
         tokens.sort_unstable();
         Self {
+            query,
             query_comparator: BatchComparator::new(query.chars()),
             query_len: query.chars().count(),
             token_comparators: tokens
@@ -74,9 +76,52 @@ impl<'a> Scorer<'a> {
                 .normalized_similarity(name.chars())
                 .max(token_similarity)
         };
-        let score = 0.7 * whole + 0.3 * overlap;
+        let score = (0.7 * whole + 0.3 * overlap).max(contained_name_score(self.query, &name));
         self.scores.insert(name, score);
         score
+    }
+}
+
+// A complete name inside a noisy description is strong retrieval evidence, but
+// never an exact/trusted match. Respect token boundaries and avoid boosting
+// short abbreviations or names consisting entirely of transaction vocabulary.
+fn contained_name_score(query: &str, name: &str) -> f64 {
+    let meaningful = name.split_whitespace().any(|word| {
+        word.chars().count() >= 3
+            && !matches!(
+                word,
+                "purchase"
+                    | "payment"
+                    | "transfer"
+                    | "credit"
+                    | "debit"
+                    | "refund"
+                    | "store"
+                    | "online"
+                    | "transaction"
+                    | "pending"
+                    | "card"
+                    | "pos"
+                    | "visa"
+                    | "mastercard"
+                    | "from"
+                    | "to"
+            )
+            && word.chars().any(char::is_alphabetic)
+    });
+    if !meaningful || name.chars().count() < 5 {
+        return 0.0;
+    }
+    let contained = query.match_indices(name).any(|(start, _)| {
+        (start == 0 || query.as_bytes()[start - 1] == b' ')
+            && (start + name.len() == query.len() || query.as_bytes()[start + name.len()] == b' ')
+    });
+    if contained {
+        // Prefer the more specific name when both a brand and a longer business
+        // name occur in the same description. Keep exact full-query scores higher.
+        0.85 + 0.1 * name.chars().count() as f64 / query.chars().count().max(1) as f64
+    } else {
+        0.0
     }
 }
 #[cfg(test)]
@@ -95,7 +140,8 @@ mod tests {
             })
             .sum::<f64>()
             / aa.len().max(1) as f64;
-        0.7 * strsim::normalized_levenshtein(query, name).max(token) + 0.3 * overlap
+        (0.7 * strsim::normalized_levenshtein(query, name).max(token) + 0.3 * overlap)
+            .max(contained_name_score(query, name))
     }
     #[test]
     fn optimized_distance_matches_reference_across_lengths_and_unicode() {
@@ -121,7 +167,7 @@ mod tests {
         }
     }
     #[test]
-    fn cached_scoring_preserves_unicode_and_original_scoring_formula() {
+    fn cached_scoring_preserves_unicode_and_scoring_formula() {
         for query in [
             "payment from adidas",
             "julius cafe bromont",
@@ -153,8 +199,9 @@ mod tests {
                     })
                     .sum::<f64>()
                     / aa.len().max(1) as f64;
-                let expected =
-                    0.7 * strsim::normalized_levenshtein(query, name).max(token) + 0.3 * overlap;
+                let expected = (0.7 * strsim::normalized_levenshtein(query, name).max(token)
+                    + 0.3 * overlap)
+                    .max(contained_name_score(query, name));
                 assert!(
                     (scorer.score(name.into()) - expected).abs() < 1e-12,
                     "{query} / {name}"
@@ -162,5 +209,25 @@ mod tests {
                 assert!((scorer.score(name.into()) - expected).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn embedded_names_respect_boundaries_specificity_and_noise() {
+        let query = "credit card purchase amazon web services store 1005 montreal qc 2026 10 01";
+        let mut scorer = Scorer::new(query);
+        assert!(scorer.score("amazon web services".into()) > 0.85);
+        assert!(scorer.score("amazon web services".into()) > scorer.score("amazon".into()));
+        assert_eq!(contained_name_score(query, "credit card"), 0.0);
+        assert_eq!(contained_name_score(query, "1005"), 0.0);
+        assert_eq!(
+            contained_name_score("payment carpet supertarget 123", "target"),
+            0.0
+        );
+        assert_eq!(contained_name_score("payment uber 123", "uber"), 0.0);
+        assert_eq!(
+            contained_name_score("payment alpha cafe 123", "cafe alpha"),
+            0.0
+        );
+        assert!(Scorer::new("amazon").score("amazon".into()) > scorer.score("amazon".into()));
     }
 }

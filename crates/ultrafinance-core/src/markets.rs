@@ -209,25 +209,6 @@ pub(crate) fn market_counts(
     (unknown, rows)
 }
 
-pub(crate) fn paginate(
-    mut merchants: Vec<Merchant>,
-    market: Option<&str>,
-    limit: usize,
-    offset: usize,
-) -> crate::store::MerchantPage {
-    if let Some(market) = market {
-        merchants.retain(|m| m.markets.iter().any(|c| c == market));
-    }
-    merchants.sort_by_cached_key(|m| (m.name.to_lowercase(), m.id.clone()));
-    let total = merchants.len();
-    crate::store::MerchantPage {
-        merchants: merchants.into_iter().skip(offset).take(limit).collect(),
-        total,
-        limit,
-        offset,
-    }
-}
-
 /// One-time storage migration, not an accepted merchant input format.
 pub(crate) fn migrate_country(data: &str, source_record: bool) -> anyhow::Result<String> {
     let mut value: serde_json::Value = serde_json::from_str(data)?;
@@ -269,7 +250,7 @@ mod tests {
 
     #[test]
     fn market_evidence_combines_sources_outlets_and_manual_declarations() -> anyhow::Result<()> {
-        let store = MerchantStore::memory()?;
+        let store = MerchantStore::temporary()?;
         let studio = r#"{"schemaVersion":"1.1.0","merchants":[{"id":"brand","canonicalName":"Brand","countryHints":["US","CA","CA"]}]}"#;
         let mut records = import::merchant_studio(studio)?;
         let mut regional = records[0].clone();
@@ -339,7 +320,7 @@ mod tests {
 
     #[test]
     fn absent_markets_never_exclude_and_collisions_remain_ambiguous() -> anyhow::Result<()> {
-        let store = MerchantStore::memory()?;
+        let store = MerchantStore::temporary()?;
         for merchant in [
             json!({"id":"a","name":"Same Brand","markets":["US"]}),
             json!({"id":"b","name":"Same Brand","markets":["CA"]}),
@@ -364,7 +345,7 @@ mod tests {
         )?;
         records[0].version = Some("us:snapshot".into());
         records[0].raw = json!({"publisherCountry":"US","countryHints":["NZ","invalid"]});
-        let store = MerchantStore::memory()?;
+        let store = MerchantStore::temporary()?;
         store.import(&records)?;
         let merchant = store.list(None, 10, 0)?.merchants.remove(0);
         assert_eq!(merchant.markets, ["CA", "NZ"]);
@@ -387,101 +368,6 @@ mod tests {
                 )?)
                 .is_err()
         );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod migration_tests {
-    use crate::{import, store::MerchantStore};
-    use rusqlite::{Connection, params};
-    use serde_json::{Value, json};
-    #[test]
-    fn sqlite_migrates_country_once_and_rolls_back_invalid_data() -> anyhow::Result<()> {
-        let directory = std::env::temp_dir().join(format!(
-            "ultrafinance-market-migration-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&directory)?;
-        for invalid in [false, true] {
-            let path = directory.join(format!("{invalid}.sqlite"));
-            let store = MerchantStore::open(&path)?;
-            store.import(&import::catalog(
-                r#"[{"id":"brand","name":"Brand","markets":["CA"]}]"#,
-                "test",
-            )?)?;
-            let id = store.resolve_source("test", "brand")?.unwrap();
-            store.put(&serde_json::from_value(
-                json!({"id":id,"name":"Corrected","markets":["CA"]}),
-            )?)?;
-            let original = store.fingerprint()?;
-            drop(store);
-            let connection = Connection::open(&path)?;
-            connection.execute_batch(
-                "ALTER TABLE merchants ADD COLUMN country TEXT; PRAGMA user_version=1;",
-            )?;
-            for table in ["merchants", "manual_merchants", "source_records"] {
-                let rows: Vec<(i64, String)> = connection
-                    .prepare(&format!("SELECT rowid,data FROM {table}"))?
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<rusqlite::Result<_>>()?;
-                for (rowid, data) in rows {
-                    let mut data: Value = serde_json::from_str(&data)?;
-                    let merchant = if table == "source_records" {
-                        &mut data["merchant"]
-                    } else {
-                        &mut data
-                    };
-                    let object = merchant.as_object_mut().unwrap();
-                    object.remove("markets");
-                    object.insert(
-                        "country".into(),
-                        json!(if invalid && table == "source_records" {
-                            "ca"
-                        } else {
-                            "CA"
-                        }),
-                    );
-                    connection.execute(
-                        &format!("UPDATE {table} SET data=?1 WHERE rowid=?2"),
-                        params![data.to_string(), rowid],
-                    )?;
-                }
-            }
-            drop(connection);
-            let upgraded = MerchantStore::open(&path);
-            if invalid {
-                assert!(upgraded.is_err());
-                let connection = Connection::open(&path)?;
-                assert_eq!(
-                    connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-                    1
-                );
-                let data: String =
-                    connection.query_row("SELECT data FROM manual_merchants", [], |r| r.get(0))?;
-                assert_eq!(serde_json::from_str::<Value>(&data)?["country"], "CA");
-                assert!(connection.prepare("SELECT country FROM merchants").is_ok());
-            } else {
-                let store = upgraded?;
-                assert_eq!(store.fingerprint()?, original);
-                assert_eq!(store.resolve_source("test", "brand")?, Some(id.clone()));
-                let merchant = store.list(Some("CA"), 10, 0)?.merchants.remove(0);
-                assert_eq!(merchant.id, id);
-                assert_eq!(merchant.name, "Corrected");
-                assert_eq!(merchant.markets, ["CA"]);
-                assert!(serde_json::to_value(&merchant)?.get("country").is_none());
-                drop(store);
-                let reopened = MerchantStore::open(&path)?;
-                assert_eq!(reopened.fingerprint()?, original);
-                let connection = Connection::open(&path)?;
-                assert_eq!(
-                    connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-                    3
-                );
-                assert!(connection.prepare("SELECT country FROM merchants").is_err());
-            }
-        }
-        std::fs::remove_dir_all(directory)?;
         Ok(())
     }
 }

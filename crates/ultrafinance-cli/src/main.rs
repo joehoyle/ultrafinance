@@ -1,4 +1,5 @@
 mod batch;
+mod build_metadata;
 mod infra;
 mod output;
 use anyhow::{Context, Result, bail};
@@ -16,20 +17,12 @@ use ultrafinance_core::{EnrichRequest, Enricher, Merchant, load_catalog, store::
 #[derive(Parser)]
 #[command(
     name = "ultrafinance",
-    version,
+    version = env!("ULTRAFINANCE_CLI_VERSION"),
     about = "Test merchant enrichment locally"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// Local SQLite merchant database (used when no PostgreSQL URL is configured).
-    #[arg(
-        long,
-        global = true,
-        env = "ULTRAFINANCE_DB",
-        default_value = "data/ultrafinance.sqlite"
-    )]
-    database: PathBuf,
     /// PostgreSQL connection URL. Prefer the environment variable to keep credentials out of shell history.
     #[arg(
         long,
@@ -44,7 +37,14 @@ struct Cli {
 enum Command {
     /// Deploy the workspace, inspect Lambda logs, or open the production CLI shell.
     Infra(infra::InfraArgs),
-    /// Initialize PostgreSQL or migrate the complete SQLite catalog.
+    /// Preview competing merchant/location interpretations without provider calls.
+    Interpret { description: String },
+    /// Inspect, verify or revoke context-scoped remembered descriptor resolutions.
+    Resolutions {
+        #[command(subcommand)]
+        command: ResolutionCommand,
+    },
+    /// Initialize or upgrade the PostgreSQL schema.
     Database {
         #[command(subcommand)]
         command: DatabaseCommand,
@@ -125,8 +125,23 @@ enum LocationCommand {
 enum DatabaseCommand {
     /// Apply PostgreSQL schema migrations (safe to repeat).
     Init,
-    /// Preserve SQLite IDs, source links, provenance, and manual overrides in an empty PostgreSQL catalog.
-    MigrateSqlite { file: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum ResolutionCommand {
+    /// List remembered mappings and their evidence; no provider calls.
+    List {
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+    /// Verify an existing resolution after independently checking its merchant and context.
+    Confirm {
+        id: String,
+        #[arg(long)]
+        evidence: String,
+    },
+    /// Remove a mapping; its merchant and original history remain available.
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -159,10 +174,29 @@ enum DatasetSource {
     OpenEnrichment,
     Dodatathings,
     Moneyvis,
+    /// Synthetic merchant-labeled descriptions; names-only evaluation catalog.
+    BusinessTransactions,
 }
 
 #[derive(Subcommand)]
 enum MerchantCommand {
+    /// Find duplicates with Jev and automatically merge supported groups.
+    Dedupe {
+        /// Evaluate and report decisions without merging merchants.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
+        model: String,
+        /// Require both same-merchant probability and confidence to reach this value.
+        #[arg(long, default_value = "0.98")]
+        threshold: f64,
+        /// Fail before provider calls if the complete scan exceeds this pair budget.
+        #[arg(long, default_value = "10000", value_parser = clap::value_parser!(u32).range(1..))]
+        max_pairs: u32,
+        /// Also save the JSON report to a file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Show catalog totals and breakdowns by imported source and known market.
     Stats {
         /// Print statistics as JSON for scripts.
@@ -271,7 +305,7 @@ struct EnrichArgs {
     /// Additional evidence as a JSON object.
     #[arg(long)]
     extra: Option<String>,
-    /// Use a JSON catalog instead of the SQLite database for this request.
+    /// Use an isolated PostgreSQL catalog loaded from JSON for this request.
     #[arg(long, env = "ULTRAFINANCE_MERCHANTS")]
     merchants: Option<PathBuf>,
     #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
@@ -395,6 +429,47 @@ async fn main() -> Result<()> {
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
         Command::Infra(args) => infra::run(args)?,
+        Command::Interpret { description } => {
+            let request: EnrichRequest =
+                serde_json::from_value(serde_json::json!({"description":description}))?;
+            request.validate()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ultrafinance_core::interpretation::interpret(
+                    &request
+                ))?
+            );
+        }
+        Command::Resolutions { command } => {
+            let store = MerchantStore::configured(cli.database_url.as_deref())?;
+            match command {
+                ResolutionCommand::List { limit } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&store.resolutions(None, limit)?)?
+                ),
+                ResolutionCommand::Confirm { id, evidence } => {
+                    let mut mapping = store
+                        .resolutions(Some(&id), 1)?
+                        .into_iter()
+                        .next()
+                        .context("resolution not found")?;
+                    mapping.verified = true;
+                    mapping.evidence = Some(evidence);
+                    if !store.save_resolution(&mapping)? {
+                        bail!(
+                            "resolution schema missing; run database init with a schema-owner connection"
+                        );
+                    }
+                    println!("Verified {}", mapping.id);
+                }
+                ResolutionCommand::Revoke { id } => {
+                    if !store.revoke_resolution(&id)? {
+                        bail!("resolution not found");
+                    }
+                    println!("Revoked {id}");
+                }
+            }
+        }
         Command::Logs {
             json,
             status,
@@ -402,7 +477,7 @@ async fn main() -> Result<()> {
             limit,
             offset,
         } => {
-            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            let store = MerchantStore::configured(cli.database_url.as_deref())?;
             output::enrichment_logs(
                 &store.enrichment_logs(status.as_deref(), merchant_id.as_deref(), limit, offset)?,
                 json,
@@ -413,24 +488,16 @@ async fn main() -> Result<()> {
             let url = cli
                 .database_url
                 .as_deref()
-                .context("set ULTRAFINANCE_DATABASE_URL for PostgreSQL commands")?;
+                .unwrap_or(ultrafinance_core::store::LOCAL_DATABASE_URL);
             match command {
                 DatabaseCommand::Init => {
                     MerchantStore::initialize_postgres(url)?;
                     println!("PostgreSQL schema is ready");
                 }
-                DatabaseCommand::MigrateSqlite { file } => {
-                    let store = MerchantStore::postgres(url)?;
-                    let count = store.migrate_sqlite(&file)?;
-                    println!(
-                        "{}",
-                        serde_json::json!({"migrated":count,"database_fingerprint":store.fingerprint()?})
-                    );
-                }
             }
         }
         Command::Locations { command } => {
-            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            let store = MerchantStore::configured(cli.database_url.as_deref())?;
             match command {
                 LocationCommand::Import { file } => {
                     let records: Vec<ultrafinance_core::location::LocationRecord> =
@@ -474,6 +541,9 @@ async fn main() -> Result<()> {
                         ultrafinance_core::datasets::Source::DoDataThings
                     }
                     DatasetSource::Moneyvis => ultrafinance_core::datasets::Source::MoneyVis,
+                    DatasetSource::BusinessTransactions => {
+                        ultrafinance_core::datasets::Source::BusinessTransactions
+                    }
                 };
                 let contents = std::fs::read_to_string(&input)?;
                 let examples = examples.map(std::fs::read_to_string).transpose()?;
@@ -492,8 +562,7 @@ async fn main() -> Result<()> {
             DatasetCommand::Apply { file } => {
                 let records: Vec<ultrafinance_core::store::SourceRecord> =
                     serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                MerchantStore::configured(&cli.database, cli.database_url.as_deref())?
-                    .import(&records)?;
+                MerchantStore::configured(cli.database_url.as_deref())?.import(&records)?;
                 println!("{}", serde_json::json!({"imported":records.len()}));
             }
             DatasetCommand::ExportEval { file, output } => {
@@ -536,7 +605,6 @@ async fn main() -> Result<()> {
                     datasets_dir,
                     suites_dir,
                     output: output.unwrap_or_else(|| PathBuf::from("evals/reports/all")),
-                    database: cli.database,
                     database_url: cli.database_url,
                     mode,
                     limit,
@@ -550,7 +618,7 @@ async fn main() -> Result<()> {
             let contents = batch::contents(&file, samples, limit)?;
             let report = ultrafinance_core::eval::run(
                 &contents,
-                MerchantStore::configured(&cli.database, cli.database_url.as_deref())?,
+                MerchantStore::configured(cli.database_url.as_deref())?,
                 mode,
                 env::var("TYPESAFE_API_KEY").ok(),
                 model,
@@ -617,13 +685,17 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let store = if let Some(path) = &args.merchants {
-                let store = MerchantStore::memory()?;
+                let store = MerchantStore::temporary_on(
+                    cli.database_url
+                        .as_deref()
+                        .unwrap_or(ultrafinance_core::store::LOCAL_DATABASE_URL),
+                )?;
                 for merchant in load_catalog(Some(path))? {
                     store.put(&merchant)?;
                 }
                 store
             } else {
-                MerchantStore::configured(&cli.database, cli.database_url.as_deref())?
+                MerchantStore::configured(cli.database_url.as_deref())?
             };
             let enricher = Enricher::with_store(
                 env::var("TYPESAFE_API_KEY").ok(),
@@ -631,7 +703,7 @@ async fn main() -> Result<()> {
                 args.threshold,
                 store,
             )?;
-            let response = tokio::time::timeout(Duration::from_secs(25), enricher.enrich(&request))
+            let response = tokio::time::timeout(Duration::from_secs(55), enricher.enrich(&request))
                 .await
                 .context("merchant evaluation timed out")??;
             println!("{}", serde_json::to_string_pretty(&response)?);
@@ -645,7 +717,7 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&request)?);
                 return Ok(());
             }
-            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            let store = MerchantStore::configured(cli.database_url.as_deref())?;
             let enricher = Enricher::with_store(
                 env::var("TYPESAFE_API_KEY").ok(),
                 args.model,
@@ -690,8 +762,31 @@ async fn main() -> Result<()> {
             }
         }
         Command::Merchants { command } => {
-            let store = MerchantStore::configured(&cli.database, cli.database_url.as_deref())?;
+            let store = MerchantStore::configured(cli.database_url.as_deref())?;
             match command {
+                MerchantCommand::Dedupe {
+                    dry_run,
+                    model,
+                    threshold,
+                    max_pairs,
+                    output,
+                } => {
+                    let report = ultrafinance_core::dedupe::run(
+                        store,
+                        env::var("TYPESAFE_API_KEY").ok(),
+                        model,
+                        threshold,
+                        dry_run,
+                        max_pairs as usize,
+                    )
+                    .await?;
+                    let json = serde_json::to_string_pretty(&report)?;
+                    if let Some(path) = output {
+                        std::fs::write(&path, &json)
+                            .with_context(|| format!("cannot write {}", path.display()))?;
+                    }
+                    println!("{json}");
+                }
                 MerchantCommand::Stats { json } => {
                     output::merchant_stats(&store.stats()?, json)?;
                 }

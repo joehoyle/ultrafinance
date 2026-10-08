@@ -1,251 +1,94 @@
 use super::*;
 
-fn merchant(id: &str, name: &str) -> Merchant {
-    Merchant {
-        id: id.into(),
-        name: name.into(),
-        markets: vec!["CA".into()],
-        market_evidence: vec![],
-        website: None,
-        logo_url: Some("https://example.com/logo.png".into()),
-        logo_source: Some("manual".into()),
-        aliases: vec![],
-        sources: vec![],
+#[test]
+fn postgres_source_columns_preserve_raw_payloads_and_pattern_types() -> Result<()> {
+    let lease = MerchantStore::temporary()?;
+    let mut client = postgres::Client::connect(
+        lease.temporary_url(),
+        postgres_native_tls::MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?),
+    )?;
+    for (n, raw) in [
+        serde_json::Value::Null,
+        serde_json::json!("opaque source text"),
+        serde_json::json!([1, "two"]),
+        serde_json::json!(true),
+        serde_json::json!({"transaction_text_regexp": true}),
+        serde_json::json!({"transaction_text_regexp": "^CAFE", "parent_id": "parent"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let record: SourceRecord = serde_json::from_value(serde_json::json!({
+            "source": "column-fixture", "external_id": n.to_string(),
+            "merchant": {"id": n.to_string(), "name": format!("Fixture {n}")},
+            "attribution": "Fixture", "license": "Test", "url": "https://example.com",
+            "version": null, "raw": raw
+        }))?;
+        lease.import(&[record])?;
+        let row = client.query_one(
+            "SELECT data,transaction_pattern,parent_id FROM source_records_documents WHERE source='column-fixture' AND external_id=$1",
+            &[&n.to_string()],
+        )?;
+        let restored: SourceRecord = serde_json::from_str(row.get(0))?;
+        assert_eq!(restored.raw, raw);
+        assert_eq!(
+            row.get::<_, Option<String>>(1).as_deref(),
+            raw.get("transaction_text_regexp").and_then(|v| v.as_str())
+        );
+        assert_eq!(
+            row.get::<_, Option<String>>(2).as_deref(),
+            raw.get("parent_id").and_then(|v| v.as_str())
+        );
     }
+    Ok(())
 }
-fn record(id: &str, name: &str) -> SourceRecord {
-    SourceRecord {
-        source: "test".into(),
-        external_id: id.into(),
-        merchant: merchant(id, name),
-        attribution: "Test".into(),
-        license: "test".into(),
-        url: "https://example.com".into(),
-        version: Some("1".into()),
-        raw: serde_json::json!({}),
-    }
+
+#[test]
+fn postgres_schema_upgrade_is_atomic_and_preserves_reviewed_mappings() -> Result<()> {
+    let lease = MerchantStore::temporary()?;
+    exercise_market_migration(lease.temporary_url())
 }
 
-/// Run explicitly against an empty, disposable PostgreSQL database. CI supplies
-/// this database as a service; never point this test at the production catalog.
-#[tokio::test]
-#[ignore = "requires ULTRAFINANCE_TEST_DATABASE_URL pointing at an empty disposable PostgreSQL database"]
-async fn postgres_migration_imports_search_and_concurrency() -> Result<()> {
-    let url = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")?;
-    let pg = MerchantStore::initialize_postgres(&url)?;
-    let migration_url = url.clone();
-    tokio::task::spawn_blocking(move || exercise_market_migration(&migration_url)).await??;
-    MerchantStore::initialize_postgres(&url)?; // migrations are repeatable
-    let log_id = uuid::Uuid::new_v4().to_string();
-    pg.write_log(
-        &log_id,
-        "test-batch",
-        "started",
-        None,
-        &serde_json::json!({"request":{"description":"test"}}),
+#[test]
+fn postgres_clients_share_atomic_imports_and_exact_collisions() -> Result<()> {
+    let lease = MerchantStore::temporary()?;
+    let other = MerchantStore::postgres(lease.temporary_url())?;
+    let mut records = crate::import::catalog(
+        r#"[{"id":"one","name":"Alpha merchant"},{"id":"two","name":"Beta merchant"}]"#,
+        "fixture",
     )?;
-    assert!(
-        pg.enrichment_logs(Some("started"), None, 10, 0)?
-            .iter()
-            .any(|r| r["id"] == log_id && r["finished_at"].is_null())
-    );
-    pg.write_log(
-        &log_id,
-        "test-batch",
-        "matched",
-        Some("snapshot-merchant"),
-        &serde_json::json!({"response":{"merchant":{"data":{"id":"snapshot-merchant"}}}}),
-    )?;
-    let logs = pg.enrichment_logs(Some("matched"), Some("snapshot-merchant"), 10, 0)?;
-    assert_eq!(logs.len(), 1);
-    assert!(logs[0]["finished_at"].is_string());
-
-    let directory =
-        std::env::temp_dir().join(format!("ultrafinance-migration-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&directory)?;
-    let path = directory.join("catalog.sqlite");
-    let sqlite = MerchantStore::open(&path)?;
-    let a = record("external-a", "Julius Café");
-    let b = record("external-b", "Beta merchant");
-    sqlite.import(&[a.clone(), b.clone()])?;
-    let id = sqlite.resolve_source("test", "external-a")?.unwrap();
-    let mut manual = merchant(&id, "Julius Café corrected");
-    manual.aliases = vec!["VERIFIED ALIAS".into()];
-    sqlite.put(&manual)?;
-    sqlite.link("test", "external-b", &id)?;
-    let mut outlets: Vec<crate::location::LocationRecord> = serde_json::from_str(include_str!(
-        "../../../data/locations/open-enrichment-au.json"
-    ))?;
-    for outlet in &mut outlets {
-        outlet.merchant = crate::location::MerchantReference::Source {
-            source: "test".into(),
-            external_id: "external-a".into(),
-        };
+    lease.import(&records)?;
+    let id = lease.resolve_source("fixture", "one")?.unwrap();
+    records[0].merchant.name = "Refreshed Alpha".into();
+    lease.import(&records)?;
+    assert_eq!(other.resolve_source("fixture", "one")?, Some(id.clone()));
+    assert_eq!(other.get(&id)?.unwrap().name, "Refreshed Alpha");
+    let mut bad = records[0].clone();
+    bad.merchant.name = " ".into();
+    assert!(lease.import(&[records[1].clone(), bad]).is_err());
+    let workers: Vec<_> = (0..4)
+        .map(|n| {
+            let store = lease.clone();
+            std::thread::spawn(move || -> Result<()> {
+                let merchant: Merchant = serde_json::from_value(
+                    serde_json::json!({"id":format!("collision-{n}"),"name":"Collision"}),
+                )?;
+                store.put(&merchant)
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap()?;
     }
-    sqlite.import_locations(&outlets)?;
-    let original_locations = sqlite.locations(&id)?;
-    let original = sqlite.fingerprint()?;
-    // A bad derived SQLite row must roll back the entire destination, rather
-    // than silently changing the catalog during migration.
-    let raw = Connection::open(&path)?;
-    let data: String = raw.query_row("SELECT data FROM merchants WHERE id=?1", [&id], |r| {
-        r.get(0)
-    })?;
-    let mut corrupted: Merchant = serde_json::from_str(&data)?;
-    corrupted.name = "Corrupted derived record".into();
-    raw.execute(
-        "UPDATE merchants SET data=?2 WHERE id=?1",
-        params![id, serde_json::to_string(&corrupted)?],
-    )?;
-    assert!(pg.migrate_sqlite(&path).is_err());
-    assert_eq!(pg.list(None, 10, 0)?.total, 0);
-    raw.execute(
-        "UPDATE merchants SET data=?2 WHERE id=?1",
-        params![id, data],
-    )?;
-    drop(raw);
-    assert_eq!(pg.migrate_sqlite(&path)?, 1);
-    assert_eq!(pg.stats()?, sqlite.stats()?);
-    assert_eq!(pg.fingerprint()?, original);
     assert_eq!(
-        serde_json::to_value(pg.locations(&id)?)?,
-        serde_json::to_value(&original_locations)?
-    );
-    assert_eq!(sqlite.fingerprint()?, original);
-    assert!(pg.migrate_sqlite(&path).is_err());
-    assert_eq!(pg.fingerprint()?, original);
-    assert_eq!(pg.resolve_source("test", "external-a")?, Some(id.clone()));
-    assert_eq!(pg.resolve_source("test", "external-b")?, Some(id.clone()));
-    pg.import_locations(&outlets)?;
-    assert_eq!(
-        serde_json::to_value(pg.locations(&id)?)?,
-        serde_json::to_value(&original_locations)?
-    );
-    let mut corrected = outlets[0].clone();
-    corrected.manual_override = true;
-    corrected.location.name = Some("Corrected outlet".into());
-    pg.import_locations(&[corrected])?;
-    pg.import_locations(&outlets)?;
-    assert!(
-        pg.locations(&id)?
-            .iter()
-            .any(|r| r.location.name.as_deref() == Some("Corrected outlet"))
-    );
-    let verified = pg.search("verified alias", Some("CA"), 10)?;
-    assert!(verified[0].trusted);
-    assert_eq!(verified[0].merchant.logo_url, manual.logo_url);
-    let imported = pg.search("Beta merchant", None, 10)?;
-    assert!(!imported[0].trusted);
-    assert_eq!(imported[0].provenance.len(), 2);
-    let mut refresh = a;
-    refresh.merchant.name = "Bad refresh name".into();
-    refresh.merchant.aliases = vec!["NEW IMPORTED ALIAS".into()];
-    pg.import(&[refresh.clone(), b])?;
-    assert_eq!(
-        pg.search("new imported alias", None, 10)?[0].merchant.name,
-        manual.name
-    );
-    assert_eq!(pg.resolve_source("test", "external-b")?, Some(id.clone()));
-    let before = pg.fingerprint()?;
-    let mut bad = record("bad", " ");
-    bad.merchant.id.clear();
-    assert!(pg.import(&[record("new", "Brand new"), bad]).is_err());
-    assert!(pg.import(&[refresh.clone(), refresh]).is_err());
-    assert_eq!(before, pg.fingerprint()?);
-    assert!(pg.link("test", "external-a", "missing").is_err());
-    assert_eq!(before, pg.fingerprint()?);
-
-    // Updates become visible through independently connected API/import clients.
-    let second = MerchantStore::postgres(&url)?;
-    let mut cafe = merchant("manual-cafe", "Julius Café");
-    cafe.aliases = vec!["OLD DESCRIPTION".into()];
-    pg.put(&cafe)?;
-    assert!(
-        second
-            .search("JULIUS CAFE", Some("CA"), 10)?
-            .iter()
-            .any(|c| c.merchant.id == "manual-cafe" && c.trusted)
-    );
-    assert!(
-        second
-            .search("Julus cafe", Some("CA"), 10)?
-            .iter()
-            .any(|c| c.merchant.id == "manual-cafe")
-    );
-    assert!(
-        second
-            .search("Juli", Some("CA"), 10)?
-            .iter()
-            .any(|c| c.merchant.id == "manual-cafe")
-    );
-    assert!(second.search("LS", None, 10)?.is_empty());
-    cafe.aliases = vec!["NEW DESCRIPTION".into()];
-    pg.put(&cafe)?;
-    assert!(
-        !second
-            .search("OLD DESCRIPTION", None, 10)?
-            .iter()
-            .any(|c| c.exact)
-    );
-    assert!(second.search("NEW DESCRIPTION", None, 10)?[0].trusted);
-    second.search("\" OR * (NEAR) --", None, 10)?;
-    let mut us = merchant("us", "Julius Café");
-    us.markets = vec!["US".into()];
-    pg.put(&us)?;
-    assert!(
-        second
-            .search("Julius cafe", Some("CA"), 10)?
-            .iter()
-            .any(|c| c.merchant.id == "us")
-    );
-    let mut negative = record("amazon", "Amazon");
-    negative.merchant.aliases = vec!["Amazon web services".into()];
-    negative.raw = serde_json::json!({"negativeAliases":["amazon web services"]});
-    pg.import(&[negative])?;
-    assert!(pg.search("Amazon web services", None, 10)?.is_empty());
-    assert_eq!(second.list(Some("US"), 50, 0)?.total, 1);
-    assert_eq!(second.list(None, 1, 0)?.merchants.len(), 1);
-    assert!(second.list(None, 0, 0).is_err());
-    assert!(second.list(Some("ca"), 10, 0).is_err());
-
-    // Two concurrent importers must retain the same source ID, without orphan rows.
-    let concurrent = record("race", "Concurrent merchant");
-    let first = pg.clone();
-    let other = second.clone();
-    let copy = concurrent.clone();
-    let t1 = std::thread::spawn(move || first.import(&[copy]));
-    let t2 = std::thread::spawn(move || other.import(&[concurrent]));
-    t1.join().unwrap()?;
-    t2.join().unwrap()?;
-    assert_eq!(
-        pg.resolve_source("test", "race")?,
-        second.resolve_source("test", "race")?
-    );
-    assert_eq!(
-        pg.search("Concurrent merchant", None, 10)?
+        other
+            .search("Collision", None, 1)?
             .iter()
             .filter(|c| c.exact)
             .count(),
-        1
+        4
     );
-
-    // Preserve exact collisions even if the caller requests a one-item shortlist.
-    for n in 0..3 {
-        pg.put(&merchant(&format!("collision-{n}"), "Collision"))?;
-    }
-    assert_eq!(
-        pg.search("Collision", None, 1)?
-            .iter()
-            .filter(|c| c.exact)
-            .count(),
-        3
-    );
-    // Drop worker clients from an async runtime safely.
-    super::tests::regex_search_scenarios(&pg)?;
-    drop(second);
-    drop(pg);
-    drop(sqlite);
-    std::fs::remove_dir_all(directory)?;
+    crate::resolution::exercise(&lease)?;
     Ok(())
 }
 
@@ -256,15 +99,24 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         url,
         MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?),
     )?;
+    assert_eq!(
+        client
+            .query_one("SELECT COUNT(*) FROM merchants", &[])?
+            .get::<_, i64>(0),
+        0,
+        "market migration fixture requires an empty database"
+    );
+    client.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")?;
+    client.batch_execute(include_str!("../migrations/001_postgres.sql"))?;
+    client.batch_execute(include_str!("../migrations/002_enrichment_log.sql"))?;
+    client.batch_execute(include_str!("../migrations/003_locations.sql"))?;
     let old =
         serde_json::json!({"id":"pre-market","name":"Before markets","country":"CA"}).to_string();
     let source = serde_json::json!({
         "source":"pre-market-source","external_id":"external","merchant":{"id":"external","name":"Before markets","country":"ca"},
         "attribution":"Test","license":"Test","url":"https://example.com","version":null,"raw":{"countryHints":["US"]}
     }).to_string();
-    client.batch_execute(
-        "ALTER TABLE merchants ADD COLUMN country TEXT; UPDATE ultrafinance_schema SET version=2;",
-    )?;
+    client.batch_execute("UPDATE ultrafinance_schema SET version=2;")?;
     client.execute(
         "INSERT INTO merchants(id,country,data) VALUES('pre-market','CA',$1)",
         &[&old],
@@ -276,6 +128,23 @@ fn exercise_market_migration(url: &str) -> Result<()> {
     client.execute(
         "INSERT INTO source_records VALUES('pre-market-source','external','pre-market',$1)",
         &[&source],
+    )?;
+    client.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
+    let cached_request: crate::EnrichRequest = serde_json::from_value(
+        serde_json::json!({"description":"legacy opaque reference","country":"CA"}),
+    )?;
+    let mut resolution = crate::resolution::Resolution::supported(
+        &cached_request,
+        serde_json::from_value(
+            serde_json::json!({"id":"pre-market","name":"Before markets","markets":["CA"]}),
+        )?,
+        vec![],
+    );
+    resolution.verified = true;
+    resolution.evidence = Some("Reviewed legacy fixture".into());
+    client.execute(
+        "INSERT INTO descriptor_resolutions(id,data) VALUES($1,$2)",
+        &[&resolution.id, &serde_json::to_string(&resolution)?],
     )?;
     // Invalid source data rolls back earlier row conversions and schema changes.
     assert!(MerchantStore::initialize_postgres(url).is_err());
@@ -302,6 +171,11 @@ fn exercise_market_migration(url: &str) -> Result<()> {
     )?;
     assert!(MerchantStore::postgres(url).is_err());
     let store = MerchantStore::initialize_postgres(url)?;
+    assert!(store.search_request(&cached_request, 10)?[0].trusted);
+    assert_eq!(
+        store.resolutions(Some(&resolution.id), 1)?[0].merchant.id,
+        "pre-market"
+    );
     let page = store.list(Some("US"), 10, 0)?;
     assert_eq!(page.total, 1);
     assert_eq!(page.merchants[0].markets, ["CA", "US"]);
@@ -323,10 +197,11 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        3
+        4
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);
+    store.revoke_resolution(&resolution.id)?;
     client.batch_execute("DELETE FROM source_records WHERE source='pre-market-source'; DELETE FROM manual_merchants WHERE id='pre-market'; DELETE FROM merchants WHERE id='pre-market';")?;
     Ok(())
 }

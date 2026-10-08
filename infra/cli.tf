@@ -19,11 +19,11 @@ resource "aws_cloudwatch_log_group" "cli" {
   retention_in_days = 14
 }
 
-# Lambda and the shell use the same application login, never the administrator.
+# Preserve the existing application URL secret; administrator shells use the RDS-managed secret.
 resource "aws_secretsmanager_secret" "cli_database_url" {
   count                   = local.cli_enabled ? 1 : 0
   name                    = "${var.name}/cli-database-url"
-  description             = "Shared TLS PostgreSQL application URL for Lambda and the CLI shell"
+  description             = "TLS PostgreSQL application URL"
   recovery_window_in_days = 7
 }
 
@@ -48,7 +48,7 @@ resource "aws_iam_role_policy" "cli_execution" {
       { Effect = "Allow", Action = "ecr:GetAuthorizationToken", Resource = "*" },
       { Effect = "Allow", Action = ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"], Resource = aws_ecr_repository.app.arn },
       { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.cli[0].arn}:*" },
-      { Effect = "Allow", Action = "secretsmanager:GetSecretValue", Resource = aws_secretsmanager_secret.cli_database_url[0].arn }
+      { Effect = "Allow", Action = "secretsmanager:GetSecretValue", Resource = aws_rds_cluster.database[0].master_user_secret[0].secret_arn }
     ]
   })
 }
@@ -89,13 +89,20 @@ resource "aws_ecs_task_definition" "cli" {
     command                = ["exec sleep 3600"]
     linuxParameters        = { initProcessEnabled = true }
     readonlyRootFilesystem = false
-    secrets                = var.database_url == null ? [] : [{ name = "ULTRAFINANCE_DATABASE_URL", valueFrom = aws_secretsmanager_secret.cli_database_url[0].arn }]
+    environment = [
+      { name = "ULTRAFINANCE_DATABASE_HOST", value = aws_rds_cluster.database[0].endpoint },
+      { name = "ULTRAFINANCE_DATABASE_NAME", value = aws_rds_cluster.database[0].database_name }
+    ]
+    secrets = [
+      { name = "ULTRAFINANCE_ADMIN_USERNAME", valueFrom = "${aws_rds_cluster.database[0].master_user_secret[0].secret_arn}:username::" },
+      { name = "ULTRAFINANCE_ADMIN_PASSWORD", valueFrom = "${aws_rds_cluster.database[0].master_user_secret[0].secret_arn}:password::" }
+    ]
     logConfiguration = {
       logDriver = "awslogs"
       options   = { awslogs-group = aws_cloudwatch_log_group.cli[0].name, awslogs-region = var.aws_region, awslogs-stream-prefix = "cli" }
     }
   }])
-  depends_on = [aws_secretsmanager_secret_version.cli_database_url]
+  depends_on = [aws_iam_role_policy.cli_execution]
   lifecycle {
     precondition {
       condition     = var.enable_aurora && var.image_uri != null

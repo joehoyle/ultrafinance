@@ -1,12 +1,17 @@
 pub mod batch;
+mod columns;
 pub mod datasets;
+pub mod dedupe;
+pub mod discovery;
 pub mod eval;
 pub mod import;
+pub mod interpretation;
 pub mod location;
 pub mod markets;
 pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
+mod pipeline;
 mod regex_rules;
-mod search_profile;
+pub mod resolution;
 mod search_score;
 pub mod store;
 use anyhow::{Context, Result, bail};
@@ -127,6 +132,7 @@ pub struct EnrichResponse {
 
 #[derive(Clone)]
 pub struct Enricher {
+    discovery: Option<discovery::Discovery>,
     client: reqwest::Client,
     provider_url: String,
     api_key: Option<String>,
@@ -145,7 +151,7 @@ impl Enricher {
         if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
             bail!("match threshold must be between 0 and 1");
         }
-        let store = store::MerchantStore::memory()?;
+        let store = store::MerchantStore::temporary()?;
         let mut ids = HashSet::new();
         for merchant in &merchants {
             if !ids.insert(&merchant.id) {
@@ -166,6 +172,7 @@ impl Enricher {
             bail!("match threshold must be between 0 and 1");
         }
         Ok(Self {
+            discovery: discovery::Discovery::from_env()?,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .build()?,
@@ -303,7 +310,7 @@ mod tests {
     }
     #[tokio::test]
     async fn exact_matches_bypass_jev_but_collisions_and_fuzzy_candidates_do_not() {
-        let store = store::MerchantStore::memory().unwrap();
+        let store = store::MerchantStore::temporary().unwrap();
         let merchant = candidates().remove(0);
         store.put(&merchant).unwrap();
         let request: EnrichRequest =
@@ -319,6 +326,20 @@ mod tests {
         assert!(
             enricher
                 .enrich(&fuzzy)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not configured")
+        );
+        let mut noisy = request.clone();
+        noisy.description =
+            "CREDIT CARD PURCHASE EXAMPLE CAFE STORE 1005 MONTREAL QC 2026 10 01".into();
+        let retrieved = store.search(&noisy.description, Some("CA"), 10).unwrap();
+        assert_eq!(retrieved[0].merchant.id, merchant.id);
+        assert!(!retrieved[0].exact);
+        assert!(
+            enricher
+                .enrich(&noisy)
                 .await
                 .unwrap_err()
                 .to_string()

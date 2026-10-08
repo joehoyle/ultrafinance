@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn imports_are_atomic_stable_and_follow_merchant_links() {
-        let store = MerchantStore::memory().unwrap();
+        let store = MerchantStore::temporary().unwrap();
         seed(&store);
         let merchant_id = store
             .resolve_source("open-enrichment", "04eb38e9-d678-4d44-90a9-1786f12effd6")
@@ -799,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_batch_and_unresolved_merchants_get_independent_locations_and_logs() {
-        let store = MerchantStore::memory().unwrap();
+        let store = MerchantStore::temporary().unwrap();
         seed(&store);
         let mut merchant = store.list(None, 10, 0).unwrap().merchants.remove(0);
         merchant
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn evaluation_measures_fields_outlets_and_abstention_separately() {
-        let store = MerchantStore::memory().unwrap();
+        let store = MerchantStore::temporary().unwrap();
         seed(&store);
         store.import_locations(&records()).unwrap();
         let suite: LocationSuite =
@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn source_refresh_preserves_manual_corrections_and_fingerprint_tracks_outlets() {
-        let store = MerchantStore::memory().unwrap();
+        let store = MerchantStore::temporary().unwrap();
         seed(&store);
         let before = store.fingerprint().unwrap();
         store.import_locations(&records()).unwrap();

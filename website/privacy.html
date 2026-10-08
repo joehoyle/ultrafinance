@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en" prefix="og: https://ogp.me/ns#">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8f2">
+  <meta name="description" content="How Ultrafinance handles lookup data, AI processing, saved history, and your privacy choices.">
+  <title>Privacy policy | Ultrafinance</title>
+  <link rel="canonical" href="https://ultrafinance.app/privacy">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ultrafinance">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:url" content="https://ultrafinance.app/privacy">
+  <meta property="og:title" content="Ultrafinance · Privacy policy">
+  <meta property="og:description" content="How Ultrafinance handles lookup data, AI processing, saved history, and your privacy choices.">
+  <meta property="og:image" content="https://ultrafinance.app/assets/share.png">
+  <meta property="og:image:secure_url" content="https://ultrafinance.app/assets/share.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ultrafinance. Make sense of the spend. An open-source merchant enrichment API at ultrafinance.app.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Ultrafinance · Privacy policy">
+  <meta name="twitter:description" content="How Ultrafinance handles lookup data, AI processing, saved history, and your privacy choices.">
+  <meta name="twitter:image" content="https://ultrafinance.app/assets/share.png">
+  <meta name="twitter:image:alt" content="Ultrafinance. Make sense of the spend. An open-source merchant enrichment API at ultrafinance.app.">
+  <link rel="icon" href="/assets/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" sizes="any">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" sizes="180x180">
+  <style>
+    :root { color-scheme: light; --paper: #f7f8f2; --ink: #20251b; --muted: #646b5c; --line: #dde1d3; --lime: #d5f86b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-underline-offset: 4px; }
+    a:hover { color: #58712e; }
+    a:focus-visible { outline: 3px solid #58761c; outline-offset: 5px; }
+    .wrap { max-width: 1200px; margin: auto; padding: 0 48px; }
+    nav { min-height: 112px; display: flex; justify-content: space-between; align-items: center; gap: 24px; border-bottom: 1px solid var(--line); }
+    nav a, footer a { text-decoration: none; }
+    .brand { display: inline-flex; align-items: center; gap: 11px; font-size: 21px; font-weight: 750; letter-spacing: -.8px; }
+    .mark { width: 33px; height: 33px; background: var(--lime); border-radius: 9px; display: grid; place-items: center; }
+    .mark svg { width: 20px; height: 24px; }
+    .nav-links { display: flex; align-items: center; gap: 24px; font-size: 13px; font-weight: 600; }
+    [aria-current="page"] { text-decoration: underline; }
+    .github { display: inline-flex; align-items: center; gap: 9px; }
+    .github svg { width: 19px; height: 19px; }
+    main { padding: 72px 0; }
+    .eyebrow { font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); }
+    h1 { font-size: clamp(44px, 5.5vw, 68px); line-height: 1.08; font-weight: 650; letter-spacing: -3px; margin: 24px 0; }
+    h1 span { background: var(--lime); padding: 0 7px 5px; }
+    .intro { max-width: 700px; font-size: 18px; line-height: 1.7; color: var(--muted); }
+    .scope { border-left: 3px solid #88a647; padding: 16px 22px; background: #edf1e6; max-width: 800px; margin: 28px 0 48px; }
+    p { font-size: 15px; line-height: 1.75; color: var(--muted); margin: 12px 0; }
+    h2 { font-size: 26px; letter-spacing: -.7px; margin: 0 0 12px; }
+    h3 { font-size: 21px; letter-spacing: -.5px; margin: 0 0 10px; }
+    main { max-width: 800px; }
+    header + section { margin-top: 48px; }
+    .updated { font-size: 13px; }
+    section + section { margin-top: 48px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-top: 24px; }
+    article { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+    .license { display: inline-block; border-radius: 5px; background: #edf1e6; padding: 5px 8px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .credit { color: var(--ink); font-size: 13px; }
+    .method { border-top: 1px solid var(--line); padding-top: 32px; max-width: 800px; }
+    footer { border-top: 1px solid var(--line); padding: 24px 0 30px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 20px; color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    @media (max-width: 720px) { .wrap { padding: 0 24px; } nav { min-height: 90px; flex-wrap: wrap; padding: 20px 0; } .nav-links { gap: 18px; } .nav-label { display: none; } main { padding: 48px 0; } .grid { grid-template-columns: 1fr; } article { padding: 24px; } h1 { letter-spacing: -2px; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" style="display:none"><symbol id="github-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M12 .8a11.2 11.2 0 0 0-3.54 21.83c.56.1.77-.24.77-.54v-2.1c-3.12.68-3.78-1.33-3.78-1.33-.51-1.3-1.24-1.65-1.24-1.65-1.02-.7.08-.69.08-.69 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.94.1-.73.39-1.22.71-1.5-2.49-.28-5.1-1.25-5.1-5.54 0-1.22.43-2.22 1.15-3-.12-.29-.5-1.42.11-2.96 0 0 .94-.3 3.08 1.15a10.76 10.76 0 0 1 5.6 0c2.14-1.45 3.08-1.15 3.08-1.15.61 1.54.23 2.67.11 2.96.72.78 1.15 1.78 1.15 3 0 4.3-2.62 5.25-5.11 5.53.4.35.76 1.03.76 2.08v3.1c0 .3.2.65.77.54A11.2 11.2 0 0 0 12 .8Z"/></symbol></svg>
+  <div class="wrap">
+    <nav aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="Ultrafinance home"><span class="mark"><svg viewBox="0 0 24 28" aria-hidden="true"><path fill="currentColor" d="M14 1 3 16h9L9 27l12-16h-9z"/></svg></span>Ultrafinance</a>
+      <div class="nav-links"><a href="/sources">Sources</a><a href="/docs">API docs</a><a class="github" data-repo href="https://github.com/joehoyle/ultrafinance" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#github-icon"/></svg><span class="nav-label">View on GitHub</span><span class="arrow" aria-hidden="true">↗</span></a></div>
+    </nav>
+    <main>
+      <header>
+        <div class="eyebrow">Your data / Clear answers</div>
+        <h1>Privacy, in <span>plain English.</span></h1>
+        <p class="intro">A transaction description can say a lot about a person. Here is what happens to the information you send to Ultrafinance.</p>
+        <p class="updated">Last updated: October 8, 2026</p>
+        <p class="scope">The short version: lookups are saved, some are sent to an AI provider, and saved lookups do not currently expire automatically. Try the demo with made-up data and leave out personal details.</p>
+      </header>
+      <section aria-labelledby="who">
+        <h2 id="who">Who this policy covers</h2>
+        <p>Ultrafinance is operated by Joe Hoyle. This policy covers the website and hosted API at ultrafinance.app. If you run the open-source code yourself, you control that installation and its data practices.</p>
+      </section>
+      <section aria-labelledby="collect">
+        <h2 id="collect">What we receive</h2>
+        <p>When you submit a lookup, we receive the transaction description and any optional information you include, such as amount, currency, date, country, location, or extra context. The demo sends the fields you fill in when you press the lookup button.</p>
+        <p>We save the full lookup input, the merchant candidates considered, the matching method, any AI answer, and the final result or error, along with timestamps. The hosted API has no accounts and no public endpoint for browsing this lookup history.</p>
+        <p>Our hosting providers also handle connection information, such as your IP address and browser details, to deliver requests. Operational logs can include errors and technical information. If you email us, we receive your email address and whatever you choose to share.</p>
+      </section>
+      <section aria-labelledby="use">
+        <h2 id="use">Why we use it</h2>
+        <p>We use lookup information to identify merchants and transaction locations, investigate errors, and check how matching works. We use technical information to operate and protect the service, and contact information to answer your requests.</p>
+        <p>We do not sell your personal information, use it for advertising, or publish your submitted transactions in the merchant catalog.</p>
+      </section>
+      <section aria-labelledby="providers">
+        <h2 id="providers">Who helps process a lookup</h2>
+        <p>Amazon Web Services hosts the service and its database. When a lookup needs AI evaluation, we send the transaction fields you supplied, including extra context, and relevant merchant candidates to TypeSafe AI’s Jev service. Verified exact matches can resolve without an AI call. When no merchant candidates are available after any configured discovery step, no AI call is needed.</p>
+        <p>If a business-discovery service is configured, unresolved lookups can send their description, country, supplied location and possible name interpretations to that service. This discovery request excludes amount, currency, date and extra context. Supported resolutions may be saved privately with their transaction context and business evidence to assist later lookups; a model result alone does not become a verified mapping.</p>
+        <p><a href="https://typesafe.ai/legal/privacy-policy">TypeSafe’s privacy policy</a> says it does not train or fine-tune models on submitted inputs. Its policy also explains its use of service providers and its handling of data. We do not promise that a provider immediately deletes a lookup after answering it.</p>
+        <p>Providers may process information outside your country, including in the United States, where privacy laws may differ. We may also disclose information when required by law or when necessary to investigate abuse or protect the service and people using it.</p>
+      </section>
+      <section aria-labelledby="retention">
+        <h2 id="retention">How long information stays</h2>
+        <p>Saved lookup history currently has no automatic expiry. Unless a record is deleted, the full input and result remain in our database. This applies to demo lookups too.</p>
+        <p>Our application’s operational logs are configured to expire after 14 days. Database backups and provider records have separate retention rules; deleting a live record does not necessarily erase every backup or provider copy immediately.</p>
+        <p>We use HTTPS for the hosted website and API and restrict database access through hosting permissions. No online service can guarantee absolute security, so please send only the context needed for a lookup.</p>
+      </section>
+      <section aria-labelledby="choices">
+        <h2 id="choices">Your choices and requests</h2>
+        <p>You can browse the site and merchant catalog without submitting a transaction. For lookups, use sample data or remove personal details first. Please do not send account or card numbers, passwords, full bank statements, or sensitive information about yourself or someone else.</p>
+        <p>Email <a href="mailto:contact@ultrafinance.app">contact@ultrafinance.app</a> to ask about your information, request a copy or correction, request deletion, or raise a privacy concern. Include an approximate submission time and enough non-sensitive context to help us find the record. Please do not resend a full transaction or bank statement.</p>
+        <p>Because there are no accounts, we may need to confirm a record belongs to you before sharing or changing it. We will explain if we cannot identify it, or if a legal requirement prevents deletion. Your local law may give you additional rights, including the right to complain to a privacy regulator.</p>
+      </section>
+      <section aria-labelledby="cookies">
+        <h2 id="cookies">Cookies and other websites</h2>
+        <p>The main website does not set cookies or use advertising trackers or analytics scripts. The API documentation loads its interface from jsDelivr, which receives connection information when your browser downloads it. Links to GitHub, merchant websites, and other services take you to sites with their own privacy practices.</p>
+      </section>
+      <section aria-labelledby="changes">
+        <h2 id="changes">If this policy changes</h2>
+        <p>We will update this page and its date when our practices change. For a significant change, we will also put a notice on the website before it takes effect. If a new use of personal information requires your consent, we will ask for it.</p>
+        <p>Questions are welcome at <a href="mailto:contact@ultrafinance.app">contact@ultrafinance.app</a>. You can also read our <a href="/terms">terms of use</a>.</p>
+      </section>
+    </main>
+    <footer><a href="/">Ultrafinance / ultrafinance.app</a><a href="/privacy" aria-current="page">Privacy</a><a href="/terms">Terms</a><a href="/sources">Data sources</a></footer>
+  </div>
+</body>
+</html>

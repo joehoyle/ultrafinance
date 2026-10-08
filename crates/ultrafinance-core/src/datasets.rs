@@ -16,6 +16,7 @@ pub enum Source {
     OpenEnrichment,
     DoDataThings,
     MoneyVis,
+    BusinessTransactions,
 }
 impl Source {
     pub fn name(self) -> &'static str {
@@ -24,6 +25,7 @@ impl Source {
             Self::OpenEnrichment => "open-enrichment",
             Self::DoDataThings => "dodatathings",
             Self::MoneyVis => "moneyvis",
+            Self::BusinessTransactions => "business-transactions",
         }
     }
 }
@@ -305,6 +307,70 @@ pub fn prepare(
                 "requires-merchant-labels",
             )
         }
+        Source::BusinessTransactions => {
+            // A name-keyed synthetic reference catalog, not verified place identities.
+            // Generated descriptions must never become aliases or inference evidence.
+            let mut merchants = BTreeMap::new();
+            for row in csv_rows(contents)? {
+                let merchant_name = field(&row, "name")?.trim();
+                let description = field(&row, "transaction_string")?.trim();
+                let normalized_name = normalize(merchant_name);
+                if normalized_name.is_empty() || description.is_empty() {
+                    bail!("BusinessTransactions requires nonblank names and descriptions");
+                }
+                let id = format!(
+                    "name-{}",
+                    crate::eval::fingerprint(normalized_name.as_bytes())
+                        .trim_start_matches("fnv1a64:")
+                );
+                // Choosing a deterministic spelling keeps imports independent of row order.
+                merchants
+                    .entry(id.clone())
+                    .and_modify(|name: &mut String| {
+                        if merchant_name < name.as_str() {
+                            *name = merchant_name.to_owned();
+                        }
+                    })
+                    .or_insert_with(|| merchant_name.to_owned());
+                samples.push(sample(
+                    name,
+                    description.into(),
+                    Some(expected(name, &id)),
+                    row.get("category_label")
+                        .filter(|s| !s.trim().is_empty())
+                        .cloned(),
+                    "source-synthetic-generated-merchant",
+                ));
+            }
+            for (id, merchant_name) in merchants {
+                records.push(SourceRecord {
+                    source: name.into(),
+                    external_id: id.clone(),
+                    merchant: crate::Merchant {
+                        id,
+                        name: merchant_name.clone(),
+                        markets: vec![],
+                        market_evidence: vec![],
+                        website: None,
+                        logo_url: None,
+                        logo_source: None,
+                        aliases: vec![],
+                        sources: vec!["https://huggingface.co/datasets/HighkeyPrxneeth/BusinessTransactions".into()],
+                    },
+                    attribution: "HighkeyPrxneeth; business names derived from Foursquare OS Places".into(),
+                    license: "CC-BY-4.0 AND Apache-2.0".into(),
+                    url: "https://huggingface.co/datasets/HighkeyPrxneeth/BusinessTransactions".into(),
+                    version: None,
+                    raw: json!({"name":merchant_name,"identity_kind":"normalized-name-only","usage":"synthetic-evaluation-reference"}),
+                });
+            }
+            (
+                "CC-BY-4.0 AND Apache-2.0",
+                "HighkeyPrxneeth; business names derived from Foursquare OS Places",
+                "https://huggingface.co/datasets/HighkeyPrxneeth/BusinessTransactions",
+                "synthetic-source-consistency",
+            )
+        }
     };
     // Deduplicate exact normalized descriptions, rejecting conflicting labels.
     let mut unique: BTreeMap<String, Sample> = BTreeMap::new();
@@ -475,6 +541,69 @@ impl Bundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn business_transactions_isolates_generated_evidence_and_has_stable_name_ids() {
+        let input = "name,transaction_string,category_label\nCafe Azul,CAFE AZUL STORE 0006 PHOENIX AZ $15.00,Dining\ncafe azul,CAFE AZUL PURCHASE 123,Dining\n";
+        let bundle = prepare(Source::BusinessTransactions, input, None, "global").unwrap();
+        assert_eq!(bundle.records.len(), 1);
+        let record = &bundle.records[0];
+        assert_eq!(record.merchant.name, "Cafe Azul");
+        assert!(record.merchant.aliases.is_empty());
+        assert!(record.merchant.markets.is_empty());
+        assert!(record.merchant.website.is_none());
+        assert!(record.raw.get("transaction_string").is_none());
+        assert!(record.raw.get("category_label").is_none());
+        assert!(
+            !serde_json::to_string(&record.raw)
+                .unwrap()
+                .contains("PHOENIX")
+        );
+        assert_eq!(
+            bundle.manifest.evaluation_kind,
+            "synthetic-source-consistency"
+        );
+        for case in bundle.development.iter().chain(&bundle.holdout) {
+            assert!(case.expected.is_some());
+            assert_eq!(case.label_origin, "source-synthetic-generated-merchant");
+            assert!(case.request.country.is_none());
+            assert!(case.request.location.is_none());
+            assert!(case.request.amount.is_none());
+            assert!(case.request.extra.is_empty());
+        }
+        let reordered = "name,transaction_string,category_label\ncafe azul,CAFE AZUL PURCHASE 123,Dining\nCafe Azul,CAFE AZUL STORE 0006 PHOENIX AZ $15.00,Dining\n";
+        let other = prepare(Source::BusinessTransactions, reordered, None, "global").unwrap();
+        assert_eq!(other.records[0].external_id, record.external_id);
+        assert_eq!(other.records[0].merchant.name, record.merchant.name);
+        assert_eq!(
+            serde_json::to_value(other.development).unwrap(),
+            serde_json::to_value(bundle.development).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(other.holdout).unwrap(),
+            serde_json::to_value(bundle.holdout).unwrap()
+        );
+    }
+    #[test]
+    fn business_transactions_rejects_conflicting_labels_and_blank_names() {
+        let input =
+            "name,transaction_string\nCafe Azul,SAME TRANSACTION\nCafe Verde,SAME TRANSACTION\n";
+        assert!(
+            prepare(Source::BusinessTransactions, input, None, "global")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("conflicting merchant labels")
+        );
+        assert!(
+            prepare(
+                Source::BusinessTransactions,
+                "name,transaction_string\n,CAFE PURCHASE\n",
+                None,
+                "global"
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn category_labels_do_not_turn_into_merchant_labels_and_splits_are_stable() {
         let input = "description,category\nADIDAS,Shopping\nPAYMENT FROM ADIDAS,Shopping\nNETFLIX,Subscription\n";

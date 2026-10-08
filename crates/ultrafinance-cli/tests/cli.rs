@@ -9,11 +9,16 @@ fn run(args: &[&str], stdin: Option<&str>) -> std::process::Output {
     command
         .args(args)
         .env_remove("TYPESAFE_API_KEY")
-        .env_remove("ULTRAFINANCE_DB")
-        .env_remove("ULTRAFINANCE_DATABASE_URL")
+        .env(
+            "ULTRAFINANCE_DATABASE_URL",
+            std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+                .unwrap_or_else(|_| ultrafinance_core::store::LOCAL_DATABASE_URL.into()),
+        )
         .env_remove("ULTRAFINANCE_MERCHANTS")
         .env_remove("JEV_MODEL")
         .env_remove("ULTRAFINANCE_MATCH_THRESHOLD")
+        .env_remove("ULTRAFINANCE_DISCOVERY_URL")
+        .env_remove("ULTRAFINANCE_DISCOVERY_API_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -44,7 +49,7 @@ fn missing_subcommands_show_contextual_help() {
         for global_flags in [false, true] {
             let mut args = Vec::new();
             if global_flags {
-                args.extend(["--database", "/unused/catalog.sqlite"]);
+                args.extend(["--database-url", "postgresql://unused"]);
             }
             if let Some(group) = group {
                 args.push(group);
@@ -67,7 +72,6 @@ fn missing_subcommands_show_contextual_help() {
         }
     }
     let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
-        .env("ULTRAFINANCE_DB", "/unused/catalog.sqlite")
         .env("ULTRAFINANCE_DATABASE_URL", "postgres://unused")
         .output()
         .unwrap();
@@ -107,7 +111,11 @@ fn infra_routes_logs_and_stops_deploy_before_build_on_config_failure() {
         Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
             .current_dir(&directory)
             .env("PATH", directory.join("bin"))
-            .env_remove("ULTRAFINANCE_DATABASE_URL")
+            .env(
+                "ULTRAFINANCE_DATABASE_URL",
+                std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+                    .unwrap_or_else(|_| ultrafinance_core::store::LOCAL_DATABASE_URL.into()),
+            )
             .args(args)
             .output()
             .unwrap()
@@ -126,6 +134,27 @@ fn infra_routes_logs_and_stops_deploy_before_build_on_config_failure() {
     assert!(!deploy.status.success());
     assert!(deploy.stdout.is_empty());
     assert!(String::from_utf8_lossy(&deploy.stderr).contains("repository_url"));
+    let image = format!(
+        "123456789012.dkr.ecr.ca-central-1.amazonaws.com/ultrafinance@sha256:{}",
+        "a".repeat(64)
+    );
+    // CI has OIDC credentials and no local OpenTofu state or Docker build.
+    std::fs::write(
+        directory.join("bin/aws"),
+        "#!/bin/sh\nif [ \"$1\" != --region ] || [ \"$2\" != ci-region ]; then exit 2; fi\necho 'An error occurred (CIReleaseReached) when calling GetAlias' >&2\nexit 1\n",
+    )
+    .unwrap();
+    let ci = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+        .current_dir(&directory)
+        .env("PATH", directory.join("bin"))
+        .env("AWS_PROFILE", "")
+        .env("AWS_REGION", "ci-region")
+        .env("LAMBDA_FUNCTION_NAME", "ci-function")
+        .args(["infra", "deploy", "--image", &image])
+        .output()
+        .unwrap();
+    assert!(!ci.status.success());
+    assert!(String::from_utf8_lossy(&ci.stderr).contains("CIReleaseReached"));
     let shell = invoke(&["infra", "cli"]);
     assert!(!shell.status.success());
     assert!(String::from_utf8_lossy(&shell.stderr).contains("interactive terminal"));
@@ -211,11 +240,11 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     let directory =
         std::env::temp_dir().join(format!("ultrafinance-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).unwrap();
-    let database = directory.join("merchants.sqlite");
-    let db = database.to_str().unwrap();
+    let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = database.temporary_url();
     let added = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "merchants",
             "add",
@@ -236,7 +265,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     let merchant: Value = serde_json::from_slice(&added.stdout).unwrap();
     let searched = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "merchants",
             "search",
@@ -252,7 +281,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     assert_eq!(candidates[0]["exact"], false);
     let enriched = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "enrich",
             "julius café bromont",
@@ -271,7 +300,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     assert_eq!(result["merchant"]["data"]["id"], merchant["id"]);
     let history = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "logs",
             "--status",
@@ -296,7 +325,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     );
     assert_eq!(logs[0]["data"]["response"], result);
 
-    let history_table = run(&["--database", db, "logs", "--status", "matched"], None);
+    let history_table = run(&["--database-url", db, "logs", "--status", "matched"], None);
     assert!(history_table.status.success());
     let table = String::from_utf8(history_table.stdout).unwrap();
     for expected in [
@@ -313,7 +342,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
     ] {
         assert!(table.contains(expected), "{table}");
     }
-    let empty = run(&["--database", db, "logs", "--offset", "1"], None);
+    let empty = run(&["--database-url", db, "logs", "--offset", "1"], None);
     assert!(empty.status.success());
     assert!(
         String::from_utf8(empty.stdout)
@@ -330,7 +359,7 @@ fn dataset_import_apply_and_refresh_preserve_merchant_ids() {
     std::fs::create_dir_all(&root).unwrap();
     let input = root.join("source.csv");
     std::fs::write(&input, "id,name,parent_id,website_url,transaction_text_examples,transaction_text_regexp\nadidas,Adidas,,https://adidas.com,[`ADIDAS`],ADIDAS\n").unwrap();
-    let db = root.join("catalog.sqlite");
+    let db = ultrafinance_core::store::MerchantStore::temporary().unwrap();
     let args = [
         "datasets",
         "import",
@@ -351,16 +380,16 @@ fn dataset_import_apply_and_refresh_preserve_merchant_ids() {
     let knowledge = std::path::Path::new(prepared["path"].as_str().unwrap()).join("knowledge.json");
     assert!(run(&args, None).status.success());
     let apply = [
-        "--database",
-        db.to_str().unwrap(),
+        "--database-url",
+        db.temporary_url(),
         "datasets",
         "apply",
         knowledge.to_str().unwrap(),
     ];
     assert!(run(&apply, None).status.success());
     let list = [
-        "--database",
-        db.to_str().unwrap(),
+        "--database-url",
+        db.temporary_url(),
         "merchants",
         "list",
         "--json",
@@ -406,10 +435,10 @@ fn batch_eval_uses_latest_holdouts_and_summarizes_unlabeled_cases() {
         std::fs::write(path.join("development.jsonl"), "not an eval input").unwrap();
     }
     let reports = root.join("reports");
-    let database = root.join("catalog.sqlite");
+    let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
     let args = [
-        "--database",
-        database.to_str().unwrap(),
+        "--database-url",
+        database.temporary_url(),
         "eval",
         "--all",
         "--mode",
@@ -471,12 +500,12 @@ fn enrich_batch_validates_envelopes_and_outputs_partial_results_before_failing()
     let directory =
         std::env::temp_dir().join(format!("ultrafinance-bulk-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
-    let database = directory.join("catalog.sqlite");
-    let db = database.to_str().unwrap();
+    let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = database.temporary_url();
     assert!(
         run(
             &[
-                "--database",
+                "--database-url",
                 db,
                 "merchants",
                 "add",
@@ -491,7 +520,7 @@ fn enrich_batch_validates_envelopes_and_outputs_partial_results_before_failing()
         .success()
     );
     let output = run(
-        &["--database", db, "enrich-batch", "--input", "-"],
+        &["--database-url", db, "enrich-batch", "--input", "-"],
         Some(
             r#"{"transactions":[{"description":"Alpha Cafe"},{"description":""},{"description":"Alpha Cafe PURCHASE"}]}"#,
         ),
@@ -530,15 +559,15 @@ fn locations_import_list_eval_and_structured_flags_work() {
     let directory =
         std::env::temp_dir().join(format!("ultrafinance-locations-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
-    let database = directory.join("catalog.sqlite");
+    let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let merchants = root.join("data/locations/merchants.example.json");
     let outlets = root.join("data/locations/open-enrichment-au.json");
     let suite = root.join("evals/location-smoke.json");
     for args in [
         vec![
-            "--database",
-            database.to_str().unwrap(),
+            "--database-url",
+            database.temporary_url(),
             "merchants",
             "import",
             merchants.to_str().unwrap(),
@@ -546,15 +575,15 @@ fn locations_import_list_eval_and_structured_flags_work() {
             "open-enrichment",
         ],
         vec![
-            "--database",
-            database.to_str().unwrap(),
+            "--database-url",
+            database.temporary_url(),
             "locations",
             "import",
             outlets.to_str().unwrap(),
         ],
         vec![
-            "--database",
-            database.to_str().unwrap(),
+            "--database-url",
+            database.temporary_url(),
             "locations",
             "import",
             outlets.to_str().unwrap(),
@@ -569,8 +598,8 @@ fn locations_import_list_eval_and_structured_flags_work() {
     }
     let output = run(
         &[
-            "--database",
-            database.to_str().unwrap(),
+            "--database-url",
+            database.temporary_url(),
             "merchants",
             "list",
             "--json",
@@ -581,8 +610,8 @@ fn locations_import_list_eval_and_structured_flags_work() {
     let merchant_id = merchants["merchants"][0]["id"].as_str().unwrap();
     let output = run(
         &[
-            "--database",
-            database.to_str().unwrap(),
+            "--database-url",
+            database.temporary_url(),
             "locations",
             "list",
             merchant_id,
@@ -599,8 +628,8 @@ fn locations_import_list_eval_and_structured_flags_work() {
     );
     let output = run(
         &[
-            "--database",
-            database.to_str().unwrap(),
+            "--database-url",
+            database.temporary_url(),
             "locations",
             "eval",
             suite.to_str().unwrap(),
@@ -635,11 +664,10 @@ fn locations_import_list_eval_and_structured_flags_work() {
 #[test]
 fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
     use ultrafinance_core::{import, store::MerchantStore};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("stats.sqlite");
-    let db = path.to_str().unwrap();
+    let path = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = path.temporary_url();
     let invoke = |json: bool| {
-        let mut args = vec!["--database", db, "merchants", "stats"];
+        let mut args = vec!["--database-url", db, "merchants", "stats"];
         if json {
             args.push("--json");
         }
@@ -656,7 +684,7 @@ fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
         empty,
         json!({"total":0,"manual":0,"without_source":0,"by_source":[],"without_market_evidence":0,"by_market":[],"by_source_region":[]})
     );
-    let store = MerchantStore::open(&path).unwrap();
+    let store = MerchantStore::postgres(db).unwrap();
     let catalog = r#"[{"id":"one","name":"One","markets":["CA"]},{"id":"two","name":"Two","markets":["CA"]}]"#;
     store
         .import(&import::catalog(catalog, "alpha").unwrap())
@@ -704,12 +732,11 @@ fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
 
 #[test]
 fn merchant_markets_flags_replace_country_and_exact_matches_remain_eligible() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("markets.sqlite");
-    let db = path.to_str().unwrap();
+    let path = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = path.temporary_url();
     let added = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "merchants",
             "add",
@@ -734,7 +761,7 @@ fn merchant_markets_flags_replace_country_and_exact_matches_remain_eligible() {
     assert!(merchant.get("country").is_none());
     let listed = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "merchants",
             "list",
@@ -753,7 +780,7 @@ fn merchant_markets_flags_replace_country_and_exact_matches_remain_eligible() {
     );
     let enriched = run(
         &[
-            "--database",
+            "--database-url",
             db,
             "enrich",
             "Example Brand",
@@ -789,4 +816,162 @@ fn infra_cli_latest_is_documented_and_conflicts_with_explicit_image() {
     let conflict = run(&["infra", "cli", "--latest", "--image", "example"], None);
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn dedupe_cli_empty_catalog_and_provider_failure_are_safe() {
+    let dir =
+        std::env::temp_dir().join(format!("ultrafinance-dedupe-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = database.temporary_url();
+    let output = run(&["--database-url", db, "merchants", "dedupe"], None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["candidates"], 0);
+    assert_eq!(report["dry_run"], false);
+    let file = dir.join("merchants.json");
+    std::fs::write(&file,r#"[{"id":"a","name":"Brand","website":"https://example.com"},{"id":"b","name":"Brand","website":"https://www.example.com"}]"#).unwrap();
+    assert!(
+        run(
+            &[
+                "--database-url",
+                db,
+                "merchants",
+                "import",
+                file.to_str().unwrap()
+            ],
+            None
+        )
+        .status
+        .success()
+    );
+    for extra in [
+        vec![],
+        vec!["--dry-run"],
+        vec!["--threshold", "NaN"],
+        vec!["--threshold", "0.2"],
+    ] {
+        let mut args = vec!["--database-url", db, "merchants", "dedupe"];
+        args.extend(extra);
+        assert!(!run(&args, None).status.success());
+        let output = run(
+            &["--database-url", db, "merchants", "stats", "--json"],
+            None,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["total"],
+            2
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn version_flags_print_embedded_build_identity_without_opening_a_database() {
+    for flag in ["--version", "-V"] {
+        let output = run(&["--database-url", "invalid", flag], None);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("ultrafinance {}\n", env!("ULTRAFINANCE_CLI_VERSION"))
+        );
+    }
+}
+
+#[test]
+fn interpretation_and_reviewed_resolution_commands_preserve_context_and_allow_revocation() {
+    fn json(args: &[&str]) -> Value {
+        let output = run(args, None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    let parsed = json(&["interpret", "SQ *JULIUS CAFE BROMONT 00482"]);
+    assert_eq!(parsed["hypotheses"][1]["merchant_text"], "JULIUS CAFE");
+    let path = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = path.temporary_url();
+    let store = ultrafinance_core::store::MerchantStore::postgres(db).unwrap();
+    let merchant =
+        serde_json::from_value(json!({"id":"cafe","name":"Royal Cafe","markets":["CA"]})).unwrap();
+    store.put(&merchant).unwrap();
+    let request =
+        serde_json::from_value(json!({"description":"opaque zxmq","country":"CA"})).unwrap();
+    let mapping = ultrafinance_core::resolution::Resolution::supported(&request, merchant, vec![]);
+    store.save_resolution(&mapping).unwrap();
+    drop(store);
+    let listed = json(&["--database-url", db, "resolutions", "list"]);
+    assert_eq!(listed[0]["verified"], false);
+    assert!(
+        !run(
+            &[
+                "--database-url",
+                db,
+                "resolutions",
+                "confirm",
+                &mapping.id,
+                "--evidence",
+                " "
+            ],
+            None
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            &[
+                "--database-url",
+                db,
+                "resolutions",
+                "confirm",
+                &mapping.id,
+                "--evidence",
+                "Official receipt verified"
+            ],
+            None
+        )
+        .status
+        .success()
+    );
+    let response = json(&[
+        "--database-url",
+        db,
+        "enrich",
+        "opaque zxmq",
+        "--country",
+        "CA",
+    ]);
+    assert_eq!(response["merchant"]["data"]["id"], "cafe");
+    let other = json(&[
+        "--database-url",
+        db,
+        "enrich",
+        "opaque zxmq",
+        "--country",
+        "US",
+    ]);
+    assert_eq!(other["merchant"]["status"], "unresolved");
+    assert!(
+        run(
+            &["--database-url", db, "resolutions", "revoke", &mapping.id],
+            None
+        )
+        .status
+        .success()
+    );
+    assert!(
+        json(&["--database-url", db, "resolutions", "list"])
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

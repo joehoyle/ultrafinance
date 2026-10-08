@@ -15,7 +15,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
 unicode-normalization = "0.1"
 strsim = "0.11"
 rapidfuzz = "0.5"
@@ -36,10 +35,6 @@ opt-level = 2
 opt-level = 3
 
 [profile.dev.package.serde_json]
-opt-level = 2
-
-# This also enables C optimization for the bundled SQLite engine, including FTS.
-[profile.dev.package.libsqlite3-sys]
 opt-level = 2
 
 [profile.dev.package.rapidfuzz]

@@ -215,9 +215,19 @@ fn release(client: &impl Lambda, image: &str) -> Result<(String, String)> {
     Ok((version, text(&previous, "FunctionVersion")?.to_owned()))
 }
 
-pub fn deploy(root: &Path) -> Result<()> {
+pub fn deploy(root: &Path, image: Option<&str>) -> Result<()> {
     let aws = Aws::configured(root)?;
     let function = super::output(root, "function_name")?;
+    let image = if let Some(image) = image {
+        validate_image(image)?;
+        image.to_owned()
+    } else {
+        build(root, &aws)?
+    };
+    promote(root, &aws, &function, &image)
+}
+
+fn build(root: &Path, aws: &Aws) -> Result<String> {
     let repository = super::output(root, "repository_url")?;
     let (registry, name) = repository
         .split_once('/')
@@ -246,7 +256,13 @@ pub fn deploy(root: &Path) -> Result<()> {
     }
     let tag = format!("{repository}:{}", uuid::Uuid::new_v4().simple());
     // The Dockerfile runs workspace tests and Clippy before pushing the final image.
-    super::checked(Command::new("docker").current_dir(root).args([
+    let metadata = crate::build_metadata::BuildMetadata::capture(root);
+    eprintln!(
+        "Building CLI version {}",
+        metadata.version(env!("CARGO_PKG_VERSION"))
+    );
+    let mut command = Command::new("docker");
+    command.current_dir(root).args([
         "buildx",
         "build",
         "--platform",
@@ -255,8 +271,25 @@ pub fn deploy(root: &Path) -> Result<()> {
         "--tag",
         &tag,
         "--push",
-        ".",
-    ]))?;
+    ]);
+    for (name, value) in [
+        (
+            "ULTRAFINANCE_BUILD_TAG",
+            metadata.tag.as_deref().unwrap_or(""),
+        ),
+        (
+            "ULTRAFINANCE_BUILD_REVISION",
+            metadata.revision.as_deref().unwrap_or(""),
+        ),
+        (
+            "ULTRAFINANCE_BUILD_DIRTY",
+            if metadata.dirty { "true" } else { "false" },
+        ),
+        ("ULTRAFINANCE_BUILD_TIME", metadata.time.as_str()),
+    ] {
+        command.args(["--build-arg", &format!("{name}={value}")]);
+    }
+    super::checked(command.arg("."))?;
     let image_tag = format!(
         "imageTag={}",
         tag.rsplit(':').next().context("missing release tag")?
@@ -274,13 +307,11 @@ pub fn deploy(root: &Path) -> Result<()> {
     let digest = result.as_str().context("ECR image digest missing")?;
     let image = format!("{repository}@{digest}");
     validate_image(&image)?;
-    let (version, previous) = release(
-        &Client {
-            aws: &aws,
-            function: &function,
-        },
-        &image,
-    )?;
+    Ok(image)
+}
+
+fn promote(root: &Path, aws: &Aws, function: &str, image: &str) -> Result<()> {
+    let (version, previous) = release(&Client { aws, function }, image)?;
     println!("Deployed version {version}; previous version {previous}");
     let site = super::output(root, "site_url")?;
     for path in ["/health", "/docs", "/openapi.json"] {

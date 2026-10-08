@@ -21,8 +21,11 @@ impl Aws {
 
     pub fn command(&self) -> Command {
         let mut command = Command::new("aws");
+        if !self.profile.is_empty() {
+            command.args(["--profile", &self.profile]);
+        }
         command
-            .args(["--profile", &self.profile, "--region", &self.region])
+            .args(["--region", &self.region])
             .env("AWS_PAGER", "")
             .env("AWS_REGION", &self.region)
             .env("AWS_DEFAULT_REGION", &self.region);

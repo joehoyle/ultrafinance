@@ -4,8 +4,80 @@ use serde_json::{Value, json};
 use std::{
     io::{self, IsTerminal, Write},
     path::Path,
+    sync::mpsc,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+struct StartupIndicator {
+    updates: Option<mpsc::Sender<String>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl StartupIndicator {
+    fn start() -> Self {
+        let initial = "Waiting for Fargate task".to_owned();
+        if !io::stderr().is_terminal() {
+            eprintln!("{initial} and ECS Exec agent...");
+            return Self {
+                updates: None,
+                worker: None,
+            };
+        }
+        let (updates, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let started = Instant::now();
+            let mut message = initial;
+            let frames = ['|', '/', '-', '\\'];
+            let mut frame = 0;
+            loop {
+                {
+                    let mut output = io::stderr().lock();
+                    let _ = write!(
+                        output,
+                        "\r\x1b[2K{} {message} ({}s)",
+                        frames[frame % frames.len()],
+                        started.elapsed().as_secs()
+                    );
+                    let _ = output.flush();
+                }
+                frame += 1;
+                match receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(update) => message = update,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            let mut output = io::stderr().lock();
+            let _ = write!(output, "\r\x1b[2K");
+            let _ = output.flush();
+        });
+        Self {
+            updates: Some(updates),
+            worker: Some(worker),
+        }
+    }
+
+    fn update(&self, status: &str) {
+        if let Some(updates) = &self.updates {
+            let message = if status == "RUNNING" {
+                "Task running; waiting for ECS Exec agent".to_owned()
+            } else {
+                format!("Waiting for Fargate task: {status}")
+            };
+            let _ = updates.send(message);
+        }
+    }
+}
+
+impl Drop for StartupIndicator {
+    fn drop(&mut self) {
+        self.updates.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 #[cfg(unix)]
 static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -57,6 +129,11 @@ impl Drop for Interrupts {
     }
 }
 
+fn session_command() -> String {
+    let script = include_str!("admin-shell.sh");
+    format!("/bin/bash -c '{}'", script.replace('\'', "'\"'\"'"))
+}
+
 fn registration(definition: &Value, image: &str) -> Result<Value> {
     validate_image(image)?;
     let mut request = serde_json::Map::new();
@@ -82,6 +159,18 @@ fn registration(definition: &Value, image: &str) -> Result<Value> {
         .and_then(Value::as_array_mut)
         .and_then(|items| items.iter_mut().find(|item| item["name"] == "cli"))
         .context("task definition missing cli container")?;
+    let names: Vec<_> = cli["secrets"]
+        .as_array()
+        .context("CLI administrator secrets missing; apply CLI infrastructure")?
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    if !["ULTRAFINANCE_ADMIN_USERNAME", "ULTRAFINANCE_ADMIN_PASSWORD"]
+        .iter()
+        .all(|name| names.contains(name))
+    {
+        bail!("CLI administrator credentials missing; apply CLI infrastructure");
+    }
     cli["image"] = json!(image);
     Ok(Value::Object(request))
 }
@@ -151,7 +240,7 @@ pub fn open(root: &Path, image: ImageSelection<'_>) -> Result<()> {
         || interrupts.check(),
         |task| {
             println!(
-                "Opening shell. Ctrl-C cancels remote commands; use exit to stop the task. The task expires after one hour."
+                "Opening database administrator shell. Ctrl-C cancels remote commands; use exit to stop the task. The task expires after one hour."
             );
             io::stdout().flush()?;
             super::checked(aws.command().args([
@@ -165,7 +254,7 @@ pub fn open(root: &Path, image: ImageSelection<'_>) -> Result<()> {
                 "cli",
                 "--interactive",
                 "--command",
-                "/bin/bash --rcfile /etc/bash.bashrc -i",
+                &session_command(),
             ]))
         },
     )
@@ -257,23 +346,7 @@ fn run_shell(
         task = Some(text(&result["tasks"][0], "taskArn")?.to_owned());
         let task = task.as_deref().context("missing task ARN")?;
         println!("Task: {task}\nImage: {chosen}");
-        let has_database = request["containerDefinitions"]
-            .as_array()
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .filter(|item| item["name"] == "cli")
-                    .any(|item| {
-                        item["secrets"].as_array().is_some_and(|secrets| {
-                            secrets
-                                .iter()
-                                .any(|secret| secret["name"] == "ULTRAFINANCE_DATABASE_URL")
-                        })
-                    })
-            });
-        if !has_database {
-            println!("Database URL is not configured; set database_url in infrastructure.");
-        }
+        let indicator = StartupIndicator::start();
         let deadline = Instant::now() + timeout;
         loop {
             interrupt()?;
@@ -293,6 +366,7 @@ fn run_shell(
                 bail!("unable to inspect task {task}");
             }
             let status = &response["tasks"][0];
+            indicator.update(status["lastStatus"].as_str().unwrap_or("UNKNOWN"));
             if status["lastStatus"] == "STOPPED" {
                 bail!("shell task stopped before connecting; inspect ECS and CloudWatch");
             }
@@ -317,6 +391,7 @@ fn run_shell(
             }
             std::thread::sleep(Duration::from_secs(5));
         }
+        drop(indicator);
         interrupt()?;
         session(task)
     })();
@@ -388,7 +463,7 @@ mod tests {
             Ok(match args[1] {
                 "describe-task-definition" => {
                     json!({"taskDefinition": {"family":"cli", "revision":5,
-                    "containerDefinitions":[{"name":"cli","secrets":[{"name":"ULTRAFINANCE_DATABASE_URL","valueFrom":"secret"}]}]}})
+                    "containerDefinitions":[{"name":"cli","secrets":[{"name":"ULTRAFINANCE_ADMIN_USERNAME","valueFrom":"secret:username::"},{"name":"ULTRAFINANCE_ADMIN_PASSWORD","valueFrom":"secret:password::"}]}]}})
                 }
                 "get-function" => json!(image()),
                 "list-versions-by-function" => json!(["9", "$LATEST", "11", "10"]),
@@ -399,7 +474,7 @@ mod tests {
                     assert!(request.get("revision").is_none());
                     assert_eq!(
                         request["containerDefinitions"][0]["secrets"][0]["valueFrom"],
-                        "secret"
+                        "secret:username::"
                     );
                     json!({"taskDefinition":{"taskDefinitionArn":"revision"}})
                 }
@@ -437,6 +512,55 @@ mod tests {
     fn config() -> Value {
         json!({"cluster":"cluster","task_definition":"definition","function_name":"function",
             "subnets":["private"],"security_groups":["database"]})
+    }
+
+    #[test]
+    fn administrator_bootstrap_encodes_secrets_without_printing_them() {
+        let script = include_str!("admin-shell.sh");
+        let verify = r#"[[ $ULTRAFINANCE_DATABASE_URL == 'postgresql://admin%20%40user:p%40ss%3A%2F%3F%23%25%26%2B%C3%A9@database.example:5432/finance%20db?sslmode=require' ]] || exit 1
+[[ -z ${ULTRAFINANCE_ADMIN_PASSWORD+x} ]] || exit 2
+printf 'administrator URL validated\n'"#;
+        let result = std::process::Command::new("/bin/bash")
+            .args(["-c", script, "admin-shell", "/bin/bash", "-c", verify])
+            .env("ULTRAFINANCE_ADMIN_USERNAME", "admin @user")
+            .env("ULTRAFINANCE_ADMIN_PASSWORD", "p@ss:/?#%&+é")
+            .env("ULTRAFINANCE_DATABASE_HOST", "database.example")
+            .env("ULTRAFINANCE_DATABASE_NAME", "finance db")
+            .env(
+                "ULTRAFINANCE_DATABASE_URL",
+                "postgresql://old-application-login",
+            )
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"administrator URL validated\n");
+        assert!(result.stderr.is_empty());
+        let missing = std::process::Command::new("/bin/bash")
+            .args(["-c", script])
+            .env("ULTRAFINANCE_ADMIN_USERNAME", "admin")
+            .env_remove("ULTRAFINANCE_ADMIN_PASSWORD")
+            .output()
+            .unwrap();
+        assert!(!missing.status.success());
+        assert!(
+            String::from_utf8_lossy(&missing.stderr).contains("administrator password missing")
+        );
+        assert!(missing.stdout.is_empty());
+    }
+
+    #[test]
+    fn application_credentials_cannot_launch_an_administrator_shell() {
+        let definition = json!({"containerDefinitions":[{"name":"cli","secrets":[{"name":"ULTRAFINANCE_DATABASE_URL","valueFrom":"application-secret"}]}]});
+        assert!(
+            registration(&definition, &image())
+                .unwrap_err()
+                .to_string()
+                .contains("administrator credentials missing")
+        );
     }
 
     #[test]

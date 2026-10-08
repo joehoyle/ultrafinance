@@ -202,12 +202,9 @@ pub async fn run_with_progress(
                 } => store.resolve_source(&r.source, &r.external_id)?,
             };
             let db = store.clone();
-            let description = case.request.description.clone();
-            let country = case.request.country.clone();
-            let candidates = tokio::task::spawn_blocking(move || {
-                db.search(&description, country.as_deref(), 10)
-            })
-            .await??;
+            let request = case.request.clone();
+            let candidates =
+                tokio::task::spawn_blocking(move || db.search_request(&request, 10)).await??;
             let candidate_ids: Vec<_> = candidates.iter().map(|c| c.merchant.id.clone()).collect();
             let expected_rank = expected_local_id
                 .as_ref()
@@ -290,7 +287,6 @@ pub async fn run_with_progress(
                 include_str!("../migrations/001_postgres.sql"),
                 include_str!("search_score.rs"),
                 include_str!("regex_rules.rs"),
-                include_str!("search_profile.rs"),
                 include_str!("import.rs"),
                 include_str!("eval.rs"),
                 include_str!("location.rs"),
@@ -401,7 +397,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn offline_retrieval_and_exact_matching_are_separate_metrics() {
-        let db = MerchantStore::memory().unwrap();
+        let db = MerchantStore::temporary().unwrap();
         db.put(&crate::Merchant {
             id: "mer_a".into(),
             name: "Julius Café".into(),
@@ -438,7 +434,7 @@ mod tests {
     }
     #[tokio::test]
     async fn service_errors_cannot_be_counted_as_correct_unresolved() {
-        let db = MerchantStore::memory().unwrap();
+        let db = MerchantStore::temporary().unwrap();
         db.put(&crate::Merchant {
             id: "mer_a".into(),
             name: "Julius Café".into(),
@@ -471,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn unlabeled_outcomes_measure_coverage_without_claiming_accuracy() {
-        let db = MerchantStore::memory().unwrap();
+        let db = MerchantStore::temporary().unwrap();
         db.put(&crate::Merchant {
             id: "a".into(),
             name: "Julius Cafe".into(),

@@ -1,0 +1,69 @@
+-- Schema version 4: scalar catalog fields are authoritative; views serialize API documents.
+ALTER TABLE merchants ADD COLUMN name TEXT NOT NULL DEFAULT 'unknown' CHECK(length(trim(name)) > 0);
+ALTER TABLE merchants ADD COLUMN website TEXT;
+ALTER TABLE merchants ADD COLUMN logo_url TEXT;
+ALTER TABLE merchants ADD COLUMN logo_source TEXT;
+ALTER TABLE merchants ADD COLUMN markets_json TEXT;
+ALTER TABLE merchants ADD COLUMN market_evidence_json TEXT;
+ALTER TABLE merchants ADD COLUMN aliases_json TEXT;
+ALTER TABLE merchants ADD COLUMN sources_json TEXT;
+UPDATE merchants SET name=(data::jsonb #>> '{name}'),website=(data::jsonb #>> '{website}'),logo_url=(data::jsonb #>> '{logo_url}'),logo_source=(data::jsonb #>> '{logo_source}'),markets_json=COALESCE(((data::jsonb #> '{markets}'))::text,'[]'),market_evidence_json=COALESCE(((data::jsonb #> '{market_evidence}'))::text,'[]'),aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),sources_json=COALESCE(((data::jsonb #> '{sources}'))::text,'[]');
+ALTER TABLE merchants DROP COLUMN data;
+CREATE VIEW merchants_documents AS SELECT *, (jsonb_build_object('id',id,'name',name,'website',website,'logo_url',logo_url,'logo_source',logo_source,'markets',markets_json::jsonb,'market_evidence',market_evidence_json::jsonb,'aliases',aliases_json::jsonb,'sources',sources_json::jsonb))::text AS data FROM merchants;
+ALTER TABLE manual_merchants ADD COLUMN name TEXT NOT NULL DEFAULT 'unknown' CHECK(length(trim(name)) > 0);
+ALTER TABLE manual_merchants ADD COLUMN website TEXT;
+ALTER TABLE manual_merchants ADD COLUMN logo_url TEXT;
+ALTER TABLE manual_merchants ADD COLUMN logo_source TEXT;
+ALTER TABLE manual_merchants ADD COLUMN markets_json TEXT;
+ALTER TABLE manual_merchants ADD COLUMN market_evidence_json TEXT;
+ALTER TABLE manual_merchants ADD COLUMN aliases_json TEXT;
+ALTER TABLE manual_merchants ADD COLUMN sources_json TEXT;
+UPDATE manual_merchants SET name=(data::jsonb #>> '{name}'),website=(data::jsonb #>> '{website}'),logo_url=(data::jsonb #>> '{logo_url}'),logo_source=(data::jsonb #>> '{logo_source}'),markets_json=COALESCE(((data::jsonb #> '{markets}'))::text,'[]'),market_evidence_json=COALESCE(((data::jsonb #> '{market_evidence}'))::text,'[]'),aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),sources_json=COALESCE(((data::jsonb #> '{sources}'))::text,'[]');
+ALTER TABLE manual_merchants DROP COLUMN data;
+CREATE VIEW manual_merchants_documents AS SELECT *, (jsonb_build_object('id',id,'name',name,'website',website,'logo_url',logo_url,'logo_source',logo_source,'markets',markets_json::jsonb,'market_evidence',market_evidence_json::jsonb,'aliases',aliases_json::jsonb,'sources',sources_json::jsonb))::text AS data FROM manual_merchants;
+ALTER TABLE source_records ADD COLUMN merchant_json TEXT;
+ALTER TABLE source_records ADD COLUMN raw_json TEXT;
+ALTER TABLE source_records ADD COLUMN version TEXT;
+ALTER TABLE source_records ADD COLUMN attribution TEXT;
+ALTER TABLE source_records ADD COLUMN license TEXT;
+ALTER TABLE source_records ADD COLUMN url TEXT;
+ALTER TABLE source_records ADD COLUMN transaction_pattern TEXT;
+ALTER TABLE source_records ADD COLUMN parent_id TEXT;
+UPDATE source_records SET merchant_json=COALESCE(((data::jsonb #> '{merchant}'))::text,'{}'),raw_json=COALESCE(((data::jsonb #> '{raw}'))::text,'{}'),version=(data::jsonb #>> '{version}'),attribution=(data::jsonb #>> '{attribution}'),license=(data::jsonb #>> '{license}'),url=(data::jsonb #>> '{url}'),transaction_pattern=CASE WHEN jsonb_typeof(data::jsonb #> '{raw,transaction_text_regexp}')='string' THEN (data::jsonb #>> '{raw,transaction_text_regexp}') ELSE NULL END,parent_id=(data::jsonb #>> '{raw,parent_id}');
+ALTER TABLE source_records DROP COLUMN data;
+CREATE VIEW source_records_documents AS SELECT *, (jsonb_build_object('source',source,'external_id',external_id,'merchant',merchant_json::jsonb,'raw',raw_json::jsonb,'version',version,'attribution',attribution,'license',license,'url',url))::text AS data FROM source_records;
+ALTER TABLE location_records ADD COLUMN name TEXT;
+ALTER TABLE location_records ADD COLUMN precision TEXT;
+ALTER TABLE location_records ADD COLUMN address TEXT;
+ALTER TABLE location_records ADD COLUMN city TEXT;
+ALTER TABLE location_records ADD COLUMN region TEXT;
+ALTER TABLE location_records ADD COLUMN postal_code TEXT;
+ALTER TABLE location_records ADD COLUMN country TEXT;
+ALTER TABLE location_records ADD COLUMN store_number TEXT;
+ALTER TABLE location_records ADD COLUMN latitude DOUBLE PRECISION;
+ALTER TABLE location_records ADD COLUMN longitude DOUBLE PRECISION;
+ALTER TABLE location_records ADD COLUMN aliases_json TEXT;
+ALTER TABLE location_records ADD COLUMN place_ids_json TEXT;
+ALTER TABLE location_records ADD COLUMN transaction_pattern TEXT;
+ALTER TABLE location_records ADD COLUMN manual_override BOOLEAN;
+ALTER TABLE location_records ADD COLUMN attribution TEXT;
+ALTER TABLE location_records ADD COLUMN license TEXT;
+ALTER TABLE location_records ADD COLUMN url TEXT;
+UPDATE location_records SET name=(data::jsonb #>> '{location,name}'),precision=(data::jsonb #>> '{location,precision}'),address=(data::jsonb #>> '{location,address}'),city=(data::jsonb #>> '{location,city}'),region=(data::jsonb #>> '{location,region}'),postal_code=(data::jsonb #>> '{location,postal_code}'),country=(data::jsonb #>> '{location,country}'),store_number=(data::jsonb #>> '{location,store_number}'),latitude=((data::jsonb #>> '{location,latitude}'))::double precision,longitude=((data::jsonb #>> '{location,longitude}'))::double precision,aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),place_ids_json=COALESCE(((data::jsonb #> '{place_ids}'))::text,'{}'),transaction_pattern=(data::jsonb #>> '{transaction_pattern}'),manual_override=COALESCE(((data::jsonb #>> '{manual_override}'))::boolean,false),attribution=(data::jsonb #>> '{attribution}'),license=(data::jsonb #>> '{license}'),url=(data::jsonb #>> '{url}');
+ALTER TABLE location_records DROP COLUMN data;
+CREATE VIEW location_records_documents AS SELECT *, (jsonb_build_object('source',source,'external_id',external_id,'merchant',CASE WHEN merchant_id IS NOT NULL THEN jsonb_build_object('merchant_id',merchant_id) ELSE jsonb_build_object('source',merchant_source,'external_id',merchant_external_id) END,'location',jsonb_build_object('id',id,'name',name,'precision',precision,'address',address,'city',city,'region',region,'postal_code',postal_code,'country',country,'store_number',store_number,'latitude',latitude,'longitude',longitude),'aliases',aliases_json::jsonb,'place_ids',place_ids_json::jsonb,'transaction_pattern',transaction_pattern,'manual_override',manual_override,'attribution',attribution,'license',license,'url',url))::text AS data FROM location_records;
+CREATE INDEX merchants_name ON merchants(lower(name) COLLATE "C",id);
+CREATE INDEX source_records_patterns ON source_records(source,parent_id) WHERE transaction_pattern IS NOT NULL;
+CREATE INDEX location_records_geography ON location_records(country,city,merchant_id);
+CREATE INDEX location_records_store_number ON location_records(merchant_id,store_number) WHERE store_number IS NOT NULL;
+CREATE TABLE merchant_market_evidence (
+ merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+ country TEXT NOT NULL CHECK(length(country)=2 AND country=upper(country)),
+ source TEXT NOT NULL,
+ external_id TEXT NOT NULL,
+ kind TEXT NOT NULL,
+ confidence TEXT NOT NULL,
+ PRIMARY KEY(merchant_id,country,source,external_id,kind,confidence)
+);
+CREATE INDEX merchant_market_evidence_country ON merchant_market_evidence(country,merchant_id);
+UPDATE ultrafinance_schema SET version=4;

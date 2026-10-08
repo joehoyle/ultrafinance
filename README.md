@@ -1,18 +1,32 @@
 # Ultrafinance
 
 A small synchronous merchant enrichment API in Rust. Axum serves HTTP, and the
-independent `ultrafinance-core` crate retrieves merchant candidates from PostgreSQL (or local SQLite)
+independent `ultrafinance-core` crate retrieves merchant candidates from PostgreSQL
 and uses Jev to evaluate fuzzy matches. Unique normalized exact aliases resolve
 locally without a provider call.
 One request returns a completed result; there are no background jobs.
 
+Merchant lookup now preserves competing interpretations of processor prefixes,
+business names and possible location suffixes. Optional structured business
+discovery supplies evidence when catalog matching cannot resolve a transaction.
+Supported resolutions are remembered with context; only explicit review enables
+direct matching from a remembered mapping. See [interpretation, discovery and
+mapping configuration](docs/discovery.md).
+
 ## Run
 
 ```sh
+./dev/postgres.sh up
 cargo run -p ultrafinance-api
 ```
 
-The server binds to `127.0.0.1:3000`. Set `ULTRAFINANCE_DATABASE_URL` to use PostgreSQL; without it, local development opens `data/ultrafinance.sqlite`.
+The server binds to `127.0.0.1:3000`. PostgreSQL is the only database backend.
+Local commands default to the Docker server at `127.0.0.1:55432`; set
+`ULTRAFINANCE_DATABASE_URL` to use another PostgreSQL database. The startup script
+starts PostgreSQL 17 and applies schema migrations. Data persists in the Compose
+volume. `./dev/postgres.sh down` stops the container while retaining its data;
+`./dev/postgres.sh test` starts PostgreSQL and runs the workspace tests.
+The local container accepts connections without a password on its loopback port.
 An empty database returns `unresolved` without calling any provider.
 
 Open `http://127.0.0.1:3000/` for the project website, copyable HTTP/CLI examples,
@@ -24,6 +38,12 @@ static web server, without a frontend build step. The `/sources` page
 (`website/sources.html`) documents supported catalog and evaluation datasets,
 credits, licenses, transformations, and coverage limitations. Static hosts need
 to map `/sources` to that file.
+
+Plain-language privacy and terms pages live at `/privacy` and `/terms`
+(`website/privacy.html` and `website/terms.html`). Static hosts need to map these
+paths to their HTML files too. Both are linked from the site footer, and the
+lookup form explains saved history and AI processing before submission. Keep
+these disclosures in sync with data handling, provider, and retention changes.
 
 The website's canonical URL is `https://ultrafinance.app/`. Search metadata,
 Open Graph and Twitter cards, and JSON-LD are in the initial HTML. A branded
@@ -40,8 +60,8 @@ Search Console and submit `https://ultrafinance.app/sitemap.xml`.
 
 Add verified merchants using the CLI commands below. Set `TYPESAFE_API_KEY` in
 your environment to evaluate fuzzy candidates. The API sees database updates on
-subsequent requests. For an isolated JSON catalog, set `ULTRAFINANCE_MERCHANTS`
-to its path; this loads the catalog into memory at startup instead of SQLite.
+subsequent requests. Import JSON catalogs through `merchants import`;
+CLI enrichment also supports an isolated PostgreSQL catalog with `--merchants FILE`.
 Transaction fields including `extra` and candidate records are sent to TypeSafe
 when evaluation runs. Keep unrelated personal information out of requests.
 
@@ -93,6 +113,25 @@ cargo test -p ultrafinance-api
 ## Local CLI
 
 The CLI is the default workspace executable. `cargo run` displays its help.
+Check which binary you are running with `cargo run -- --version` (or
+`ultrafinance --version` / `-V` for the installed binary). A clean checkout at an
+exact Git tag prints that tag, for example `ultrafinance v0.1.0`. Other builds
+include the UTC build time, Git revision when available, and a `-dirty` marker
+for local changes:
+
+```text
+ultrafinance 0.1.0-dev (built 2026-10-08T21:00:00Z; git abc123def456-dirty)
+```
+
+The timestamp is embedded at compilation, so running an existing binary does
+not change it. Cargo/Docker cache hits retain the original binary's build time.
+The deployment script and CI pass fresh build metadata into Docker, which keeps
+the version identifiable even though `.git` is excluded from the image context.
+Direct Docker builds can pass `ULTRAFINANCE_BUILD_TAG`,
+`ULTRAFINANCE_BUILD_REVISION`, `ULTRAFINANCE_BUILD_DIRTY` (`true`/`false`), and
+`ULTRAFINANCE_BUILD_TIME` (UTC ISO 8601) as build arguments. Without metadata,
+Docker builds show a development version with the compilation time.
+
 It uses Clap for commands, argument validation, and generated help.
 Use the same enrichment core directly, without starting the server:
 
@@ -103,7 +142,7 @@ cargo run -- enrich 'LS' --country CA --amount 142.97 \
 
 The CLI prints pretty JSON to stdout, diagnostics to stderr, and exits nonzero on
 validation, configuration, or provider errors. It uses the same environment
-variables and default SQLite database as the API. Provide `--merchants FILE`,
+variables and default local PostgreSQL database as the API. Provide `--merchants FILE`,
 `--model MODEL`, or `--threshold NUMBER` to override settings. Set
 `TYPESAFE_API_KEY` in the environment for Jev evaluation.
 
@@ -159,6 +198,62 @@ Optionally install the binary for shorter commands:
 cargo install --path crates/ultrafinance-cli
 ultrafinance enrich 'LS' --country CA
 ```
+
+## Automated merchant deduplication
+
+Run the complete scan, Jev evaluation, and merge without a review step:
+
+```sh
+cargo run -- merchants dedupe
+```
+
+Set `TYPESAFE_API_KEY` in the environment. The command uses the configured
+PostgreSQL database, defaulting to the local Docker server when no URL is set.
+It prints progress to stderr and a JSON report to stdout. Optional flags:
+
+```sh
+cargo run -- merchants dedupe --dry-run --output dedupe-report.json
+cargo run -- merchants dedupe --model jev-latest --threshold 0.98 --max-pairs 10000
+```
+
+Candidate discovery uses normalized names/aliases, normalized website hosts,
+and similar names sharing character trigrams (at least 0.85 normalized edit
+similarity). These signals only select pairs to evaluate; they never authorize
+merges. Jev receives each pair's merchant fields, manual corrections, and source
+provenance, and chooses same brand, related but distinct, different, or
+insufficient evidence. Both its same-brand probability and confidence must reach
+`--threshold` (default 0.98). This is a conservative starting threshold, not a
+measured guarantee of merge accuracy. Related products, subscriptions, parent
+companies, and outlets remain separate. Uncertain decisions are reported and
+skipped. Groups require accepted decisions for every pair; rejected or unexamined
+relationships never become merges through transitivity. Groups containing more
+than one manual merchant remain separate to preserve corrections.
+
+The surviving ID prefers a manual merchant, then the merchant with the most
+source records, then the lexicographically first ID. Merges preserve source keys,
+provenance, aliases, market evidence, available website/logo metadata, and outlet
+references. Source refreshes keep the merged identity. Conflicting nonblank scalar
+metadata uses the survivor's record, with other source facts retained in provenance.
+Imported aliases remain unverified; merging never makes them trusted exact matches.
+
+All provider evaluations must complete successfully before any merge. Requests
+are bounded to 32 questions, 24 KiB per question, and 48 KiB per request. Oversized
+evidence, malformed answers, provider failures, or a scan exceeding `--max-pairs`
+fail without merging. The command rechecks the entire catalog and commits every
+group in one transaction; concurrent catalog changes abort the run for a retry.
+`--dry-run` calls Jev but performs no merges.
+
+Each applied run saves its report and complete pre-merge catalog snapshot in
+`merchant_merge_runs`; the report includes its `run_id`. Retired IDs are recorded
+in `merchant_redirects`, and local outlet imports/listing follow those redirects.
+Manual writes to retired IDs are rejected. The saved snapshot supports recovery, but there is no
+automatic undo command. Neither enrichment history nor old external responses
+are rewritten.
+
+PostgreSQL creates these tables through `database init`. The CLI database role needs schema creation
+permission for first-time setup (or have a schema owner run `database init`),
+read access to the new tables, and write/delete access to the catalog tables
+and merge tables. This command does not alter infrastructure grants.
 
 ## Transaction locations
 
@@ -222,8 +317,7 @@ are not automatically treated as transaction locations. See the
 cargo run -- locations eval evals/location-smoke.json
 ```
 
-SQLite adds outlet storage when opened. PostgreSQL requires migration 003 through
-`database init`. The outlet migration preserves the version-2 merchant/log
+PostgreSQL creates outlet storage through `database init`. The outlet migration preserves the version-2 merchant/log
 contract, so the previous application remains compatible and release rollback
 continues to work. Apply it before deploying the location-enabled application.
 The Lambda runtime role also needs `SELECT` on `location_records`;
@@ -242,6 +336,8 @@ cargo run -- datasets import --source open-enrichment \
   --input data/imports/open-enrichment-global.csv --region global
 cargo run -- datasets import --source dodatathings --input data/imports/dodatathings.csv
 cargo run -- datasets import --source moneyvis --input data/imports/moneyvis.csv
+cargo run -- datasets import --source business-transactions \
+  --input data/imports/business-transactions-reviewed.csv
 ```
 
 Download Merchant Studio's `merchant_aliases.json` and
@@ -322,30 +418,47 @@ Errors remain in the match-rate denominator and are counted separately from unre
 Use `--limit` to try a smaller run before evaluating the full dataset with provider calls.
 Coverage does not establish whether predicted merchants are correct.
 
-Unlabeled samples are omitted by `datasets export-eval`. Development samples can be used for matching rules
-or future training; this importer does not train a model.
+BusinessTransactions accepts the native `name`, `transaction_string`, and optional
+`category_label` CSV columns from
+[HighkeyPrxneeth's FSQ-derived synthetic dataset](https://huggingface.co/datasets/HighkeyPrxneeth/BusinessTransactions).
+Review the selected rows before benchmarking: generated text can contain artifacts,
+non-business places, generic names, or conflicting merchant labels. Conflicting
+labels for the same normalized description reject the import rather than picking
+a winner. Missing names or descriptions also reject the import.
 
-For search profiling, run:
+Its bundle contains a names-only reference catalog for isolated synthetic retrieval
+tests. External IDs are derived from normalized names, not Foursquare place IDs;
+same-name businesses cannot be distinguished. Generated descriptions are never
+imported as aliases or raw merchant evidence. Generated geography, store numbers,
+amounts, dates, and categories do not become merchant/outlet facts or structured
+request hints. Category labels remain evaluation metadata. These scores measure
+synthetic source consistency, not real transaction accuracy. Use a separate local
+database when applying this reference catalog, not the production merchant database.
+The published data is CC-BY-4.0, with Foursquare's Apache-2.0 license and applicable
+NOTICE/attribution obligations for upstream names; preserve both when distributing.
 
 ```sh
-ULTRAFINANCE_PROFILE_SEARCH=1 cargo run -- eval --all --limit 500
+docker compose exec -T postgres createdb -U ultrafinance ultrafinance_eval
+cargo run -- --database-url postgresql://ultrafinance@127.0.0.1:55432/ultrafinance_eval?sslmode=disable database init
+cargo run -- \
+  --database-url postgresql://ultrafinance@127.0.0.1:55432/ultrafinance_eval?sslmode=disable \
+  datasets apply <BUNDLE>/knowledge.json
+cargo run -- \
+  --database-url postgresql://ultrafinance@127.0.0.1:55432/ultrafinance_eval?sslmode=disable \
+  eval <BUNDLE>/holdout.eval.json --mode search \
+  --output evals/reports/business-transactions-holdout.json
 ```
 
-This prints aggregate SQLite timings for exact, token, and trigram SQL,
-JSON decoding, fuzzy scoring, and provenance reads. It logs no descriptors or
-merchant records. The flag is off by default. `--limit` applies to each suite;
-use an unrestricted run for the complete benchmark. Enrichment evaluations
-reuse the measured candidate shortlist rather than searching twice per case.
+Unlabeled samples are omitted by `datasets export-eval`. Development samples can be used for matching rules
+or future training; this importer does not train a model.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ULTRAFINANCE_BIND` | `127.0.0.1:3000` | Listening address |
-| `ULTRAFINANCE_DATABASE_URL` | unset | PostgreSQL URL; takes precedence over local SQLite and API JSON catalogs |
+| `ULTRAFINANCE_DATABASE_URL` | Local Docker PostgreSQL | PostgreSQL connection URL; required explicitly in production |
 | `ULTRAFINANCE_REQUIRE_POSTGRES` | unset locally; `true` in Docker | Refuse API startup without PostgreSQL |
-| `ULTRAFINANCE_DB` | `data/ultrafinance.sqlite` | Local SQLite fallback |
-| `ULTRAFINANCE_MERCHANTS` | unset | Optional JSON catalog instead of SQLite |
 | `TYPESAFE_API_KEY` | unset | Jev credential |
 | `JEV_MODEL` | `jev-latest` | Jev model |
 | `ULTRAFINANCE_MATCH_THRESHOLD` | `0.95` | Minimum chosen probability and model confidence |
@@ -364,22 +477,16 @@ The client validates certificates and hostnames. For a disposable local server,
 The application image installs Canada Central's public RDS CA certificates from
 `deploy/rds-ca/` so Aurora's TLS certificate can be validated.
 
-Initialize with a schema administration role, then migrate the authoritative
-SQLite catalog with a write role:
+Initialize with a schema administration role:
 
 ```sh
 cargo run -- database init
-cargo run -- database migrate-sqlite data/ultrafinance.sqlite
 cargo run -- merchants list --json
 ```
 
-Migration requires an empty destination catalog and opens SQLite read-only.
-It copies source records, links, local IDs, manual overrides, and logos in one
-transaction, then rebuilds search indexes and verifies the complete catalog fingerprint before committing. Do not seed production from
-`deploy/catalog.json` or `export-catalog.py`: those flattened exports do not
-preserve the full import and correction history. Keep the source SQLite backup
-until the production catalog has been verified. Migration refuses to overwrite
-an existing catalog.
+Use PostgreSQL backups for recovery. Import source bundles and manual records
+through the normal CLI commands; a flattened merchant export does not preserve
+all provenance and corrections.
 
 Once connected to production, the usual commands update the shared database:
 
@@ -414,15 +521,16 @@ on connection failure or interruption; tasks also expire after one hour.
 During an active shell session, Ctrl-C cancels remote commands without
 interrupting the launcher. Use `exit` to close the shell and stop the task.
 
-The shell automatically receives the same `ULTRAFINANCE_DATABASE_URL` as
-Lambda. Set `database_url` in the private infrastructure variables and apply
-once; OpenTofu populates the shared Secrets Manager URL used by ECS. Use a
-non-administrator application login with catalog read/write permissions so
-both the API and CLI can use it. Schema administration remains separate.
+The CLI shell uses the RDS administrator, with credentials injected from the
+RDS-managed secret when a task starts. The launcher constructs its TLS-enabled
+`ULTRAFINANCE_DATABASE_URL` inside the shell. Lambda continues to use the
+non-administrator application URL configured by `database_url`. Apply CLI
+infrastructure changes with `./infra/tofu.sh apply`, then open a new shell to
+pick up administrator credentials.
 Use `cargo run -- infra cli --latest` to open the newest published Lambda image,
 including a release held back by a required database migration. Run
-`ultrafinance database init` in that new shell with schema-administration
-permissions before completing the release. `--latest` selects the highest
+`ultrafinance database init` in that new administrator shell before completing
+the release. `--latest` selects the highest
 published version, excludes mutable `$LATEST`, and conflicts with `--image`.
 Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a specific immutable image. The shell filesystem is temporary.
 
@@ -432,7 +540,7 @@ processes. API reads use consistent snapshots and see committed changes on the
 next request. PostgreSQL uses indexed token-prefix and substring-trigram
 retrieval; the final Rust similarity score, provenance, negative aliases, and
 verified exact-match rules remain the same. Candidate ranking may differ from
-SQLite FTS, so compare held-out evaluations before production cutover.
+other retrieval engines, so compare held-out evaluations when changing search behavior.
 
 Schema creation is an explicit CLI operation, never an API startup side effect.
 Use a shared application role with `CONNECT`, schema `USAGE`, and `SELECT`,
@@ -458,8 +566,7 @@ unusually slow resumes can still time out and require a fresh request.
 The PostgreSQL integration test runs against an **empty disposable database**:
 
 ```sh
-ULTRAFINANCE_TEST_DATABASE_URL=postgresql://localhost/ultrafinance_test?sslmode=disable \
-  cargo test -p ultrafinance-core postgres_ -- --ignored
+./dev/postgres.sh test
 ```
 
 ## Merchant database and search
@@ -483,10 +590,10 @@ Generated merchant IDs remain stable. To replace a record and its aliases, use
 `merchants add --id EXISTING_ID ...`. Import an existing JSON catalog with
 `merchants import FILE`. Imports update source/external ID pairs; repeat imports preserve local IDs.
 Imported aliases remain unverified and cannot bypass Jev. Manual names, websites and verified aliases take precedence over imported records.
-Manual markets supplement imported market evidence. `--database FILE` overrides the local SQLite path globally. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects PostgreSQL for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
+Manual markets supplement imported market evidence. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects the PostgreSQL database for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
 
 Search removes accents, folds case, and normalizes punctuation and whitespace.
-Exact aliases are indexed separately; SQLite FTS5 token/prefix and trigram
+Exact aliases are indexed separately; PostgreSQL full-text and trigram
 indexes retrieve a bounded fuzzy pool. Rust ranks candidates using edit distance
 and token overlap. Search scores are retrieval scores, not match probabilities.
 Short descriptors such as `LS` don't generate fuzzy candidates from letters alone.
@@ -520,12 +627,12 @@ current authoritative records. Dataset-region statistics remain separate from
 market coverage.
 
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
-`merchants add/list --country` have been removed. SQLite upgrades existing stored
-country declarations to markets transactionally on open. PostgreSQL requires
+`merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to migrate to
-schema version 3 before running this application. The migration preserves IDs,
+schema version 4 before running this application. See
+[database schema](docs/database-schema.md) for column storage and migration details. The migration preserves IDs,
 source links, outlets, and manual corrections. Older application versions cannot
-run against version 3, so application-only rollback across this migration is
+run against version 4, so application-only rollback across this migration is
 unsupported.
 
 ## Merchant logos
@@ -582,7 +689,7 @@ local IDs. Use a stable source name across refreshes.
 Merchant Studio data: **Enrichment from Merchant Studio by Jonathan Taveras**,
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 Adapter transformations normalize website URLs, preserve evidence, and assign
-local IDs. The downloaded snapshot and local SQLite database are ignored by Git.
+local IDs. Downloaded snapshots are ignored by Git; PostgreSQL data resides in the Docker volume.
 The dataset's own confidence values are evidence, not our measured accuracy.
 
 ## Evaluations
@@ -644,7 +751,12 @@ provider evaluation begins.
 
 Rates in saved JSON are fractions from 0 to 1; `null` means unavailable or no
 applicable denominator. Search mode reports retrieval metrics only, not final
-matching accuracy. Its candidate list includes exact collisions in addition to
+matching accuracy. Complete merchant names embedded in noisy descriptions receive a
+retrieval boost when they span full token boundaries and contain a meaningful
+name of at least five characters. Longer names rank above shorter contained
+names; short abbreviations and names made entirely of generic transaction words
+receive no boost. Embedded names remain non-exact candidates and require Jev
+evaluation; this does not create trusted aliases or confirm a location. Its candidate list includes exact collisions in addition to
 the nominal top 10, matching normal enrichment behavior. Missing expected source
 references count as retrieval misses and failed known-merchant matches, not as
 correct abstentions.
@@ -711,19 +823,19 @@ cargo run -- logs --json
 
 Output is a summary table, newest first, with UTC timestamps, status, description,
 merchant, method, and errors. Use `--json` for full records; limit is 1–1000. Inspection uses the configured
-SQLite or PostgreSQL database and is available through the CLI, with no public
+PostgreSQL database and is available through the CLI, with no public
 history endpoint. Input `extra` and candidate evidence are retained as supplied.
 History has no automatic expiry. A log write failure fails enrichment so a result
 is never reported as successfully completed without its history being saved.
 
-Existing SQLite databases gain the table when opened. For PostgreSQL, run
+Run
 `cargo run -- database init` with the schema administration role to apply migration
 002 before running the updated application. The runtime role also needs `SELECT`,
 `INSERT`, and `UPDATE` on `enrichment_log`. This migration preserves the catalog.
 
 ## Current scope
 
-This version stores merchants and aliases in PostgreSQL (or local SQLite) and evaluates retrieved
+This version stores merchants and aliases in PostgreSQL and evaluates retrieved
 candidates. It does not yet discover merchants through web research, use
 embeddings, or cache transaction results. Retrieval currently uses the description
 and country; Jev considers all supplied fields and `extra` when evaluating the
@@ -767,14 +879,18 @@ exclusive. `infra shell` is an alias.
 `infra cli-cleanup` stops all Fargate tasks in the configured CLI task family,
 including active shells and tasks still starting, and waits for them to stop.
 Run these from the workspace or use `infra --workspace PATH ...` with an installed
-binary. They require the same external tools and AWS login as the underlying
-scripts, plus `curl` for public release verification. These Rust commands do not
-invoke Python. The top-level `logs` command continues to read database enrichment history.
+binary. They require OpenTofu, AWS CLI, Docker for builds, the Session Manager
+plugin for shells, and `curl` for public release verification.
+`infra deploy --image REPOSITORY@sha256:DIGEST` releases an already-pushed image.
+CI supplies `AWS_REGION`, `LAMBDA_FUNCTION_NAME`, and `ULTRAFINANCE_SITE_URL`
+instead of reading local OpenTofu outputs, and sets `AWS_PROFILE` to an empty
+string to use its OIDC credentials. `ECR_REPOSITORY` can override the repository
+for builds. `deploy/deploy.sh` is a wrapper for the Rust deploy command. The top-level `logs` command continues to read database enrichment history.
 
 See [the OpenTofu deployment guide](infra/README.md) for CloudFront, a Lambda function URL,
-and a Rust container on Lambda using the `joehoyle` AWS profile. The initial
-storage approach packages a SQLite catalog snapshot into each image. After the
-initial infrastructure setup, `./deploy/deploy.sh` builds, checks and promotes a
+and a Rust container on Lambda using the `joehoyle` AWS profile. Application
+storage uses the configured PostgreSQL database. After the
+initial infrastructure setup, `cargo run -- infra deploy` builds, checks and promotes a
 release through the stable `live` alias. GitHub Actions can run the same release
 process from `main` using AWS OIDC.
 
@@ -792,7 +908,7 @@ as a positive ranking signal instead. Catalog queries
 do not call the AI provider. API responses omit matching aliases. Cards show known markets, merchant IDs, and websites;
 “Try lookup” fills the enrichment form without submitting it.
 
-The development profile optimizes the enrichment core, JSON/edit-distance dependencies, and bundled SQLite engine
+The development profile optimizes the enrichment core and JSON/edit-distance dependencies
 while retaining debug symbols, so offline evals are practical with `cargo run`.
 Search reuses query tokenization and similarity scores within each request and
 scores each retrieved merchant once. For production timing, use `cargo run --release`.

@@ -64,9 +64,10 @@ NAT, storage and secrets still accrue charges while database compute is paused.
 
 The container requires PostgreSQL and never seeds or migrates a database on
 startup. Initialize and migrate with the CLI before promoting the first
-PostgreSQL release (see the root README). Use a shared non-administrator application role for
-Lambda and the CLI, with catalog read/write permissions. The URL is sensitive and, like
-other Lambda secrets managed here, is stored in private OpenTofu state.
+PostgreSQL release (see the root README). Use a non-administrator application
+role for Lambda, with catalog read/write permissions. CLI shells use the RDS
+administrator for migrations and catalog work. The application URL is sensitive
+and, like other Lambda secrets managed here, is stored in private OpenTofu state.
 
 For cutover, first apply with `enable_aurora = true` and `database_url = null`.
 This provisions the database/network without attaching Lambda to the VPC.
@@ -88,11 +89,11 @@ SQLite snapshot; it does not reflect subsequent PostgreSQL edits.
 CLI resources are included automatically whenever Aurora and an immutable
 application image are configured. Apply with `./infra/tofu.sh apply`. This adds
 an ECS cluster and ARM64 Fargate task definition, execution/task IAM roles,
-a CloudWatch log group, and a Secrets Manager secret populated from `database_url`. There is no ECS
-service or continuously running task. Tasks use the existing database client
+a CloudWatch log group, and access to the RDS-managed administrator secret.
+There is no ECS service or continuously running task. Tasks use the existing database client
 security group, private subnets, and NAT gateway.
 
-Run `python3 deploy/prod-cli.py` in a terminal to launch the existing application
+Run `cargo run -- infra cli` in a terminal to launch the existing application
 image and open interactive Bash through ECS Exec, with an `ultrafinance` prompt
 showing the working directory. Install the AWS CLI and Session Manager
 plugin locally first. The container runs a bounded sleep process with init
@@ -105,18 +106,22 @@ still cancels the launch and cleans up any known task.
 Run `cargo run -- infra cli-cleanup` to stop leftover CLI tasks and wait for
 them to stop. This also closes any active production CLI shells.
 
-Set `database_url` in the private infrastructure variables to the shared
-TLS-enabled application URL. OpenTofu configures Lambda's environment variable
-and populates the Secrets Manager URL injected into shell tasks. Both use the
-same non-administrator login with catalog read/write permissions; schema
-administration remains separate. The URL is sensitive and stored in private
-OpenTofu state. The execution role can read only this secret and the application
-ECR repository. The task role has the four `ssmmessages` channel permissions
-required for ECS Exec.
+Set `database_url` in the private infrastructure variables to the TLS-enabled
+application URL used by Lambda. CLI tasks instead receive the administrator
+username and password directly from the RDS-managed secret using ECS JSON-key
+secret injection. The execution role can read only that administrator secret and
+the application ECR repository; the task role retains only the ECS Exec channel
+permissions. Password rotation is picked up when a new task starts.
+
+The launcher builds the administrator connection URL inside the remote shell
+with percent-encoded credentials and `sslmode=require`, without printing the
+password or placing it in command arguments or task definitions. This works
+with existing Bash-enabled application images. Reopen the shell after applying
+CLI infrastructure changes; existing tasks retain their original credentials.
 
 The runner selects the immutable image behind Lambda's `live` alias and
 registers a temporary task definition revision for the session. Use
-`cargo run -- infra cli --latest` (or `python3 deploy/prod-cli.py --latest`) to
+`cargo run -- infra cli --latest` to
 select the highest published Lambda version, including one awaiting a database
 migration before promotion. Mutable `$LATEST` is excluded. `--image` selects a
 specific immutable digest and cannot be combined with `--latest`. The runner stops
@@ -127,7 +132,8 @@ the task's one-hour lifetime still applies. The filesystem is ephemeral.
 The operator's AWS profile needs `ecs:DescribeTaskDefinition`,
 `ecs:RegisterTaskDefinition`, `ecs:DeregisterTaskDefinition`, `ecs:RunTask`,
 `ecs:DescribeTasks`, `ecs:ExecuteCommand`, and `ecs:StopTask`, plus
-`iam:PassRole` for the two CLI roles and `lambda:GetFunction`. Tasks do not
+`iam:PassRole` for the two CLI roles, `lambda:GetFunction`, and
+`lambda:ListVersionsByFunction` for `--latest`. Tasks do not
 inherit the operator's credentials. Fargate compute is charged while the task runs; logs and the
 secret have their normal charges.
 
@@ -140,7 +146,7 @@ After pushing the first image, configure its immutable digest and apply again.
 Keep `image_uri` set for an existing deployment: clearing it would plan deletion
 of the application resources.
 
-Routine releases use `./deploy/deploy.sh` from the repository root or GitHub
+Routine releases use `cargo run -- infra deploy` from the repository root or GitHub
 Actions. Release tooling owns the image and the version selected by `live`;
 it tests new versions before promotion and supports guarded rollback.
 After changing Lambda runtime settings with OpenTofu, run a release to promote

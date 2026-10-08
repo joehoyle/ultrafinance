@@ -100,7 +100,7 @@
       </section>
       <section aria-labelledby="evaluation-sources">
         <h2 id="evaluation-sources">Transaction evaluation datasets</h2>
-        <p>These adapters prepare transaction examples for evaluation. They do not add merchant records to the catalog, and need merchant labels before they can measure merchant recognition.</p>
+        <p>These adapters prepare transaction examples for evaluation. Category-only and unlabeled examples need merchant labels before they can measure merchant recognition. Synthetic reference catalogs are intended for isolated testing.</p>
         <div class="grid">
           <article>
             <h3><a href="https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2">DoDataThings ↗</a></h3>
@@ -114,6 +114,12 @@
             <p class="credit">MoneyData / MoneyVis by Robert Laramee and collaborators</p>
             <p>Bank transaction descriptions and amounts for evaluation. Our adapter retains transaction type and deliberately discards account, sort code, and balance columns. Merchant identities remain unlabeled until explicitly annotated.</p>
           </article>
+          <article>
+            <h3><a href="https://huggingface.co/datasets/HighkeyPrxneeth/BusinessTransactions">BusinessTransactions ↗</a></h3>
+            <span class="license"><a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a> · upstream <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a></span>
+            <p class="credit">HighkeyPrxneeth; business names derived from Foursquare OS Places</p>
+            <p>Generated descriptions paired with business names, for reviewed synthetic retrieval tests. Names-only reference records use normalized-name identifiers, not place IDs. Generated descriptions never become aliases or merchant evidence, and generated geography and store numbers never become outlet facts. Results measure source consistency rather than accuracy on real transactions.</p>
+          </article>
         </div>
       </section>
       <section class="method" aria-labelledby="provenance">
@@ -124,7 +130,7 @@
         <p>For import details and reproducible evaluations, see the <a href="https://github.com/joehoyle/ultrafinance#repeatable-dataset-imports">project documentation</a>. To report incorrect data or suggest a source, <a href="https://github.com/joehoyle/ultrafinance/issues">open an issue</a>.</p>
       </section>
     </main>
-    <footer><a href="/">Ultrafinance / ultrafinance.app</a><a href="https://github.com/joehoyle/ultrafinance">Source on GitHub ↗</a></footer>
+    <footer><a href="/">Ultrafinance / ultrafinance.app</a><a href="https://github.com/joehoyle/ultrafinance">Source on GitHub ↗</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></footer>
   </div>
 </body>
 </html>

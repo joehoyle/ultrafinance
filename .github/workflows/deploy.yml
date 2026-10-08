@@ -38,8 +38,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust
+        run: rustup toolchain install 1.98 --profile minimal
       - name: Verify release tooling
-        run: python3 -m unittest discover -s deploy -p 'test_*.py'
+        run: cargo +1.98 test --locked -p ultrafinance-cli infra
       - name: Check repository configuration
         env:
           DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
@@ -56,6 +59,16 @@ jobs:
           registry=${ECR_REPOSITORY%%/*}
           aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Record build metadata
+        id: metadata
+        run: |
+          build_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
+          build_dirty=false
+          if [ -n "$(git status --porcelain)" ]; then build_dirty=true; fi
+          printf 'tag=%s\n' "$build_tag" >> "$GITHUB_OUTPUT"
+          printf 'revision=%s\n' "$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'dirty=%s\n' "$build_dirty" >> "$GITHUB_OUTPUT"
+          printf 'time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Build and push
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -64,10 +77,17 @@ jobs:
           platforms: linux/arm64
           push: true
           provenance: false
+          build-args: |
+            ULTRAFINANCE_BUILD_TAG=${{ steps.metadata.outputs.tag }}
+            ULTRAFINANCE_BUILD_REVISION=${{ steps.metadata.outputs.revision }}
+            ULTRAFINANCE_BUILD_DIRTY=${{ steps.metadata.outputs.dirty }}
+            ULTRAFINANCE_BUILD_TIME=${{ steps.metadata.outputs.time }}
           tags: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=ultrafinance-arm64
           cache-to: type=gha,scope=ultrafinance-arm64,mode=max
       - name: Publish, check and promote
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-        run: python3 deploy/release.py "$ECR_REPOSITORY@$IMAGE_DIGEST"
+          AWS_PROFILE: '' # Use the credentials supplied by GitHub OIDC.
+          ULTRAFINANCE_SITE_URL: https://ultrafinance.app
+        run: cargo +1.98 run --locked -- infra deploy --image "$ECR_REPOSITORY@$IMAGE_DIGEST"

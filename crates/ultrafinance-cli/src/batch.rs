@@ -18,7 +18,6 @@ pub struct Options {
     pub datasets_dir: PathBuf,
     pub suites_dir: PathBuf,
     pub output: PathBuf,
-    pub database: PathBuf,
     pub database_url: Option<String>,
     pub mode: Mode,
     pub limit: Option<u32>,
@@ -157,7 +156,7 @@ pub async fn run(options: Options) -> Result<()> {
             Ok(input)
         })
         .collect::<Result<Vec<_>>>()?;
-    let store = MerchantStore::configured(&options.database, options.database_url.as_deref())?;
+    let store = MerchantStore::configured(options.database_url.as_deref())?;
     let fingerprint = store.fingerprint()?;
     let directory = options.output.join(format!("run-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&directory)?;
@@ -260,12 +259,7 @@ pub async fn run(options: Options) -> Result<()> {
     if let Some(metrics) = &metrics {
         table.add_row(row("Total", metrics));
     }
-    if let Some(profile) = ultrafinance_core::store::search_profile() {
-        eprintln!(
-            "Search profile: {}",
-            serde_json::to_string_pretty(&profile)?
-        );
-    }
+
     let summary = directory.join("summary.json");
     fs::write(
         &summary,

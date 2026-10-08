@@ -119,6 +119,14 @@ fn router(enricher: Enricher) -> Router {
         "/sources",
         get(|| async { Html(include_str!("../../../website/sources.html")) }),
     )
+    .route(
+        "/privacy",
+        get(|| async { Html(include_str!("../../../website/privacy.html")) }),
+    )
+    .route(
+        "/terms",
+        get(|| async { Html(include_str!("../../../website/terms.html")) }),
+    )
     .merge(api)
     .merge(Scalar::with_url("/docs", spec.clone()).title("Ultrafinance API documentation"))
     .route("/openapi.json", get(move || async move { Json(spec) }))
@@ -396,21 +404,11 @@ async fn main() -> Result<()> {
     {
         anyhow::bail!("ULTRAFINANCE_DATABASE_URL is required in production");
     }
-    let path = env::var_os("ULTRAFINANCE_MERCHANTS").map(std::path::PathBuf::from);
-    let store = if let Some(url) = database_url {
-        ultrafinance_core::store::MerchantStore::postgres_lazy(&url)?
-    } else if let Some(path) = path {
-        let store = ultrafinance_core::store::MerchantStore::memory()?;
-        for merchant in ultrafinance_core::load_catalog(Some(&path))? {
-            store.put(&merchant)?;
-        }
-        store
-    } else {
-        let database = env::var_os("ULTRAFINANCE_DB")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| "data/ultrafinance.sqlite".into());
-        ultrafinance_core::store::MerchantStore::open(&database)?
-    };
+    let store = ultrafinance_core::store::MerchantStore::postgres_lazy(
+        database_url
+            .as_deref()
+            .unwrap_or(ultrafinance_core::store::LOCAL_DATABASE_URL),
+    )?;
     let threshold = env::var("ULTRAFINANCE_MATCH_THRESHOLD")
         .unwrap_or_else(|_| "0.95".into())
         .parse()?;
@@ -771,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn health_and_site_are_public() {
         let app = router(Enricher::new(None, "jev-latest".into(), 0.95, vec![]).unwrap());
-        for path in ["/", "/sources", "/health"] {
+        for path in ["/", "/sources", "/privacy", "/terms", "/health"] {
             let response = app
                 .clone()
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())
