@@ -14,9 +14,10 @@ Install OpenTofu, AWS CLI, and jq. Authenticate your AWS profile before running
 commands. The shell helper bridges AWS CLI login credentials to the provider;
 credentials stay in process memory.
 
-For a new checkout, copy `terraform.tfvars.example` to `terraform.tfvars` and
-replace the account ID with your own. Keep the existing variable file when
-working with an already deployed installation.
+Keep the existing ignored `terraform.tfvars` when managing this deployment.
+For a new installation, create it using the inputs declared in `variables.tf`:
+set `aws_account_id` and `aws_use_cli_credentials = true`, then configure the
+repository, domain, and image digest as needed.
 
 Set `TYPESAFE_API_KEY` in the ignored root `.env` file. The helper passes it as
 the sensitive OpenTofu input `typesafe_api_key`. An explicit
@@ -69,9 +70,9 @@ certificate in `us-east-1`. Lambda stays in the configured application region.
 
 ## Private local files
 
-`terraform.tfstate` and its backup are the records of the live deployment.
-They contain the provider key. Keep them private and backed up; never delete
-state as part of a directory cleanup. `terraform.tfvars`, `.env`, saved plans,
+`terraform.tfstate` is the record of the live deployment and contains the
+provider key. Keep it private; never delete active state as part of a directory
+cleanup. OpenTofu may generate a backup during future writes. `terraform.tfvars`, `.env`, saved plans,
 the provider lock file, and the generated `.terraform` directory are ignored.
 The provider version is pinned in `versions.tf`. Run `init` again after removing
 the provider cache. No remote state backend is configured yet.
