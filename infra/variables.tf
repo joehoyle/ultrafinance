@@ -2,6 +2,11 @@ variable "aws_profile" {
   type    = string
   default = "joehoyle"
 }
+variable "domain_name" {
+  description = "Optional public domain whose existing Route 53 zone must be imported before applying."
+  type        = string
+  default     = null
+}
 variable "aws_use_cli_credentials" {
   description = "Use temporary credentials exported by deploy/tofu.py for AWS CLI login profiles."
   type        = bool

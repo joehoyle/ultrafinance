@@ -109,10 +109,12 @@ resource "aws_lambda_permission" "function_url_invoke" {
 }
 
 resource "aws_cloudfront_distribution" "app" {
-  count   = local.deploy_app ? 1 : 0
-  enabled = true
-  comment = var.name
-  # Start with AWS's HTTPS hostname. A custom domain can be added later.
+  count           = local.deploy_app ? 1 : 0
+  enabled         = true
+  comment         = var.name
+  aliases         = var.domain_name == null ? [] : [var.domain_name]
+  is_ipv6_enabled = true
+  # Keep the AWS hostname available alongside the optional custom domain.
   price_class = "PriceClass_100"
   origin {
     domain_name = trimsuffix(trimprefix(aws_lambda_function_url.app[0].function_url, "https://"), "/")
@@ -141,7 +143,10 @@ resource "aws_cloudfront_distribution" "app" {
     }
   }
   viewer_certificate {
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = var.domain_name == null
+    acm_certificate_arn            = var.domain_name == null ? null : aws_acm_certificate_validation.site[0].certificate_arn
+    ssl_support_method             = var.domain_name == null ? null : "sni-only"
+    minimum_protocol_version       = var.domain_name == null ? "TLSv1" : "TLSv1.2_2021"
   }
   depends_on = [aws_lambda_permission.function_url, aws_lambda_permission.function_url_invoke]
 }

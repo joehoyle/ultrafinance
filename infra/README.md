@@ -7,7 +7,7 @@ the direct function URL. The function URL uses `NONE` authentication. No client
 token or application request throttle is configured.
 
 The region defaults to `ca-central-1` and AWS profile to `joehoyle`. Both are
-configurable. A custom domain and remote state backend can be added later.
+configurable. An optional custom domain is supported; a remote state backend can be added later.
 API responses are never cached. CloudFront forwards requests while replacing
 Host for the Lambda function URL. Origin signing is disabled, so standard JSON
 POSTs work unchanged.
@@ -239,3 +239,20 @@ Infrastructure tests use a mocked AWS provider; release tests exercise candidate
 failure, alias conflicts and guarded rollback without contacting AWS. Actual AWS
 version publication, IAM/OIDC authentication and HTTP routing still need a first
 live deployment after login.
+
+## Custom domain
+
+Set `domain_name = "ultrafinance.app"` in `infra/terraform.tfvars`, then import
+its existing public hosted zone before planning the change:
+
+```sh
+python3 deploy/tofu.py import 'aws_route53_zone.site[0]' YOUR_HOSTED_ZONE_ID
+python3 deploy/tofu.py plan
+python3 deploy/tofu.py apply
+```
+
+The configuration manages the zone, an ACM DNS validation record, and apex A/AAAA
+aliases to CloudFront. It preserves existing email and other unmanaged records.
+The zone is protected with `prevent_destroy`. The certificate is issued in
+`us-east-1` for CloudFront; the Lambda function stays in the configured region.
+`site_url` returns the custom domain once configured.

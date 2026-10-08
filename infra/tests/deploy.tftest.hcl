@@ -1,4 +1,8 @@
 mock_provider "aws" {
+  alias = "us_east_1"
+}
+
+mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = {
       arn = "arn:aws:iam::123456789012:role/ultrafinance-lambda"
@@ -15,8 +19,9 @@ mock_provider "aws" {
 run "repository_bootstrap" {
   command = plan
   variables {
-    image_uri = null
-    github_repository = null
+    domain_name              = null
+    image_uri                = null
+    github_repository        = null
     github_oidc_provider_arn = null
   }
   assert {
@@ -28,6 +33,7 @@ run "repository_bootstrap" {
 run "alias_and_oidc" {
   command = plan
   variables {
+    domain_name          = null
     image_uri            = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/ultrafinance@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     github_repository    = "joehoyle/ultrafinance"
     github_owner_id      = "161683"

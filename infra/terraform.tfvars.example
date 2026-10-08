@@ -15,3 +15,6 @@ github_repository_id = "1410780058"
 # CLI login credentials are exported in memory by deploy/tofu.py.
 aws_use_cli_credentials = true
 aws_account_id          = "123456789012"
+
+# Set this, then import the existing zone before applying (see README).
+# domain_name = "ultrafinance.app"

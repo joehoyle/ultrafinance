@@ -16,3 +16,13 @@ provider "aws" {
     tags = { Project = var.name, ManagedBy = "OpenTofu" }
   }
 }
+
+provider "aws" {
+  alias               = "us_east_1"
+  profile             = var.aws_use_cli_credentials ? null : var.aws_profile
+  region              = "us-east-1"
+  allowed_account_ids = var.aws_account_id == null ? null : [var.aws_account_id]
+  default_tags {
+    tags = { Project = var.name, ManagedBy = "OpenTofu" }
+  }
+}

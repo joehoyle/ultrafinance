@@ -2,7 +2,7 @@ output "repository_url" {
   value = aws_ecr_repository.app.repository_url
 }
 output "site_url" {
-  value = local.deploy_app ? "https://${aws_cloudfront_distribution.app[0].domain_name}" : null
+  value = local.deploy_app ? "https://${var.domain_name == null ? aws_cloudfront_distribution.app[0].domain_name : var.domain_name}" : null
 }
 output "function_url" {
   description = "Public direct Lambda endpoint."
