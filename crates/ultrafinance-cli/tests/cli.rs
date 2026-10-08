@@ -111,6 +111,12 @@ fn infra_routes_logs_and_stops_deploy_before_build_on_config_failure() {
         Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
             .current_dir(&directory)
             .env("PATH", directory.join("bin"))
+            // Exercise OpenTofu fixture outputs independently of CI deployment settings.
+            .env_remove("AWS_PROFILE")
+            .env_remove("AWS_REGION")
+            .env_remove("LAMBDA_FUNCTION_NAME")
+            .env_remove("ECR_REPOSITORY")
+            .env_remove("ULTRAFINANCE_SITE_URL")
             .env(
                 "ULTRAFINANCE_DATABASE_URL",
                 std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
