@@ -182,7 +182,7 @@ impl PostgresStore {
                     if version <= 2 { migrate_markets(&mut tx)?; }
                     tx.batch_execute(crate::dedupe::SCHEMA)?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)?;
-                    if version > 8 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 9 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -205,12 +205,15 @@ impl PostgresStore {
                         tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
                         tx.batch_execute("UPDATE ultrafinance_schema SET version=8")?;
                     }
+                    if version < 9 {
+                        tx.batch_execute(include_str!("../migrations/009_remove_market_evidence.sql"))?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 8 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 9 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -1457,6 +1460,75 @@ mod connection_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn version_eight_legacy_views_are_migrated_before_import() -> Result<()> {
+        let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+        let lease = PostgresStore::temporary(&base)?;
+        let url = lease.temporary_url().unwrap().to_owned();
+        let records = crate::import::merchant_studio(
+            r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha","countryHints":["CA"]}]}"#,
+        )?;
+        lease.run(move |client| {
+            let mut tx = client.transaction()?;
+            let data = serde_json::to_string(&records[0].merchant)?;
+            crate::columns::postgres_merchants(&mut tx, "alpha", &data)?;
+            crate::columns::postgres_manual_merchants(&mut tx, "alpha", &data)?;
+            crate::columns::postgres_source_records(
+                &mut tx, "merchant-studio", "alpha", "alpha",
+                &serde_json::to_string(&records[0])?,
+            )?;
+            // Recreate the stale projections found in existing version-8 catalogs.
+            tx.batch_execute(r#"
+                ALTER VIEW merchants_documents RENAME TO merchants_current;
+                ALTER VIEW manual_merchants_documents RENAME TO manual_merchants_current;
+                ALTER VIEW source_records_documents RENAME TO source_records_current;
+                ALTER TABLE merchants ADD COLUMN market_evidence_json TEXT DEFAULT '[]';
+                ALTER TABLE manual_merchants ADD COLUMN market_evidence_json TEXT DEFAULT '[]';
+                CREATE TABLE source_market_inputs (source TEXT);
+                CREATE TABLE merchant_market_evidence (merchant_id TEXT);
+                CREATE VIEW merchants_documents AS SELECT id,
+                    (data::jsonb || '{"market_evidence":[]}'::jsonb)::text AS data FROM merchants_current;
+                CREATE VIEW manual_merchants_documents AS SELECT id,
+                    (data::jsonb || '{"market_evidence":[]}'::jsonb)::text AS data FROM manual_merchants_current;
+                CREATE VIEW source_records_documents AS SELECT source,external_id,merchant_id,
+                    jsonb_set(data::jsonb,'{merchant,market_evidence}','[]'::jsonb)::text AS data FROM source_records_current;
+                GRANT SELECT ON merchants_documents,manual_merchants_documents,source_records_documents TO PUBLIC;
+                UPDATE ultrafinance_schema SET version=8;
+            "#)?;
+            tx.commit()?;
+            Ok(())
+        })?;
+        assert!(lease.get("alpha").is_err());
+        let error = match PostgresStore::connect(&url, false) {
+            Ok(_) => bail!("legacy schema must require initialization"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("database init"));
+        let migrated = PostgresStore::connect(&url, true)?;
+        assert_eq!(migrated.get("alpha")?.unwrap().name, "Alpha");
+        migrated.run(|client| {
+            assert!(client.query_one("SELECT to_regclass('source_market_inputs') IS NULL AND to_regclass('merchant_market_evidence') IS NULL AND NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND column_name='market_evidence_json')", &[])?.get::<_, bool>(0));
+            for view in ["merchants_documents", "manual_merchants_documents", "source_records_documents"] {
+                let data: String = client.query_one(&format!("SELECT data FROM {view}"), &[])?.get(0);
+                assert!(!data.contains("market_evidence"));
+                assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name=$1 AND grantee='PUBLIC' AND privilege_type='SELECT')", &[&view])?.get::<_, bool>(0));
+            }
+            let data: String = client.query_one("SELECT data FROM source_records_documents", &[])?.get(0);
+            let record: SourceRecord = serde_json::from_str(&data)?;
+            assert_eq!(record.raw["countryHints"], serde_json::json!(["CA"]));
+            Ok(())
+        })?;
+        let refreshed = crate::import::merchant_studio(
+            r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha Updated","countryHints":["CA"]}]}"#,
+        )?;
+        assert_eq!(migrated.import(&refreshed)?.updated, 1);
+        assert_eq!(migrated.get("alpha")?.unwrap().name, "Alpha");
+        // Reinitialization remains safe after the upgrade.
+        PostgresStore::connect(&url, true)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn lazy_store_does_not_connect_during_startup() -> Result<()> {
         // No server exists here. Construction still succeeds inside an async
@@ -1502,7 +1574,7 @@ mod connection_tests {
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get(0);
             assert_eq!(
-                version, 8,
+                version, 9,
                 "market migration must run before application use"
             );
             let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);

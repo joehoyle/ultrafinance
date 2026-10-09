@@ -172,7 +172,11 @@ fn examples(value: &str) -> Result<Vec<String>> {
 fn adapter_version(source: Source) -> u32 {
     // The source-input schema removed Merchant.market_evidence. Rebuild older
     // prepared bundles from raw snapshots instead of deserializing that field.
-    if matches!(source, Source::LunchMoney | Source::Foursquare) { 4 } else { 3 }
+    if matches!(source, Source::LunchMoney | Source::Foursquare) {
+        4
+    } else {
+        3
+    }
 }
 
 fn bundle_path(
@@ -827,8 +831,8 @@ mod tests {
     use super::*;
     #[test]
     fn legacy_market_evidence_bundles_are_rebuilt_without_overwriting() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("ultra-dataset-schema-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir()
+            .join(format!("ultra-dataset-schema-{}", uuid::Uuid::new_v4()));
         let input = r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha","countryHints":["CA"]}]}"#;
         let examples = r#"{"schemaVersion":"1.0","descriptors":[]}"#;
         let mut legacy = prepare(Source::MerchantStudio, input, Some(examples), "global")?;
@@ -839,7 +843,10 @@ mod tests {
         let legacy_bytes = serde_json::to_vec(&records)?;
         std::fs::write(legacy_path.join("knowledge.json"), &legacy_bytes)?;
         assert!(read_selected_records(&legacy_path.join("knowledge.json"), None).is_err());
-        assert!(cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?.is_none());
+        assert!(
+            cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?
+                .is_none()
+        );
 
         let rebuilt = prepare(Source::MerchantStudio, input, Some(examples), "global")?;
         let path = rebuilt.save(&root)?;
@@ -849,12 +856,25 @@ mod tests {
         assert_eq!(records[0].merchant.name, "Alpha");
         assert_eq!(records[0].raw["countryHints"], json!(["CA"]));
         assert!(records[0].merchant.markets.is_empty());
-        assert_eq!(std::fs::read(legacy_path.join("knowledge.json"))?, legacy_bytes);
-        assert_eq!(cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?.unwrap().0, path);
+        assert_eq!(
+            std::fs::read(legacy_path.join("knowledge.json"))?,
+            legacy_bytes
+        );
+        assert_eq!(
+            cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?
+                .unwrap()
+                .0,
+            path
+        );
         // All adapters share the changed Merchant schema, including the file
         // preparation path used by Foursquare.
-        for source in [Source::MerchantStudio, Source::OpenEnrichment, Source::DoDataThings,
-            Source::MoneyVis, Source::BusinessTransactions] {
+        for source in [
+            Source::MerchantStudio,
+            Source::OpenEnrichment,
+            Source::DoDataThings,
+            Source::MoneyVis,
+            Source::BusinessTransactions,
+        ] {
             assert_eq!(adapter_version(source), 3);
         }
         for source in [Source::LunchMoney, Source::Foursquare] {

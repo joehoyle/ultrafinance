@@ -1,6 +1,6 @@
 # Database lookup columns
 
-Schema version 8 stores fixed catalog and matching fields in columns in
+Schema version 9 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
 indexes. JSON remains for variable evidence, source payloads and arrays whose
 searchable values have relational indexes.
@@ -50,6 +50,10 @@ reviewed identity or silently change an existing mapping to another merchant.
 
 PostgreSQL requires `ultrafinance
 database init` with the schema-owner connection before running this version.
+The version-9 migration removes obsolete market-evidence columns and tables and
+rebuilds document views without the retired `market_evidence` field. It preserves
+merchant country coverage, source links and explicit view privileges, including
+databases already marked version 8 with legacy view definitions.
 The version-7 migration builds merchant identity keys in bounded 5,000-row pages
 and installs catalog revision triggers. Application writes keep these keys in
 sync with merchant refreshes and manual changes. Imports consult this index
@@ -70,7 +74,7 @@ if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 8; coordinate the database upgrade with the new application
+run against version 9; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.
