@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "source": "GeoNames cities500",
+  "source_url": "https://www.geonames.org/",
+  "license": "CC-BY-4.0",
+  "snapshot_date": "2026-10-09",
+  "records": 236017,
+  "countries": 246,
+  "aliases": 249916,
+  "max_city_words": 13,
+  "mapped_regions": 1814,
+  "unmapped_regions": 2051,
+  "alias_policy": "Canonical/ASCII plus preferred or short current English and official-language names; exclude historical, colloquial and dated alternate names.",
+  "region_policy": "Unique ISO subdivision name mapping; otherwise full GeoNames region name. Numeric GeoNames/FIPS codes are not statement aliases.",
+  "subdivision_source": "pycountry / Debian iso-codes",
+  "subdivision_license": "LGPL-2.1",
+  "sha256": "a7899fd61d232e944458e02e77eb79a760ee0bac909165a05b8945ef187026d3",
+  "inputs": [
+    {
+      "file": "cities500.zip",
+      "url": "https://download.geonames.org/export/dump/cities500.zip",
+      "sha256": "4022ba76d34abbcd7c7b32597a6f968f51edfa4fb262bf04f15c109624ae3db2"
+    },
+    {
+      "file": "alternateNamesV2.zip",
+      "url": "https://download.geonames.org/export/dump/alternateNamesV2.zip",
+      "sha256": "5e61abd63b30bff4f0b34cb562f850c15ecafbbf9f52c3d56a92e28fb8f47d1b"
+    },
+    {
+      "file": "admin1CodesASCII.txt",
+      "url": "https://download.geonames.org/export/dump/admin1CodesASCII.txt",
+      "sha256": "1da92a6323a5fec3176f3f743bf4cf4040fd56a876da55e46fbca23c863aa60a"
+    },
+    {
+      "file": "countryInfo.txt",
+      "url": "https://download.geonames.org/export/dump/countryInfo.txt",
+      "sha256": "f835fda64430210e0a6a4e1fba9f9e99ed3aa0694e61aeff43fb761ac2613a0f"
+    },
+    {
+      "file": "ISO-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/pycountry/pycountry/main/LICENSE.txt",
+      "sha256": "3fa39c6e18a3a4411082b64c164deae1d8f47b03a4d45304c1f0ae478626e382"
+    },
+    {
+      "file": "iso3166-2.json",
+      "url": "https://raw.githubusercontent.com/pycountry/pycountry/main/src/pycountry/databases/iso3166-2.json",
+      "sha256": "78c90ef7fc25b5c2631aac5f089bc9ff6ec22c025c05b6ddbc087a1f1be2e46a"
+    }
+  ]
+}

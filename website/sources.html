@@ -96,6 +96,14 @@
             <p>Merchant names, websites, transaction examples, and matching patterns from global and country-specific CSV datasets. Separately imported outlet records can provide location evidence.</p>
             <p>Child places are excluded from the brand catalog. Country-specific dataset regions provide market evidence; global scope does not establish a merchant’s operating countries. Merchant icons are not imported and are excluded from the dataset license.</p>
           </article>
+          <article>
+            <h3><a href="https://docs.foursquare.com/data-products/docs/access-fsq-os-places">Foursquare OS Places ↗</a></h3>
+            <span class="license"><a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a></span>
+            <p class="credit">Foursquare OS Places by Foursquare Labs, Inc.</p>
+            <p>Token-authenticated downloads through the Places Portal Iceberg catalog and merchant imports from filtered place exports, including business names, websites, categories, and country evidence. Reviewed brand mappings combine related places into one merchant while preserving the contributing Foursquare place IDs.</p>
+            <p>Unmapped same-name businesses remain separate. Imported names remain candidate evidence; this adapter creates no transaction aliases, matching patterns, logos, or location records. It supplies business knowledge rather than transaction accuracy labels.</p>
+            <p><a href="#foursquare-notice">Foursquare attribution and modification notice</a> · <a href="https://github.com/joehoyle/ultrafinance/blob/main/docs/foursquare.md">Import documentation ↗</a></p>
+          </article>
         </div>
       </section>
       <section aria-labelledby="evaluation-sources">
@@ -128,6 +136,11 @@
         <p>Manually verified names and aliases can resolve unique exact matches locally. Imported aliases remain unverified; ambiguous and fuzzy candidates are evaluated by Jev, our AI matching provider. Jev chooses among catalog candidates rather than supplying a separate merchant dataset. Enrichment results derived from source-linked merchants include attribution information.</p>
         <p>Coverage depends on the imported data and corrections. A missing market does not mean a merchant does not operate there. Source-derived evaluations measure consistency with a dataset, not accuracy on unseen real transactions.</p>
         <p>For import details and reproducible evaluations, see the <a href="https://github.com/joehoyle/ultrafinance#repeatable-dataset-imports">project documentation</a>. To report incorrect data or suggest a source, <a href="https://github.com/joehoyle/ultrafinance/issues">open an issue</a>.</p>
+      </section>
+      <section class="method" id="foursquare-notice" aria-labelledby="foursquare-notice-heading">
+        <h2 id="foursquare-notice-heading">Foursquare attribution and modification notice</h2>
+        <p>© 2026 Foursquare Labs, Inc. All rights reserved.<br>The Foursquare OS Places dataset (the “Data”) is licensed under the Apache License, Version 2.0 (the “License”). You may not use, modify, or distribute the Data except in compliance with the License.<br>As set forth more fully in the License, if you use, modify, or distribute the Data, you must:<br>– provide recipients with a copy of the License.<br>– if applicable, include prominent notices to the extent you’ve changed the Data.<br>– preserve attribution to Foursquare, including preserving the full content of this NOTICE.txt file.<br>To ensure appropriate attribution to Foursquare, we recommend the following:<br>– if using/distributing the Data in flat file form as-is or after making changes/modifications: include this NOTICE.txt file, which may be modified to include an additional notice of your changes/modifications, if any.<br>– if using/distributing the Data in API form as-is or after making changes/modifications: include a copy of the content from this NOTICE.txt file prominently in your developer documentation for such API, which may be modified to include an additional notice of your changes/modifications, if any.<br>You may obtain a copy of the License at: http://www.apache.org/licenses/LICENSE-2.0. Unless required by applicable law or agreed to in writing, the Data distributed under the License is distributed on an “AS IS” BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.<br>See the License for the specific language governing permissions and limitations under the License.<br>We also encourage you to join our Placemaker community where you can contribute and provide suggestions to improve the accuracy of the Data for future releases for yourself and others.</p>
+        <p>Ultrafinance modifications: eligible place rows are filtered and optionally grouped<br>into reviewed merchant identities. Selected source fields and place IDs are retained;<br>transaction aliases, logos and outlet records are not generated.</p>
       </section>
     </main>
     <footer><a href="/">Ultrafinance / ultrafinance.app</a><a href="https://github.com/joehoyle/ultrafinance">Source on GitHub ↗</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></footer>

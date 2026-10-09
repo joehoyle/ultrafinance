@@ -173,6 +173,7 @@ impl PostgresStore {
                     if version <= 2 { tx.batch_execute(include_str!("../migrations/003_locations.sql"))?; }
                     if version <= 2 { migrate_markets(&mut tx)?; }
                     tx.batch_execute(crate::dedupe::SCHEMA)?;
+                    tx.batch_execute(crate::location_dedupe::SCHEMA)?;
                     if version > 4 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
@@ -287,6 +288,7 @@ impl PostgresStore {
                 stored.location.id = Some(id.clone());
                 crate::columns::postgres_location_records(&mut tx, &id, &record.source, &record.external_id, &merchant_id, &merchant_source, &merchant_external, &serde_json::to_string(&stored)?)?;
             }
+            reconcile_locations(&mut tx, None, false)?;
             refresh_market_lookup(&mut tx, None)?;
             tx.commit()?;
             Ok(())
@@ -295,9 +297,48 @@ impl PostgresStore {
     pub fn locations(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
         let merchant_id = merchant_id.to_owned();
         self.run(move |client| {
-            client.query("SELECT l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=$1 ORDER BY l.id", &[&merchant_id])?.iter().map(|row| Ok(serde_json::from_str(row.get::<_, &str>(0))?)).collect()
+            let mut tx = client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()?;
+            let records = location_rows(&mut tx, Some(&merchant_id))?
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+            let output =
+                crate::location_dedupe::consolidate(records, &location_redirects(&mut tx)?);
+            tx.commit()?;
+            Ok(output)
         })
     }
+    pub fn location_sources(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
+        let merchant_id = merchant_id.to_owned();
+        self.run(move |client| {
+            Ok(location_rows(client, Some(&merchant_id))?
+                .into_iter()
+                .map(|(_, record)| record)
+                .collect())
+        })
+    }
+    pub fn dedupe_locations(
+        &self,
+        merchant_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<crate::location_dedupe::Report> {
+        let merchant_id = merchant_id.map(str::to_owned);
+        self.run(move |client| {
+            let mut tx = client.transaction()?;
+            write_lock(&mut tx)?;
+            tx.batch_execute(
+                "LOCK TABLE merchants,source_records,location_records IN SHARE ROW EXCLUSIVE MODE",
+            )?;
+            let report = reconcile_locations(&mut tx, merchant_id.as_deref(), dry_run)?;
+            tx.commit()?;
+            Ok(report)
+        })
+    }
+
     pub fn put(&self, merchant: &Merchant) -> Result<()> {
         validate(merchant)?;
         let merchant = merchant.clone();
@@ -330,7 +371,22 @@ impl PostgresStore {
             Ok(())
         })
     }
-    pub fn import(&self, records: &[SourceRecord]) -> Result<()> {
+    pub fn source_records(
+        &self,
+        source: &str,
+        external_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let (source, external_id) = (source.to_owned(), external_id.map(str::to_owned));
+        let (limit, offset) = (i64::try_from(limit)?, i64::try_from(offset)?);
+        self.run(move |client| {
+            client.query("SELECT merchant_id,data FROM source_records_documents WHERE source=$1 AND ($2::text IS NULL OR external_id=$2) ORDER BY external_id LIMIT $3 OFFSET $4", &[&source,&external_id,&limit,&offset])?.into_iter().map(|row| {
+                Ok(serde_json::json!({"merchant_id": row.get::<_,String>(0), "record": serde_json::from_str::<serde_json::Value>(&row.get::<_,String>(1))?}))
+            }).collect()
+        })
+    }
+    pub fn import(&self, records: &[SourceRecord]) -> Result<super::ImportDelta> {
         let mut keys = HashSet::new();
         for r in records {
             validate(&r.merchant)?;
@@ -345,41 +401,9 @@ impl PostgresStore {
         self.run(move |client| {
             let mut tx = client.transaction()?;
             write_lock(&mut tx)?;
-            let mut changed = HashSet::new();
-            for record in records {
-                let id: String = tx
-                    .query_opt(
-                        "SELECT merchant_id FROM source_records WHERE source=$1 AND external_id=$2",
-                        &[&record.source, &record.external_id],
-                    )?
-                    .map(|r| r.get(0))
-                    .unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple()));
-                if tx
-                    .query_opt("SELECT id FROM merchants WHERE id=$1", &[&id])?
-                    .is_none()
-                {
-                    let mut seed = record.merchant.clone();
-                    seed.id = id.clone();
-                    crate::columns::postgres_merchants(
-                        &mut tx,
-                        &id,
-                        &serde_json::to_string(&seed)?,
-                    )?;
-                }
-                crate::columns::postgres_source_records(
-                    &mut tx,
-                    &record.source,
-                    &record.external_id,
-                    &id,
-                    &serde_json::to_string(&record)?,
-                )?;
-                changed.insert(id);
-            }
-            for id in changed {
-                rebuild(&mut tx, &id)?;
-            }
+            let delta = import_records(&mut tx, &records, None, None)?;
             tx.commit()?;
-            Ok(())
+            Ok(delta)
         })
     }
     pub fn link(&self, source: &str, external_id: &str, target: &str) -> Result<()> {
@@ -477,21 +501,62 @@ impl PostgresStore {
             crate::dedupe::validate_plan(&expected, &current, &groups)?;
             let run_id = uuid::Uuid::new_v4().to_string();
             tx.execute("INSERT INTO merchant_merge_runs VALUES($1,$2)", &[&run_id,&serde_json::to_string(&audit)?])?;
-            for group in groups {
-                let target = &group[0];
-                for retired in &group[1..] {
-                    tx.execute("UPDATE source_records SET merchant_id=$1 WHERE merchant_id=$2", &[target,retired])?;
-                    tx.execute("UPDATE location_records SET merchant_id=$1 WHERE merchant_id=$2", &[target,retired])?;
-                    tx.execute("UPDATE descriptor_resolutions SET merchant_id=$1 WHERE merchant_id=$2", &[target,retired])?;
-                    tx.execute("UPDATE merchant_redirects SET merchant_id=$1 WHERE merchant_id=$2", &[target,retired])?;
-                    tx.execute("INSERT INTO merchant_redirects VALUES($1,$2)", &[retired,target])?;
-                    tx.execute("DELETE FROM manual_merchants WHERE id=$1", &[retired])?;
-                    rebuild(&mut tx, retired)?;
-                }
-                rebuild(&mut tx, target)?;
-            }
+            merge_groups(&mut tx, &groups)?;
             tx.commit()?;
             Ok(run_id)
+        })
+    }
+    pub fn apply_reconciled_import(
+        &self,
+        expected: &crate::dedupe::Snapshot,
+        staged: &crate::dedupe::Snapshot,
+        records: &[SourceRecord],
+        identities: &[String],
+        groups: &[Vec<String>],
+        audit: &serde_json::Value,
+    ) -> Result<(super::ImportDelta, Option<String>)> {
+        let (expected, staged, records, identities, groups, audit) = (
+            expected.clone(),
+            staged.clone(),
+            records.to_vec(),
+            identities.to_vec(),
+            groups.to_vec(),
+            audit.clone(),
+        );
+        if records.len() != identities.len() {
+            bail!("invalid import identity plan");
+        }
+        self.run(move |client| {
+            crate::dedupe::validate_plan(&staged, &staged, &groups)?;
+            let mut tx = import_transaction(client)?;
+            eprintln!("Import: waiting for database write lock");
+            write_lock(&mut tx)?;
+            eprintln!("Import: validating catalog snapshot");
+            tx.batch_execute(crate::dedupe::SCHEMA).context("cannot initialize dedupe tables; run database init with a schema-owner connection")?;
+            tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
+            let current = postgres_dedupe_snapshot(&mut tx)?;
+            crate::dedupe::validate_plan(&expected, &current, &[])?;
+            // New duplicate source records go directly to their survivor. Only
+            // already-persisted identities need retirement and redirects.
+            let targets: HashMap<_,_> = groups.iter().flat_map(|g| g.iter().map(|id| (id, &g[0]))).collect();
+            let identities: Vec<_> = identities.iter().map(|id| targets.get(id).copied().unwrap_or(id).clone()).collect();
+            let existing: HashSet<_> = expected.merchants.iter().map(|m| &m.id).collect();
+            let persisted_groups: Vec<Vec<String>> = groups.iter().filter_map(|g| {
+                let mut group=vec![g[0].clone()];
+                group.extend(g[1..].iter().filter(|id| existing.contains(id)).cloned());
+                (group.len()>1).then_some(group)
+            }).collect();
+            let delta = import_records(&mut tx, &records, Some(&identities), Some(&expected))?;
+            let run_id = if groups.is_empty() { None } else {
+                let run_id = uuid::Uuid::new_v4().to_string();
+                tx.execute("INSERT INTO merchant_merge_runs VALUES($1,$2)", &[&run_id,&serde_json::to_string(&audit)?])?;
+                merge_groups(&mut tx, &persisted_groups)?;
+                Some(run_id)
+            };
+            eprintln!("Import: committing transaction");
+            tx.commit()?;
+            eprintln!("Import: committed — {} added, {} updated, {} unchanged", delta.added, delta.updated, delta.unchanged);
+            Ok((delta, run_id))
         })
     }
     pub fn fingerprint(&self) -> Result<String> {
@@ -776,6 +841,13 @@ fn add_candidate(
     Ok(())
 }
 fn rebuild(tx: &mut Transaction<'_>, id: &str) -> Result<()> {
+    rebuild_with_market_refresh(tx, id, true)
+}
+fn rebuild_with_market_refresh(
+    tx: &mut Transaction<'_>,
+    id: &str,
+    refresh_markets: bool,
+) -> Result<()> {
     let mut merchant = tx
         .query_opt(
             "SELECT data FROM manual_merchants_documents WHERE id=$1",
@@ -838,7 +910,9 @@ fn rebuild(tx: &mut Transaction<'_>, id: &str) -> Result<()> {
         "INSERT INTO merchant_search(merchant_id,text) VALUES($1,$2)",
         &[&id, &names.join(" \n ")],
     )?;
-    refresh_market_lookup(tx, Some(&[id.to_owned()]))?;
+    if refresh_markets {
+        refresh_market_lookup(tx, Some(&[id.to_owned()]))?;
+    }
     Ok(())
 }
 
@@ -908,7 +982,251 @@ fn fingerprint(tx: &mut Transaction<'_>) -> Result<String> {
             contents.push(0);
         }
     }
+    for (retired, canonical) in location_redirects(tx)? {
+        contents.extend(retired.bytes());
+        contents.push(0);
+        contents.extend(canonical.bytes());
+        contents.push(0);
+    }
     Ok(crate::eval::fingerprint(&contents))
+}
+
+fn import_transaction(client: &mut Client) -> Result<Transaction<'_>> {
+    let mut tx = client.transaction()?;
+    // CPU-heavy plan validation can leave an otherwise active import idle.
+    // Limit the exemption to this transaction, preserving web-request defaults.
+    tx.batch_execute(
+        "SET LOCAL idle_in_transaction_session_timeout = '0'; SET LOCAL statement_timeout = '0'",
+    )?;
+    Ok(tx)
+}
+
+fn import_records(
+    tx: &mut Transaction<'_>,
+    records: &[SourceRecord],
+    identities: Option<&[String]>,
+    baseline: Option<&crate::dedupe::Snapshot>,
+) -> Result<super::ImportDelta> {
+    let mut changed = HashSet::new();
+    let mut delta = super::ImportDelta::default();
+    let mut progress = identities.map(|_| {
+        crate::import_progress::Progress::new("checking/writing source records", records.len())
+    });
+    // The guarded reconciliation snapshot already contains these rows. Avoid
+    // querying PostgreSQL twice per source record just to rediscover them.
+    let previous_records: HashMap<_, _> = baseline
+        .into_iter()
+        .flat_map(|s| &s.sources)
+        .map(|(id, record)| {
+            (
+                (record.source.as_str(), record.external_id.as_str()),
+                (id, record),
+            )
+        })
+        .collect();
+    let mut known_ids: HashSet<String> = baseline
+        .into_iter()
+        .flat_map(|s| &s.merchants)
+        .map(|m| m.id.clone())
+        .collect();
+    let previous_query = tx.prepare(
+        "SELECT merchant_id,data FROM source_records_documents WHERE source=$1 AND external_id=$2",
+    )?;
+    let merchant_query = tx.prepare("SELECT id FROM merchants WHERE id=$1")?;
+    for (index, record) in records.iter().enumerate() {
+        let previous: Option<(String, SourceRecord)> = if baseline.is_some() {
+            previous_records
+                .get(&(record.source.as_str(), record.external_id.as_str()))
+                .map(|(id, old)| ((*id).clone(), (*old).clone()))
+        } else {
+            tx.query_opt(&previous_query, &[&record.source, &record.external_id])?
+                .map(|r| -> Result<(String, SourceRecord)> {
+                    Ok((r.get(0), serde_json::from_str(r.get::<_, &str>(1))?))
+                })
+                .transpose()?
+        };
+        if let Some((_, old_record)) = &previous {
+            let mut old = serde_json::to_value(old_record)?;
+            let same_region = crate::markets::dataset_region(old_record)
+                == crate::markets::dataset_region(record);
+            let mut incoming = serde_json::to_value(record)?;
+            // A new whole-file version does not make unchanged rows a delta.
+            // Keep their original import version as provenance.
+            old.as_object_mut().unwrap().remove("version");
+            incoming.as_object_mut().unwrap().remove("version");
+            if same_region && old == incoming {
+                delta.unchanged += 1;
+                if let Some(progress) = &mut progress {
+                    progress.advance(index + 1);
+                }
+                continue;
+            }
+            delta.updated += 1;
+        } else {
+            delta.added += 1;
+        }
+        let id: String = previous.map(|r| r.0).unwrap_or_else(|| {
+            identities
+                .map(|ids| ids[index].clone())
+                .unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple()))
+        });
+        let exists = if baseline.is_some() {
+            known_ids.contains(&id)
+        } else {
+            tx.query_opt(&merchant_query, &[&id])?.is_some()
+        };
+        if !exists {
+            let mut seed = record.merchant.clone();
+            seed.id = id.clone();
+            crate::columns::postgres_merchants(tx, &id, &serde_json::to_string(&seed)?)?;
+            known_ids.insert(id.clone());
+        }
+        crate::columns::postgres_source_records(
+            tx,
+            &record.source,
+            &record.external_id,
+            &id,
+            &serde_json::to_string(&record)?,
+        )?;
+        changed.insert(id);
+        if let Some(progress) = &mut progress {
+            progress.advance(index + 1);
+        }
+    }
+    if let Some(progress) = progress {
+        progress.finish();
+    }
+    let mut progress = identities.map(|_| {
+        crate::import_progress::Progress::new("rebuilding merchant search", changed.len())
+    });
+    let changed: Vec<_> = changed.into_iter().collect();
+    for (index, id) in changed.iter().enumerate() {
+        rebuild_with_market_refresh(tx, id, false)?;
+        if let Some(progress) = &mut progress {
+            progress.advance(index + 1);
+        }
+    }
+    if let Some(progress) = progress {
+        progress.finish();
+    }
+    let mut progress = identities.map(|_| {
+        crate::import_progress::Progress::new("refreshing merchant markets", changed.len())
+    });
+    for (index, ids) in changed.chunks(1000).enumerate() {
+        refresh_market_lookup(tx, Some(ids))?;
+        if let Some(progress) = &mut progress {
+            progress.advance(((index + 1) * 1000).min(changed.len()));
+        }
+    }
+    if let Some(progress) = progress {
+        progress.finish();
+    }
+    Ok(delta)
+}
+fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> {
+    let total = groups.iter().map(|g| g.len() - 1).sum();
+    let mut progress =
+        crate::import_progress::Progress::dedupe("merging duplicate identities", total);
+    let mut completed = 0;
+    for group in groups {
+        let target = &group[0];
+        for retired in &group[1..] {
+            tx.execute(
+                "UPDATE source_records SET merchant_id=$1 WHERE merchant_id=$2",
+                &[target, retired],
+            )?;
+            tx.execute(
+                "UPDATE location_records SET merchant_id=$1 WHERE merchant_id=$2",
+                &[target, retired],
+            )?;
+            tx.execute(
+                "UPDATE descriptor_resolutions SET merchant_id=$1 WHERE merchant_id=$2",
+                &[target, retired],
+            )?;
+            tx.execute(
+                "UPDATE merchant_redirects SET merchant_id=$1 WHERE merchant_id=$2",
+                &[target, retired],
+            )?;
+            tx.execute(
+                "INSERT INTO merchant_redirects VALUES($1,$2)",
+                &[retired, target],
+            )?;
+            tx.execute("DELETE FROM manual_merchants WHERE id=$1", &[retired])?;
+            rebuild(tx, retired)?;
+        }
+        rebuild(tx, target)?;
+        completed += group.len() - 1;
+        progress.advance(completed);
+    }
+    progress.finish();
+    reconcile_locations(tx, None, false)?;
+    Ok(())
+}
+
+fn location_redirects(
+    c: &mut impl GenericClient,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let exists: bool = c
+        .query_one(
+            "SELECT to_regclass('public.location_redirects') IS NOT NULL",
+            &[],
+        )?
+        .get(0);
+    if !exists {
+        return Ok(Default::default());
+    }
+    Ok(c.query(
+        "SELECT retired_id,location_id FROM location_redirects ORDER BY retired_id",
+        &[],
+    )?
+    .into_iter()
+    .map(|r| (r.get(0), r.get(1)))
+    .collect())
+}
+fn location_rows(
+    c: &mut impl GenericClient,
+    merchant_id: Option<&str>,
+) -> Result<Vec<(String, LocationRecord)>> {
+    c.query("SELECT COALESCE(l.merchant_id,s.merchant_id),l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE ($1::text IS NULL OR COALESCE(l.merchant_id,s.merchant_id)=$1) ORDER BY l.id", &[&merchant_id])?.into_iter().map(|r|Ok((r.get(0),serde_json::from_str(r.get::<_,&str>(1))?))).collect()
+}
+fn reconcile_locations(
+    tx: &mut Transaction<'_>,
+    merchant_id: Option<&str>,
+    dry_run: bool,
+) -> Result<crate::location_dedupe::Report> {
+    if !dry_run {
+        tx.batch_execute(crate::location_dedupe::SCHEMA).context("cannot initialize outlet identity tables; run database init with a schema-owner connection")?;
+    }
+    if !dry_run {
+        tx.execute("DELETE FROM location_redirects WHERE retired_id IN (SELECT d.retired_id FROM location_redirects d JOIN location_records a ON a.id=d.retired_id JOIN location_records b ON b.id=d.location_id LEFT JOIN source_records sa ON sa.source=a.merchant_source AND sa.external_id=a.merchant_external_id LEFT JOIN source_records sb ON sb.source=b.merchant_source AND sb.external_id=b.merchant_external_id WHERE COALESCE(a.merchant_id,sa.merchant_id) IS DISTINCT FROM COALESCE(b.merchant_id,sb.merchant_id))", &[])?;
+    }
+    let records = location_rows(tx, merchant_id)?;
+    let redirects = location_redirects(tx)?;
+    let mut report = crate::location_dedupe::plan(&records, &redirects, dry_run);
+    if !dry_run && !report.groups.is_empty() {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO location_merge_runs VALUES($1,$2)",
+            &[
+                &run_id,
+                &serde_json::to_string(
+                    &serde_json::json!({"report":report,"before":records,"redirects":redirects}),
+                )?,
+            ],
+        )?;
+        for group in &report.groups {
+            let target = &group[0];
+            for retired in &group[1..] {
+                tx.execute(
+                    "UPDATE location_redirects SET location_id=$1 WHERE location_id=$2",
+                    &[target, retired],
+                )?;
+                tx.execute("INSERT INTO location_redirects VALUES($1,$2) ON CONFLICT(retired_id) DO UPDATE SET location_id=excluded.location_id", &[retired,target])?;
+            }
+        }
+        report.run_id = Some(run_id);
+    }
+    Ok(report)
 }
 
 fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe::Snapshot> {
@@ -952,6 +1270,7 @@ fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe:
         sources,
         locations: data(c, "SELECT data FROM location_records_documents ORDER BY id")?,
         redirects,
+        location_redirects: location_redirects(c)?.into_iter().collect(),
     })
 }
 
@@ -967,6 +1286,32 @@ mod connection_tests {
         let store = PostgresStore::lazy("postgresql://localhost:1/unused?sslmode=disable")?;
         assert!(store.run(|_| Ok(())).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn import_transaction_survives_cpu_gaps_and_restores_request_timeouts() -> Result<()> {
+        let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+        let store = PostgresStore::temporary(&base)?;
+        store.run(|client| {
+            client.batch_execute("SET idle_in_transaction_session_timeout = '1s'")?;
+            let mut tx = import_transaction(client)?;
+            std::thread::sleep(Duration::from_millis(1500));
+            let idle: String = tx
+                .query_one("SHOW idle_in_transaction_session_timeout", &[])?
+                .get(0);
+            let statement: String = tx.query_one("SHOW statement_timeout", &[])?.get(0);
+            assert_eq!(idle, "0");
+            assert_eq!(statement, "0");
+            tx.commit()?;
+            let idle: String = client
+                .query_one("SHOW idle_in_transaction_session_timeout", &[])?
+                .get(0);
+            let statement: String = client.query_one("SHOW statement_timeout", &[])?.get(0);
+            assert_eq!(idle, "1s");
+            assert_eq!(statement, "15s");
+            Ok(())
+        })
     }
 
     #[test]

@@ -16,7 +16,9 @@ pub enum Source {
     OpenEnrichment,
     DoDataThings,
     MoneyVis,
+    LunchMoney,
     BusinessTransactions,
+    Foursquare,
 }
 impl Source {
     pub fn name(self) -> &'static str {
@@ -25,7 +27,9 @@ impl Source {
             Self::OpenEnrichment => "open-enrichment",
             Self::DoDataThings => "dodatathings",
             Self::MoneyVis => "moneyvis",
+            Self::LunchMoney => "lunchmoney",
             Self::BusinessTransactions => "business-transactions",
+            Self::Foursquare => "foursquare",
         }
     }
 }
@@ -39,7 +43,7 @@ pub struct Sample {
     pub label_origin: String,
     pub source: String,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Manifest {
     pub adapter_version: u32,
     pub source: String,
@@ -57,7 +61,17 @@ pub struct Manifest {
     pub labeled_holdout: usize,
     pub merchant_records: usize,
     pub skipped_child_records: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_transactions: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_places: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retained_places: usize,
 }
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 pub struct Bundle {
     pub records: Vec<SourceRecord>,
     pub development: Vec<Sample>,
@@ -149,6 +163,107 @@ fn examples(value: &str) -> Result<Vec<String>> {
     Ok(result)
 }
 
+fn adapter_version(source: Source) -> u32 {
+    if matches!(source, Source::LunchMoney | Source::Foursquare) {
+        2
+    } else {
+        1
+    }
+}
+fn bundle_path(
+    directory: &Path,
+    source: &str,
+    version: u32,
+    region: &str,
+    input: &str,
+    examples: Option<&str>,
+) -> std::path::PathBuf {
+    directory.join(source).join(format!(
+        "v{}-{}-{}-{}",
+        version,
+        crate::eval::fingerprint(region.as_bytes()).replace("fnv1a64:", ""),
+        input.replace("fnv1a64:", ""),
+        examples.unwrap_or("none").replace("fnv1a64:", "")
+    ))
+}
+/// Reuse preparation only when input, reviews, region and adapter version agree.
+/// The saved knowledge file can include user-reviewed edits and stays authoritative.
+pub fn cached_bundle(
+    directory: &Path,
+    source: Source,
+    contents: &str,
+    examples: Option<&str>,
+    region: &str,
+) -> Result<Option<(std::path::PathBuf, Manifest)>> {
+    let input = crate::eval::fingerprint(contents.as_bytes());
+    let examples = examples.map(|s| crate::eval::fingerprint(s.as_bytes()));
+    let path = bundle_path(
+        directory,
+        source.name(),
+        adapter_version(source),
+        region,
+        &input,
+        examples.as_deref(),
+    );
+    if !path.exists() {
+        return Ok(None);
+    }
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(path.join("manifest.json"))?)?;
+    if manifest.adapter_version != adapter_version(source)
+        || manifest.source != source.name()
+        || manifest.region != region
+        || manifest.input_fingerprint != input
+        || manifest.examples_fingerprint != examples
+    {
+        bail!("cached dataset metadata does not match its input");
+    }
+    for file in ["knowledge.json", "development.jsonl", "holdout.jsonl"] {
+        if !path.join(file).is_file() {
+            bail!("incomplete existing dataset at {}", path.display());
+        }
+    }
+    Ok(Some((path, manifest)))
+}
+
+// Parse the complete JSON array, but allocate source records only for the
+// selected prefix. This preserves validation and exact available counts.
+pub fn read_selected_records(
+    path: &Path,
+    limit: Option<u32>,
+) -> Result<(Vec<SourceRecord>, usize)> {
+    use serde::Deserializer as _;
+    struct Selected(usize);
+    impl<'de> serde::de::Visitor<'de> for Selected {
+        type Value = (Vec<SourceRecord>, usize);
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an array of source records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut records = Vec::new();
+            let mut available = 0;
+            while available < self.0 {
+                let Some(record) = seq.next_element::<SourceRecord>()? else {
+                    return Ok((records, available));
+                };
+                records.push(record);
+                available += 1;
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                available += 1;
+            }
+            Ok((records, available))
+        }
+    }
+    let reader = std::io::BufReader::with_capacity(1024 * 1024, std::fs::File::open(path)?);
+    let mut decoder = serde_json::Deserializer::from_reader(reader);
+    let result = decoder.deserialize_seq(Selected(limit.map_or(usize::MAX, |n| n as usize)))?;
+    decoder.end()?;
+    Ok(result)
+}
+
 pub fn prepare(
     source: Source,
     contents: &str,
@@ -160,7 +275,25 @@ pub fn prepare(
     let mut samples = Vec::new();
     let mut records = Vec::new();
     let mut skipped = 0;
+    let mut skipped_transactions = 0;
+    let mut skipped_places = 0;
+    let mut retained_places = 0;
     let (license, credit, url, kind) = match source {
+        Source::Foursquare => {
+            let prepared = crate::foursquare::prepare(contents, example_data, region)?;
+            records = prepared.0;
+            skipped_places = prepared.1;
+            retained_places = records
+                .iter()
+                .map(|r| r.raw["places"].as_array().map_or(0, Vec::len))
+                .sum();
+            (
+                "Apache-2.0",
+                crate::foursquare::CREDIT,
+                crate::foursquare::URL,
+                "merchant-knowledge-only",
+            )
+        }
         Source::MerchantStudio => {
             records = import::merchant_studio(contents)?;
             let input: Value = serde_json::from_str(
@@ -272,6 +405,47 @@ pub fn prepare(
                 "MIT",
                 "DoDataThings us-bank-transaction-categories-v2",
                 "https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2",
+                "requires-merchant-labels",
+            )
+        }
+        Source::LunchMoney => {
+            let input: Value = serde_json::from_str(contents)?;
+            for row in input["transactions"]
+                .as_array()
+                .context("missing transactions array")?
+            {
+                // Group parents are edited aggregates; split children duplicate bank originals.
+                let description = [
+                    &row["original_name"],
+                    &row["plaid_metadata"]["original_description"],
+                    &row["plaid_metadata"]["name"],
+                    &row["plaid_metadata"]["transaction"]["original_description"],
+                    &row["plaid_metadata"]["transaction"]["name"],
+                ]
+                .into_iter()
+                .filter_map(|value| value.as_str())
+                .find(|s| !s.trim().is_empty());
+                if row["plaid_account_id"].as_i64().is_none_or(|id| id <= 0)
+                    || row["is_group_parent"].as_bool() == Some(true)
+                    || row["split_parent_id"].as_i64().is_some_and(|id| id > 0)
+                    || row["is_pending"].as_bool() == Some(true)
+                    || description.is_none()
+                {
+                    skipped_transactions += 1;
+                    continue;
+                }
+                samples.push(sample(
+                    name,
+                    description.unwrap().into(),
+                    None,
+                    None,
+                    "real-unlabeled-merchant",
+                ));
+            }
+            (
+                "private",
+                "Private Lunch Money / Plaid transaction export",
+                "https://api.lunchmoney.dev/v2/transactions",
                 "requires-merchant-labels",
             )
         }
@@ -431,7 +605,7 @@ pub fn prepare(
         ));
     }
     let manifest = Manifest {
-        adapter_version: 1,
+        adapter_version: adapter_version(source),
         source: name.into(),
         region: region.into(),
         input_fingerprint: snapshot,
@@ -448,6 +622,9 @@ pub fn prepare(
         labeled_holdout: holdout.iter().filter(|s| s.expected.is_some()).count(),
         merchant_records: records.len(),
         skipped_child_records: skipped,
+        skipped_transactions,
+        skipped_places,
+        retained_places,
     };
     Ok(Bundle {
         records,
@@ -480,18 +657,14 @@ pub fn eval_suite(name: &str, samples: &[Sample]) -> Value {
 impl Bundle {
     /// Output is content-addressed; existing prepared versions are never overwritten.
     pub fn save(&self, directory: &Path) -> Result<std::path::PathBuf> {
-        let version = format!(
-            "v{}-{}-{}-{}",
+        let path = bundle_path(
+            directory,
+            &self.manifest.source,
             self.manifest.adapter_version,
-            crate::eval::fingerprint(self.manifest.region.as_bytes()).replace("fnv1a64:", ""),
-            self.manifest.input_fingerprint.replace("fnv1a64:", ""),
-            self.manifest
-                .examples_fingerprint
-                .as_deref()
-                .unwrap_or("none")
-                .replace("fnv1a64:", "")
+            &self.manifest.region,
+            &self.manifest.input_fingerprint,
+            self.manifest.examples_fingerprint.as_deref(),
         );
-        let path = directory.join(&self.manifest.source).join(version);
         if path.exists() {
             let existing: Value =
                 serde_json::from_str(&std::fs::read_to_string(path.join("manifest.json"))?)?;
@@ -510,6 +683,10 @@ impl Bundle {
             .join(&self.manifest.source)
             .join(format!(".preparing-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path)?;
+        if self.manifest.source == "foursquare" {
+            std::fs::write(path.join("NOTICE.txt"), crate::foursquare::NOTICE)?;
+            std::fs::write(path.join("LICENSE.txt"), crate::foursquare::LICENSE)?;
+        }
         write_samples(&path.join("development.jsonl"), &self.development)?;
         write_samples(&path.join("holdout.jsonl"), &self.holdout)?;
         for (split, samples) in [
@@ -541,6 +718,51 @@ impl Bundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_preparation_preserves_reviewed_records_and_limited_reads() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("ultra-dataset-cache-{}", uuid::Uuid::new_v4()));
+        let input = "name,transaction_string,category_label\nAlpha,ALPHA STORE,Dining\nBeta,BETA STORE,Dining\n";
+        assert!(
+            cached_bundle(&root, Source::BusinessTransactions, input, None, "global")?.is_none()
+        );
+        let bundle = prepare(Source::BusinessTransactions, input, None, "global")?;
+        let path = bundle.save(&root)?;
+        let mut records = bundle.records;
+        records[0].merchant.name = "Reviewed Alpha".into();
+        std::fs::write(path.join("knowledge.json"), serde_json::to_vec(&records)?)?;
+        let (cached_path, _) =
+            cached_bundle(&root, Source::BusinessTransactions, input, None, "global")?.unwrap();
+        assert_eq!(cached_path, path);
+        let (selected, total) = read_selected_records(&path.join("knowledge.json"), Some(1))?;
+        assert_eq!(total, 2);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].merchant.name, "Reviewed Alpha");
+        assert_eq!(
+            read_selected_records(&path.join("knowledge.json"), None)?
+                .0
+                .len(),
+            2
+        );
+        assert!(
+            cached_bundle(
+                &root,
+                Source::BusinessTransactions,
+                &format!("{input}Gamma,GAMMA,Dining\n"),
+                None,
+                "global"
+            )?
+            .is_none()
+        );
+        assert!(cached_bundle(&root, Source::BusinessTransactions, input, None, "ca")?.is_none());
+        std::fs::write(
+            path.join("knowledge.json"),
+            format!("{} trailing", serde_json::to_string(&records)?),
+        )?;
+        assert!(read_selected_records(&path.join("knowledge.json"), Some(1)).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[test]
     fn business_transactions_isolates_generated_evidence_and_has_stable_name_ids() {
         let input = "name,transaction_string,category_label\nCafe Azul,CAFE AZUL STORE 0006 PHOENIX AZ $15.00,Dining\ncafe azul,CAFE AZUL PURCHASE 123,Dining\n";
@@ -618,6 +840,37 @@ mod tests {
             0
         );
         assert!(a.records.is_empty());
+    }
+    #[test]
+    fn lunchmoney_uses_only_bank_originals_without_merchant_labels() {
+        let input = json!({"transactions": [
+            {"id": 1, "plaid_account_id": 2, "original_name": "BANK RAW $12", "payee": "Edited Shop", "amount": "12", "notes": "private"},
+            {"id": 2, "plaid_account_id": 2, "original_name": "BANK RAW $12"},
+            {"id": 3, "plaid_account_id": null, "original_name": "Manual"},
+            {"id": 4, "plaid_account_id": 2, "original_name": null, "payee": "Never fallback"},
+            {"id": 5, "plaid_account_id": 2, "original_name": "Split child", "split_parent_id": 1},
+            {"id": 6, "plaid_account_id": 2, "original_name": "Group", "is_group_parent": true},
+            {"id": 7, "plaid_account_id": 2, "original_name": "Pending", "is_pending": true},
+            {"id": 8, "plaid_account_id": 2, "original_name": "   "},
+            {"id": 9, "plaid_account_id": 2, "original_name": null, "payee": "Edited", "plaid_metadata": {"name": "PLAID RAW"}},
+            {"id": 10, "plaid_account_id": 2, "original_name": "BANK RAW $12", "plaid_metadata": {"name": "DO NOT OVERRIDE"}}
+        ]});
+        let bundle = prepare(Source::LunchMoney, &input.to_string(), None, "global").unwrap();
+        assert!(bundle.records.is_empty());
+        assert_eq!(bundle.manifest.skipped_transactions, 6);
+        let cases: Vec<_> = bundle.development.iter().chain(&bundle.holdout).collect();
+        assert_eq!(cases.len(), 2);
+        let descriptions: HashSet<_> = cases
+            .iter()
+            .map(|c| c.request.description.as_str())
+            .collect();
+        assert_eq!(descriptions, HashSet::from(["BANK RAW $12", "PLAID RAW"]));
+        assert!(
+            cases
+                .iter()
+                .all(|c| c.expected.is_none() && c.request.extra.is_empty())
+        );
+        assert!(prepare(Source::LunchMoney, "{}", None, "global").is_err());
     }
     #[test]
     fn moneyvis_discards_account_details() {

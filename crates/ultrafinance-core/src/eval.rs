@@ -56,6 +56,8 @@ pub enum Mode {
 pub struct CaseResult {
     pub id: String,
     pub description: String,
+    pub request: EnrichRequest,
+    pub candidates: Vec<crate::store::Candidate>,
     pub expected: Expected,
     pub expected_local_id: Option<String>,
     pub candidate_ids: Vec<String>,
@@ -64,6 +66,8 @@ pub struct CaseResult {
     pub matched: Option<bool>,
     pub correct: Option<bool>,
     pub error: Option<String>,
+    /// In-memory enrichment evidence, including Jev answers and discovery shortlists.
+    pub enrichment: Option<serde_json::Value>,
     pub latency_ms: f64,
 }
 #[derive(Debug, Serialize)]
@@ -175,7 +179,7 @@ pub async fn run_with_progress(
     let database_fingerprint = store.fingerprint()?;
     let started_at_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let enricher = if mode == Mode::Enrich {
-        Some(Enricher::with_store(
+        Some(Enricher::for_evaluation(
             api_key,
             model.clone(),
             threshold,
@@ -211,6 +215,8 @@ pub async fn run_with_progress(
                 .and_then(|id| candidate_ids.iter().position(|candidate| candidate == id))
                 .map(|r| r + 1);
             let result = CaseResult {
+                request: case.request.clone(),
+                candidates: candidates.clone(),
                 id: case.id,
                 description: case.request.description.clone(),
                 expected: case.expected,
@@ -221,6 +227,7 @@ pub async fn run_with_progress(
                 matched: None,
                 correct: None,
                 error: None,
+                enrichment: None,
                 latency_ms: if enricher.is_none() {
                     started.elapsed().as_secs_f64() * 1000.0
                 } else {
@@ -235,8 +242,9 @@ pub async fn run_with_progress(
             break;
         }
         if let Some(enricher) = &enricher {
-            let outcomes = enricher.enrich_batch_candidates(inputs).await;
-            for (result, outcome) in batch_results.iter_mut().zip(outcomes) {
+            let (outcomes, evidence) = enricher.enrich_batch_candidates_traced(inputs).await;
+            for (index, (result, outcome)) in batch_results.iter_mut().zip(outcomes).enumerate() {
+                result.enrichment = evidence.get(index).cloned();
                 match outcome {
                     Ok(response) => {
                         result.predicted_id = match response.merchant {
@@ -513,6 +521,8 @@ mod tests {
         let mixed = [
             CaseResult {
                 id: "labeled".into(),
+                request: serde_json::from_str(r#"{"description":"test"}"#).unwrap(),
+                candidates: vec![],
                 description: "Labeled case".into(),
                 expected: Expected::Unresolved,
                 expected_local_id: None,
@@ -522,10 +532,13 @@ mod tests {
                 matched: Some(false),
                 correct: Some(true),
                 error: None,
+                enrichment: None,
                 latency_ms: 1.0,
             },
             CaseResult {
                 id: "unlabeled".into(),
+                request: serde_json::from_str(r#"{"description":"test"}"#).unwrap(),
+                candidates: vec![],
                 description: "Unlabeled case".into(),
                 expected: Expected::Unlabeled,
                 expected_local_id: None,
@@ -535,6 +548,7 @@ mod tests {
                 matched: Some(true),
                 correct: None,
                 error: None,
+                enrichment: None,
                 latency_ms: 1.0,
             },
         ];
@@ -555,6 +569,8 @@ mod tests {
         );
         let wrong = CaseResult {
             id: "x".into(),
+            request: serde_json::from_str(r#"{"description":"test"}"#).unwrap(),
+            candidates: vec![],
             description: "LS".into(),
             expected: Expected::Unresolved,
             expected_local_id: None,
@@ -564,6 +580,7 @@ mod tests {
             matched: Some(true),
             correct: Some(false),
             error: None,
+            enrichment: None,
             latency_ms: 1.0,
         };
         let metrics = summarize(&[wrong], Mode::Enrich);

@@ -86,13 +86,13 @@ extern "C" fn on_interrupt(_: libc::c_int) {
     INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-struct Interrupts {
+pub(super) struct Interrupts {
     #[cfg(unix)]
     previous: libc::sigaction,
 }
 
 impl Interrupts {
-    fn install() -> Result<Self> {
+    pub(super) fn install() -> Result<Self> {
         #[cfg(unix)]
         {
             INTERRUPTED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -111,7 +111,7 @@ impl Interrupts {
         bail!("production shell currently requires a Unix terminal")
     }
 
-    fn check(&self) -> Result<()> {
+    pub(super) fn check(&self) -> Result<()> {
         #[cfg(unix)]
         if INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
             bail!("shell startup interrupted");
@@ -275,7 +275,7 @@ pub(super) fn config(root: &Path) -> Result<Value> {
     Ok(config)
 }
 
-fn run_shell(
+pub(super) fn run_shell(
     aws: &impl Api,
     config: &Value,
     image: ImageSelection<'_>,

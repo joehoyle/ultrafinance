@@ -280,3 +280,342 @@ pub async fn run(options: Options) -> Result<()> {
     }
     Ok(())
 }
+
+/// Shared single-suite runner for file-based and registered-source evaluations.
+pub struct FileOptions {
+    pub file: PathBuf,
+    pub samples: bool,
+    pub details: bool,
+    pub limit: Option<u32>,
+    pub output: Option<PathBuf>,
+    pub database_url: Option<String>,
+    pub mode: Mode,
+    pub model: String,
+    pub threshold: f64,
+}
+pub async fn run_file(options: FileOptions) -> Result<()> {
+    let FileOptions {
+        file,
+        samples,
+        details,
+        limit,
+        output,
+        database_url,
+        mode,
+        model,
+        threshold,
+    } = options;
+    let contents = contents(&file, samples, limit)?;
+    let report = ultrafinance_core::eval::run(
+        &contents,
+        MerchantStore::configured(database_url.as_deref())?,
+        mode,
+        env::var("TYPESAFE_API_KEY").ok(),
+        model,
+        threshold,
+    )
+    .await?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = output {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &json)?;
+        eprintln!("Saved report to {}", path.display());
+    } else {
+        println!("{json}");
+    }
+    if details {
+        print_details(&report)?;
+    }
+    if report.metrics.labeled_merchants > 0 {
+        eprintln!(
+            "{} cases: retrieved expected merchant for {}/{} known cases; {} errors",
+            report.metrics.cases,
+            report.metrics.retrieval_hits,
+            report.metrics.labeled_merchants,
+            report.metrics.errors
+        );
+    } else {
+        eprintln!(
+            "{} cases; {} errors",
+            report.metrics.cases, report.metrics.errors
+        );
+    }
+    if report.metrics.unlabeled > 0 {
+        eprintln!(
+            "{} unlabeled cases; candidate coverage {:.1}%",
+            report.metrics.unlabeled,
+            report.metrics.candidate_coverage.unwrap_or(0.0) * 100.0
+        );
+    }
+    if let Some(rate) = report.metrics.match_rate {
+        eprintln!(
+            "Match rate {:.1}% · {} matched · {} unresolved · {} errors",
+            rate * 100.0,
+            report.metrics.matches.unwrap_or(0),
+            report.metrics.unresolved.unwrap_or(0),
+            report.metrics.errors
+        );
+    }
+    if let Some(accuracy) = report.metrics.accuracy {
+        eprintln!(
+            "Accuracy {:.1}% · match rate {:.1}% · match precision {}",
+            accuracy * 100.0,
+            report.metrics.match_rate.unwrap_or(0.0) * 100.0,
+            report
+                .metrics
+                .match_precision
+                .map(|p| format!("{:.1}%", p * 100.0))
+                .unwrap_or_else(|| "n/a".into())
+        );
+    }
+    Ok(())
+}
+
+/// Render retrieval scores separately from the provider's assessment.
+fn print_details(report: &eval::Report) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    for (index, result) in report.results.iter().enumerate() {
+        let rendered = render_case(index, result, report.mode)?;
+        if let Err(error) = writeln!(stdout, "{rendered}") {
+            if error.kind() == io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn percent(value: &Value) -> String {
+    value
+        .as_f64()
+        .map(|v| format!("{:.1}%", v * 100.0))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn candidate_table(candidates: &[Value], answer: &Value, matched: Option<&str>) -> String {
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header([
+            "#",
+            "Merchant",
+            "Search similarity",
+            "Jev probability",
+            "Result",
+            "Merchant ID",
+        ]);
+    if !io::stdout().is_terminal() {
+        table.set_width(140);
+    }
+    for (index, candidate) in candidates.iter().enumerate() {
+        let key = format!("candidate_{index}");
+        table.add_row([
+            (index + 1).to_string(),
+            crate::output::text(candidate["merchant"]["name"].as_str().unwrap_or("—")),
+            format!("{:.3}", candidate["score"].as_f64().unwrap_or(0.0)),
+            percent(&answer["probabilities"][&key]),
+            if matched == candidate["merchant"]["id"].as_str() {
+                "MATCHED".into()
+            } else if answer["choice"].as_str() == Some(key.as_str()) {
+                "Jev choice".into()
+            } else {
+                String::new()
+            },
+            crate::output::text(candidate["merchant"]["id"].as_str().unwrap_or("—")),
+        ]);
+    }
+    table.to_string()
+}
+
+fn jev_summary(answer: &Value, candidates: &[Value], threshold: &Value) -> String {
+    let Some(choice) = answer["choice"].as_str() else {
+        return "Jev: no answer returned".into();
+    };
+    let selected = choice
+        .strip_prefix("candidate_")
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|n| candidates.get(n))
+        .map(|c| crate::output::text(c["merchant"]["name"].as_str().unwrap_or("—")))
+        .unwrap_or_else(|| crate::output::text(choice));
+    let reason = if choice == "none" {
+        " · Jev selected no merchant"
+    } else if answer["confidence"]
+        .as_f64()
+        .zip(threshold.as_f64())
+        .is_some_and(|(v, t)| v < t)
+        || answer["probabilities"][choice]
+            .as_f64()
+            .zip(threshold.as_f64())
+            .is_some_and(|(v, t)| v < t)
+    {
+        " · below match threshold"
+    } else {
+        ""
+    };
+    format!(
+        "Jev choice: {selected} · probability {} · confidence {} · threshold {}{reason}",
+        percent(&answer["probabilities"][choice]),
+        percent(&answer["confidence"]),
+        percent(threshold)
+    )
+}
+
+fn render_case(index: usize, result: &eval::CaseResult, mode: Mode) -> Result<String> {
+    let mut rendered = format!(
+        "\n{}. {}\nDescription: {}\n",
+        index + 1,
+        crate::output::text(&result.id),
+        crate::output::text(&result.description)
+    );
+    // Omit empty fields; retain meaningful input context without dumping nulls.
+    let request = serde_json::to_value(&result.request)?;
+    let context: serde_json::Map<_, _> = request
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(key, value)| {
+            key.as_str() != "description"
+                && !value.is_null()
+                && !value.as_object().is_some_and(|o| o.is_empty())
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !context.is_empty() {
+        rendered.push_str(&format!("Context: {}\n", serde_json::to_string(&context)?));
+    }
+    let trace = result.enrichment.as_ref().unwrap_or(&Value::Null);
+    let discovery = trace["method"] == "discovery";
+    let catalog: Vec<Value> = result.candidates.iter().map(|c| json!(c)).collect();
+    let catalog_answer = if discovery {
+        &trace["catalog_provider_answer"]
+    } else {
+        &trace["provider_answer"]
+    };
+    if result.candidates.is_empty() {
+        rendered.push_str("Catalog candidates: none\n");
+    } else {
+        rendered.push_str(&candidate_table(
+            &catalog,
+            catalog_answer,
+            result.predicted_id.as_deref(),
+        ));
+        rendered.push('\n');
+    }
+    if mode == Mode::Search {
+        rendered.push_str("Jev: not evaluated (search mode)\n");
+    } else if discovery {
+        rendered.push_str(&format!(
+            "Catalog {}\n",
+            jev_summary(catalog_answer, &catalog, &trace["threshold"])
+        ));
+        let candidates = trace["candidates"]
+            .as_array()
+            .context("missing discovery candidates")?;
+        rendered.push_str("Discovery candidates:\n");
+        rendered.push_str(&candidate_table(
+            candidates,
+            &trace["provider_answer"],
+            result.predicted_id.as_deref(),
+        ));
+        rendered.push_str(&format!(
+            "\n{}\n",
+            jev_summary(&trace["provider_answer"], candidates, &trace["threshold"])
+        ));
+    } else if !trace["provider_answer"].is_null() {
+        rendered.push_str(&format!(
+            "{}\n",
+            jev_summary(&trace["provider_answer"], &catalog, &trace["threshold"])
+        ));
+    } else {
+        let reason = match trace["method"].as_str() {
+            Some("exact") => "not called (trusted exact match)",
+            Some("verified_descriptor") => "not called (verified descriptor)",
+            Some("no_candidates") => "not called (no candidates)",
+            _ => "no answer returned",
+        };
+        rendered.push_str(&format!("Jev: {reason}\n"));
+    }
+    let outcome = if let Some(error) = &result.error {
+        format!("Error: {}", crate::output::text(error))
+    } else if let Some(id) = &result.predicted_id {
+        let name = result
+            .candidates
+            .iter()
+            .find(|c| &c.merchant.id == id)
+            .map(|c| c.merchant.name.as_str())
+            .or_else(|| {
+                trace["candidates"]
+                    .as_array()
+                    .and_then(|cs| cs.iter().find(|c| c["merchant"]["id"] == *id))
+                    .and_then(|c| c["merchant"]["name"].as_str())
+            });
+        format!(
+            "Matched: {} [{}]",
+            crate::output::text(name.unwrap_or("merchant")),
+            crate::output::text(id)
+        )
+    } else if mode == Mode::Search {
+        "Match: not evaluated (search mode)".into()
+    } else {
+        "Unresolved".into()
+    };
+    rendered.push_str(&format!("Outcome: {outcome}"));
+    Ok(rendered)
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    #[test]
+    fn jev_scores_and_abstention_are_distinct_from_search_similarity() {
+        let candidates = vec![json!({"merchant":{"name":"Amazon", "id":"a"}, "score":1.0})];
+        let answer = json!({"choice":"candidate_0", "confidence":0.9, "probabilities":{"candidate_0":0.8, "none":0.2}});
+        let table = candidate_table(&candidates, &answer, None);
+        assert!(table.contains("Search similarity"));
+        assert!(table.contains("1.000"));
+        assert!(table.contains("80.0%"));
+        assert!(table.contains("Jev choice"));
+        assert!(!table.contains("MATCHED"));
+        let summary = jev_summary(&answer, &candidates, &json!(0.95));
+        assert!(summary.contains("confidence 90.0%"));
+        assert!(summary.contains("below match threshold"));
+        let none = json!({"choice":"none", "confidence":0.99, "probabilities":{"none":0.98}});
+        assert!(jev_summary(&none, &candidates, &json!(0.95)).contains("Jev selected no merchant"));
+    }
+    #[test]
+    fn discovery_choices_use_their_own_shortlist_and_null_context_is_omitted() {
+        let result = eval::CaseResult {
+            id: "case".into(),
+            description: "BANK ORIGINAL".into(),
+            request: serde_json::from_value(json!({"description":"BANK ORIGINAL"})).unwrap(),
+            candidates: vec![],
+            expected: eval::Expected::Unlabeled,
+            expected_local_id: None,
+            candidate_ids: vec![],
+            expected_rank: None,
+            predicted_id: Some("discovered".into()),
+            matched: Some(true),
+            correct: None,
+            error: None,
+            latency_ms: 1.0,
+            enrichment: Some(json!({"method":"discovery", "threshold":0.95,
+                "candidates":[{"merchant":{"id":"discovered","name":"New Shop"},"score":0.7}],
+                "provider_answer":{"choice":"candidate_0", "confidence":0.99, "probabilities":{"candidate_0":0.98}}})),
+        };
+        let rendered = render_case(9, &result, Mode::Enrich).unwrap();
+        assert!(rendered.contains("10. case"));
+        assert!(rendered.contains("Jev choice: New Shop"));
+        assert!(rendered.contains("Outcome: Matched: New Shop [discovered]"));
+        assert!(!rendered.contains("null"));
+        assert!(!rendered.contains("Context:"));
+        assert!(
+            render_case(9, &result, Mode::Search)
+                .unwrap()
+                .contains("Jev: not evaluated (search mode)")
+        );
+    }
+}

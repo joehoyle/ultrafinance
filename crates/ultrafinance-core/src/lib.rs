@@ -2,11 +2,16 @@ pub mod batch;
 mod columns;
 pub mod datasets;
 pub mod dedupe;
+mod descriptor_location;
 pub mod discovery;
 pub mod eval;
+pub mod foursquare;
+pub mod gazetteer;
 pub mod import;
+mod import_progress;
 pub mod interpretation;
 pub mod location;
+pub mod location_dedupe;
 pub mod markets;
 pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
 mod pipeline;
@@ -132,6 +137,7 @@ pub struct EnrichResponse {
 
 #[derive(Clone)]
 pub struct Enricher {
+    persist_matches: bool,
     discovery: Option<discovery::Discovery>,
     client: reqwest::Client,
     provider_url: String,
@@ -172,6 +178,7 @@ impl Enricher {
             bail!("match threshold must be between 0 and 1");
         }
         Ok(Self {
+            persist_matches: true,
             discovery: discovery::Discovery::from_env()?,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
@@ -182,6 +189,18 @@ impl Enricher {
             threshold,
             store,
         })
+    }
+
+    /// Evaluate decisions without learning resolutions or importing discovered merchants.
+    pub(crate) fn for_evaluation(
+        api_key: Option<String>,
+        model: String,
+        threshold: f64,
+        store: store::MerchantStore,
+    ) -> Result<Self> {
+        let mut enricher = Self::with_store(api_key, model, threshold, store)?;
+        enricher.persist_matches = false;
+        Ok(enricher)
     }
 
     /// Browse the catalog, or paginate a bounded pool of ranked search candidates.
@@ -223,6 +242,24 @@ impl Enricher {
         self.enrich_batch(std::slice::from_ref(request))
             .await
             .remove(0)
+    }
+
+    /// Return evidence from the same enrichment run, including failed decisions.
+    pub async fn enrich_with_details(
+        &self,
+        request: &EnrichRequest,
+    ) -> (Result<EnrichResponse>, Value) {
+        let candidates = match request.validate() {
+            Err(error) => Err(error),
+            Ok(()) => self.retrieve(request).await,
+        };
+        let (mut results, mut details) = self
+            .enrich_batch_candidates_traced(vec![(request.clone(), candidates)])
+            .await;
+        (
+            results.remove(0),
+            details.pop().unwrap_or_else(|| serde_json::json!({})),
+        )
     }
 }
 

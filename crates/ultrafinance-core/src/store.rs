@@ -150,13 +150,11 @@ impl MerchantStore {
                 found.insert(0, candidate);
             }
         }
+        let interpretation = crate::interpretation::interpret(request);
+        let mut searched = std::collections::HashSet::from([normalize(&request.description)]);
         // Never upgrade a partial-name hypothesis to an exact or trusted alias.
-        for (index, hypothesis) in crate::interpretation::interpret(request)
-            .hypotheses
-            .into_iter()
-            .enumerate()
-        {
-            if normalize(&hypothesis.merchant_text) == normalize(&request.description) {
+        for (index, hypothesis) in interpretation.hypotheses.iter().enumerate() {
+            if !searched.insert(normalize(&hypothesis.merchant_text)) {
                 continue;
             }
             for mut candidate in
@@ -178,10 +176,9 @@ impl MerchantStore {
                 }
             }
         }
-        let interpretation = crate::interpretation::interpret(request);
         for candidate in &mut found {
             let needs_outlets = interpretation.hypotheses.iter().any(|hypothesis| {
-                hypothesis.possible_location.is_some()
+                (hypothesis.possible_location.is_some() || hypothesis.location_hint.is_some())
                     && std::iter::once(&candidate.merchant.name)
                         .chain(&candidate.merchant.aliases)
                         .any(|name| normalize(name) == normalize(&hypothesis.merchant_text))
@@ -253,11 +250,52 @@ impl MerchantStore {
     pub fn locations(&self, id: &str) -> Result<Vec<LocationRecord>> {
         self.0.locations(&self.resolve_merchant_id(id)?)
     }
+    pub fn location_sources(&self, id: &str) -> Result<Vec<LocationRecord>> {
+        self.0.location_sources(&self.resolve_merchant_id(id)?)
+    }
+    pub fn dedupe_locations(
+        &self,
+        id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<crate::location_dedupe::Report> {
+        let id = id.map(|id| self.resolve_merchant_id(id)).transpose()?;
+        self.0.dedupe_locations(id.as_deref(), dry_run)
+    }
     pub fn put(&self, m: &Merchant) -> Result<()> {
         self.0.put(m)
     }
+    /// Low-level source persistence. User-facing imports should use
+    /// `dedupe::import` to reconcile merchant identity atomically.
     pub fn import(&self, r: &[SourceRecord]) -> Result<()> {
+        self.import_delta(r).map(|_| ())
+    }
+    pub fn import_delta(&self, r: &[SourceRecord]) -> Result<ImportDelta> {
         self.0.import(r)
+    }
+    pub(crate) fn apply_reconciled_import(
+        &self,
+        expected: &crate::dedupe::Snapshot,
+        staged: &crate::dedupe::Snapshot,
+        records: &[SourceRecord],
+        identities: &[String],
+        groups: &[Vec<String>],
+        audit: &Value,
+    ) -> Result<(ImportDelta, Option<String>)> {
+        self.0
+            .apply_reconciled_import(expected, staged, records, identities, groups, audit)
+    }
+    /// Browse original imported evidence independently of candidate retrieval.
+    pub fn source_records(
+        &self,
+        source: &str,
+        external_id: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        if !(1..=1000).contains(&limit) {
+            bail!("source record limit must be 1..1000");
+        }
+        self.0.source_records(source, external_id, limit, offset)
     }
     pub fn link(&self, source: &str, external: &str, target: &str) -> Result<()> {
         self.0
@@ -373,6 +411,13 @@ pub struct SourceRecord {
     pub url: String,
     pub version: Option<String>,
     pub raw: Value,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ImportDelta {
+    pub added: usize,
+    pub updated: usize,
+    pub unchanged: usize,
 }
 
 fn rank_candidates(
@@ -621,6 +666,61 @@ mod tests {
         assert!(store.get("short")?.unwrap().aliases.is_empty());
         Ok(())
     }
+    #[test]
+    fn bank_format_retrieval_is_ranked_but_never_trusted() -> Result<()> {
+        let store = MerchantStore::temporary()?;
+        store.put(&merchant("carvana", "Carvana", "US"))?;
+        store.put(&merchant("paypal", "PayPal", "US"))?;
+        store.put(&merchant("recipient", "Recipient", "US"))?;
+        for description in [
+            "PAYPAL *CARVANA 402-935-7733 AZ",
+            "10/01 POS PURCHASE PP *CARVANA REF: ABC123 2026-10-01",
+            "Orig CO Name:CARVANA Orig ID:123456 Desc Date:261001 CO Entry Descr:PAYMENT Sec:CCD Trace#:123456789 Ind Name:RECIPIENT",
+            "CARVANA DES:PAYMENT ID:123456 INDN:RECIPIENT CO ID:987654 PPD",
+        ] {
+            let request: crate::EnrichRequest = serde_json::from_value(serde_json::json!({
+                "description":description, "country":"US"
+            }))?;
+            let candidates = store.search_request(&request, 1)?;
+            assert_eq!(candidates[0].merchant.id, "carvana", "{description}");
+            assert!(
+                !candidates[0].exact && !candidates[0].trusted,
+                "{description}"
+            );
+            assert!(
+                candidates[0]
+                    .interpretation_evidence
+                    .iter()
+                    .any(|e| e.matched_name == "Carvana")
+            );
+        }
+        assert!(store.get("carvana")?.unwrap().aliases.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn structured_location_hypotheses_retrieve_the_merchant_without_learning_aliases() -> Result<()>
+    {
+        let store = MerchantStore::temporary()?;
+        store.put(&merchant("cafe", "Julius Cafe", "CA"))?;
+        for description in [
+            "SQ *JULIUS CAFE STORE 00482 TORONTO ON CAN",
+            "JULIUS CAFE SAN FRANCISCO CA",
+            "JULIUS CAFE / Amsterdam / NLD",
+        ] {
+            let request = serde_json::from_value(serde_json::json!({"description":description}))?;
+            let candidates = store.search_request(&request, 1)?;
+            assert_eq!(candidates[0].merchant.id, "cafe", "{description}");
+            assert!(!candidates[0].exact && !candidates[0].trusted);
+            assert!(
+                candidates[0]
+                    .interpretation_evidence
+                    .iter()
+                    .any(|e| e.location_hint.is_some())
+            );
+        }
+        assert!(store.get("cafe")?.unwrap().aliases.is_empty());
+        Ok(())
+    }
     fn record(id: &str, name: &str) -> SourceRecord {
         SourceRecord {
             source: "test".into(),
@@ -687,6 +787,35 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|c| c.exact)
+        );
+    }
+    #[test]
+    fn delta_imports_skip_unchanged_rows_and_retain_absent_records() {
+        let db = MerchantStore::temporary().unwrap();
+        let a = record("a", "Alpha");
+        let mut b = record("b", "Beta");
+        let first = db.import_delta(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!((first.added, first.updated, first.unchanged), (2, 0, 0));
+        let id = db.resolve_source(&a.source, "a").unwrap().unwrap();
+        let mut a = a;
+        a.version = Some("new-whole-file-version".into());
+        b.raw = serde_json::json!({"changed":true});
+        let second = db.import_delta(&[a.clone(), b]).unwrap();
+        assert_eq!((second.added, second.updated, second.unchanged), (0, 1, 1));
+        assert_eq!(db.resolve_source(&a.source, "a").unwrap().unwrap(), id);
+        let third = db.import_delta(&[a.clone()]).unwrap();
+        assert_eq!(third.unchanged, 1);
+        let rows = db.source_records(&a.source, None, 10, 0).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["record"]["raw"]["changed"], true);
+        assert_eq!(
+            db.source_records(&a.source, Some("b"), 1, 0).unwrap().len(),
+            1
+        );
+        assert!(
+            db.source_records(&a.source, None, 10, 2)
+                .unwrap()
+                .is_empty()
         );
     }
     #[test]

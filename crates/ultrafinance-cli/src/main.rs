@@ -1,7 +1,9 @@
 mod batch;
 mod build_metadata;
+mod foursquare_download;
 mod infra;
 mod output;
+mod sources;
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Map;
@@ -35,10 +37,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Browse registered datasets, download snapshots, and refresh source knowledge.
+    Sources(sources::Args),
     /// Deploy the workspace, inspect Lambda logs, or open the production CLI shell.
     Infra(infra::InfraArgs),
     /// Preview competing merchant/location interpretations without provider calls.
-    Interpret { description: String },
+    Interpret {
+        #[arg(
+            required_unless_present = "list_formats",
+            conflicts_with = "list_formats"
+        )]
+        description: Option<String>,
+        /// List supported descriptor rules and processor prefixes from the parser.
+        #[arg(long)]
+        list_formats: bool,
+        /// Print the format inventory as machine-readable JSON.
+        #[arg(long, requires = "list_formats")]
+        json: bool,
+    },
     /// Inspect, verify or revoke context-scoped remembered descriptor resolutions.
     Resolutions {
         #[command(subcommand)]
@@ -113,12 +129,65 @@ enum Command {
 
 #[derive(Subcommand)]
 enum LocationCommand {
+    /// Inspect the bundled geographic dataset or look up a city offline.
+    Gazetteer {
+        city: Option<String>,
+        #[command(subcommand)]
+        command: Option<GazetteerCommand>,
+        #[arg(long, requires = "city")]
+        country: Option<String>,
+        #[arg(long, requires = "city")]
+        region: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Import reviewed outlet JSON. Import the referenced merchants first.
     Import { file: PathBuf },
     /// Evaluate location-only labels offline with geography and outlet accuracy.
     Eval { file: PathBuf },
     /// List catalog outlets for a local merchant ID, including provenance.
-    List { merchant_id: String },
+    List {
+        merchant_id: String,
+        /// Show original source records instead of consolidated outlets.
+        #[arg(long)]
+        raw: bool,
+    },
+    /// Consolidate duplicate outlets, preserving source evidence and distinct branches.
+    Dedupe {
+        /// Restrict reconciliation to one merchant (retired IDs are resolved).
+        #[arg(long)]
+        merchant_id: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GazetteerCommand {
+    /// Browse place reference data, independently of merchant outlets.
+    List {
+        #[arg(long)]
+        country: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Look up a city (including a city named List).
+    Lookup {
+        city: String,
+        #[arg(long)]
+        country: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,7 +229,11 @@ enum DatasetCommand {
         output: PathBuf,
     },
     /// Apply a prepared knowledge.json batch to the merchant database.
-    Apply { file: PathBuf },
+    Apply {
+        file: PathBuf,
+        #[command(flatten)]
+        dedupe: ImportDedupeArgs,
+    },
     /// Export manually labeled JSONL samples into a merchant eval suite.
     ExportEval {
         file: PathBuf,
@@ -174,17 +247,24 @@ enum DatasetSource {
     OpenEnrichment,
     Dodatathings,
     Moneyvis,
+    /// Private Plaid original descriptions from Lunch Money.
+    Lunchmoney,
     /// Synthetic merchant-labeled descriptions; names-only evaluation catalog.
     BusinessTransactions,
+    /// Merchant knowledge from a filtered Foursquare OS Places CSV export.
+    Foursquare,
 }
 
 #[derive(Subcommand)]
 enum MerchantCommand {
-    /// Find duplicates with Jev and automatically merge supported groups.
+    /// Merge duplicates using name/website rules, then Jev for ambiguous pairs.
     Dedupe {
         /// Evaluate and report decisions without merging merchants.
         #[arg(long)]
         dry_run: bool,
+        /// Print complete pair decisions and merge groups as JSON.
+        #[arg(long)]
+        json: bool,
         #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
         model: String,
         /// Require both same-merchant probability and confidence to reach this value.
@@ -242,6 +322,9 @@ enum MerchantCommand {
     /// Show exact and fuzzy candidates without calling Jev.
     Search {
         description: String,
+        /// Print complete candidates and source evidence as JSON for scripts.
+        #[arg(long)]
+        json: bool,
         /// Transaction country. Prefers known markets without excluding other candidates.
         #[arg(long)]
         country: Option<String>,
@@ -257,6 +340,8 @@ enum MerchantCommand {
         /// Namespace for native catalog IDs.
         #[arg(long, default_value = "catalog")]
         source: String,
+        #[command(flatten)]
+        dedupe: ImportDedupeArgs,
     },
     /// Link an external record to an existing local merchant (no automatic name merging).
     Link {
@@ -267,6 +352,34 @@ enum MerchantCommand {
         #[arg(long)]
         merchant_id: String,
     },
+}
+
+#[derive(Args)]
+pub(crate) struct ImportDedupeArgs {
+    /// Import at most this many source records, in prepared/file order, before reconciliation.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    limit: Option<u32>,
+    /// Preview deterministic import reconciliation without database changes or Jev calls.
+    #[arg(long)]
+    dedupe_dry_run: bool,
+}
+impl ImportDedupeArgs {
+    pub(crate) fn select<T>(&self, records: &mut Vec<T>) -> serde_json::Value {
+        let available = records.len();
+        if let Some(limit) = self.limit {
+            records.truncate(limit as usize);
+        }
+        self.selection(available, records.len())
+    }
+    pub(crate) fn selection(&self, available: usize, selected: usize) -> serde_json::Value {
+        eprintln!("Import: selected {selected} of {available} source records");
+        serde_json::json!({"available_records":available,"selected_records":selected,"limit":self.limit})
+    }
+    pub(crate) fn options(&self) -> ultrafinance_core::dedupe::ImportOptions {
+        ultrafinance_core::dedupe::ImportOptions {
+            dry_run: self.dedupe_dry_run,
+        }
+    }
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -316,6 +429,9 @@ struct EnrichArgs {
     /// Validate and print the request without reading a catalog or calling Jev.
     #[arg(long)]
     dry_run: bool,
+    /// Explain parsing, the candidate shortlist and the decision on stderr.
+    #[arg(long, conflicts_with = "dry_run")]
+    details: bool,
 }
 
 #[derive(Args)]
@@ -400,6 +516,51 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
     Ok(request)
 }
 
+/// Generate nested command paths from Clap's definitions so help stays current.
+fn with_nested_command_help(command: clap::Command) -> clap::Command {
+    fn collect(
+        command: &clap::Command,
+        prefix: &str,
+        depth: usize,
+        rows: &mut Vec<(String, String)>,
+    ) {
+        for child in command.get_subcommands().filter(|c| !c.is_hide_set()) {
+            let path = if prefix.is_empty() {
+                child.get_name().to_string()
+            } else {
+                format!("{prefix} {}", child.get_name())
+            };
+            if depth >= 1 {
+                rows.push((
+                    path.clone(),
+                    child
+                        .get_about()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                ));
+            }
+            collect(child, &path, depth + 1, rows);
+        }
+    }
+    let mut rows = Vec::new();
+    collect(&command, "", 0, &mut rows);
+    let mut command = command.mut_subcommands(with_nested_command_help);
+    if !rows.is_empty() {
+        let width = rows.iter().map(|(path, _)| path.len()).max().unwrap_or(0);
+        let mut help = command
+            .get_after_help()
+            .map(|h| format!("{h}\n\n"))
+            .unwrap_or_default();
+        help.push_str("Subcommands:\n");
+        for (path, about) in rows {
+            help.push_str(&format!("  {path:width$}  {about}\n"));
+        }
+        help.push_str("\nUse `ultrafinance <command> <subcommand> --help` for options.");
+        command = command.after_help(help);
+    }
+    command
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Check for missing subcommands after parsing so global flags and environment
@@ -414,22 +575,34 @@ async fn main() -> Result<()> {
             command
         }
     }
-    let mut command = help_on_missing_subcommand(Cli::command());
+    let mut command = help_on_missing_subcommand(with_nested_command_help(Cli::command()));
     let matches = command.get_matches_mut();
     let mut current_matches = &matches;
     while let Some((name, submatches)) = current_matches.subcommand() {
         command = command.find_subcommand_mut(name).unwrap().clone();
         current_matches = submatches;
     }
-    if command.has_subcommands() {
+    // Gazetteer also accepts a direct city lookup or snapshot summary.
+    if command.has_subcommands() && command.get_name() != "gazetteer" {
         command.print_help()?;
         println!();
         return Ok(());
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
+        Command::Sources(args) => sources::run(args, cli.database_url.as_deref()).await?,
         Command::Infra(args) => infra::run(args)?,
-        Command::Interpret { description } => {
+        Command::Interpret {
+            description,
+            list_formats,
+            json,
+        } => {
+            if list_formats {
+                let inventory = ultrafinance_core::interpretation::formats();
+                output::interpretation_formats(&inventory, json)?;
+                return Ok(());
+            }
+            let description = description.context("description is required")?;
             let request: EnrichRequest =
                 serde_json::from_value(serde_json::json!({"description":description}))?;
             request.validate()?;
@@ -496,32 +669,82 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::Locations { command } => {
-            let store = MerchantStore::configured(cli.database_url.as_deref())?;
-            match command {
-                LocationCommand::Import { file } => {
-                    let records: Vec<ultrafinance_core::location::LocationRecord> =
-                        serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                    store.import_locations(&records)?;
-                    println!("{}", serde_json::json!({"imported":records.len()}));
+        Command::Locations { command } => match command {
+            LocationCommand::Gazetteer {
+                city,
+                command,
+                country,
+                region,
+                json,
+            } => match command {
+                Some(GazetteerCommand::List {
+                    country,
+                    region,
+                    limit,
+                    offset,
+                    json,
+                }) => {
+                    output::gazetteer_list(
+                        country.as_deref(),
+                        region.as_deref(),
+                        limit,
+                        offset,
+                        json,
+                    )?;
                 }
-                LocationCommand::Eval { file } => {
-                    let suite = serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&ultrafinance_core::location::evaluate(
-                            &store, suite
-                        )?)?
-                    );
+                Some(GazetteerCommand::Lookup {
+                    city,
+                    country,
+                    region,
+                    json,
+                }) => {
+                    output::gazetteer(Some(&city), country.as_deref(), region.as_deref(), json)?;
                 }
-                LocationCommand::List { merchant_id } => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&store.locations(&merchant_id)?)?
-                    );
+                None => {
+                    output::gazetteer(city.as_deref(), country.as_deref(), region.as_deref(), json)?
                 }
+            },
+            LocationCommand::Import { file } => {
+                let store = MerchantStore::configured(cli.database_url.as_deref())?;
+                let records: Vec<ultrafinance_core::location::LocationRecord> =
+                    serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                store.import_locations(&records)?;
+                println!("{}", serde_json::json!({"imported":records.len()}));
             }
-        }
+            LocationCommand::Eval { file } => {
+                let store = MerchantStore::configured(cli.database_url.as_deref())?;
+                let suite = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ultrafinance_core::location::evaluate(
+                        &store, suite
+                    )?)?
+                );
+            }
+            LocationCommand::Dedupe {
+                merchant_id,
+                dry_run,
+            } => {
+                let store = MerchantStore::configured(cli.database_url.as_deref())?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &store.dedupe_locations(merchant_id.as_deref(), dry_run)?
+                    )?
+                );
+            }
+            LocationCommand::List { merchant_id, raw } => {
+                let store = MerchantStore::configured(cli.database_url.as_deref())?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&if raw {
+                        store.location_sources(&merchant_id)?
+                    } else {
+                        store.locations(&merchant_id)?
+                    })?
+                );
+            }
+        },
         Command::Datasets { command } => match command {
             DatasetCommand::Import {
                 source,
@@ -531,6 +754,7 @@ async fn main() -> Result<()> {
                 output,
             } => {
                 let source = match source {
+                    DatasetSource::Foursquare => ultrafinance_core::datasets::Source::Foursquare,
                     DatasetSource::MerchantStudio => {
                         ultrafinance_core::datasets::Source::MerchantStudio
                     }
@@ -540,6 +764,7 @@ async fn main() -> Result<()> {
                     DatasetSource::Dodatathings => {
                         ultrafinance_core::datasets::Source::DoDataThings
                     }
+                    DatasetSource::Lunchmoney => ultrafinance_core::datasets::Source::LunchMoney,
                     DatasetSource::Moneyvis => ultrafinance_core::datasets::Source::MoneyVis,
                     DatasetSource::BusinessTransactions => {
                         ultrafinance_core::datasets::Source::BusinessTransactions
@@ -559,11 +784,21 @@ async fn main() -> Result<()> {
                     serde_json::json!({"path":path,"manifest":bundle.manifest})
                 );
             }
-            DatasetCommand::Apply { file } => {
-                let records: Vec<ultrafinance_core::store::SourceRecord> =
+            DatasetCommand::Apply { file, dedupe } => {
+                let mut records: Vec<ultrafinance_core::store::SourceRecord> =
                     serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                MerchantStore::configured(cli.database_url.as_deref())?.import(&records)?;
-                println!("{}", serde_json::json!({"imported":records.len()}));
+                let selection = dedupe.select(&mut records);
+                let count = records.len();
+                let result = ultrafinance_core::dedupe::import(
+                    MerchantStore::configured(cli.database_url.as_deref())?,
+                    records,
+                    dedupe.options(),
+                )
+                .await?;
+                println!(
+                    "{}",
+                    serde_json::json!({"imported":if result.dedupe.dry_run {0} else {count},"reconciliation":result,"selection":selection})
+                );
             }
             DatasetCommand::ExportEval { file, output } => {
                 let contents = std::fs::read_to_string(file)?;
@@ -615,68 +850,18 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let file = file.context("eval requires a file or --all")?;
-            let contents = batch::contents(&file, samples, limit)?;
-            let report = ultrafinance_core::eval::run(
-                &contents,
-                MerchantStore::configured(cli.database_url.as_deref())?,
+            batch::run_file(batch::FileOptions {
+                file,
+                samples,
+                details: false,
+                limit,
                 mode,
-                env::var("TYPESAFE_API_KEY").ok(),
+                output,
+                database_url: cli.database_url,
                 model,
                 threshold,
-            )
+            })
             .await?;
-            let json = serde_json::to_string_pretty(&report)?;
-            if let Some(path) = output {
-                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&path, &json)?;
-                eprintln!("Saved report to {}", path.display());
-            } else {
-                println!("{json}");
-            }
-            if report.metrics.labeled_merchants > 0 {
-                eprintln!(
-                    "{} cases: retrieved expected merchant for {}/{} known cases; {} errors",
-                    report.metrics.cases,
-                    report.metrics.retrieval_hits,
-                    report.metrics.labeled_merchants,
-                    report.metrics.errors
-                );
-            } else {
-                eprintln!(
-                    "{} cases; {} errors",
-                    report.metrics.cases, report.metrics.errors
-                );
-            }
-            if report.metrics.unlabeled > 0 {
-                eprintln!(
-                    "{} unlabeled cases; candidate coverage {:.1}%",
-                    report.metrics.unlabeled,
-                    report.metrics.candidate_coverage.unwrap_or(0.0) * 100.0
-                );
-            }
-            if let Some(rate) = report.metrics.match_rate {
-                eprintln!(
-                    "Match rate {:.1}% · {} matched · {} unresolved · {} errors",
-                    rate * 100.0,
-                    report.metrics.matches.unwrap_or(0),
-                    report.metrics.unresolved.unwrap_or(0),
-                    report.metrics.errors
-                );
-            }
-            if let Some(accuracy) = report.metrics.accuracy {
-                eprintln!(
-                    "Accuracy {:.1}% · match rate {:.1}% · match precision {}",
-                    accuracy * 100.0,
-                    report.metrics.match_rate.unwrap_or(0.0) * 100.0,
-                    report
-                        .metrics
-                        .match_precision
-                        .map(|p| format!("{:.1}%", p * 100.0))
-                        .unwrap_or_else(|| "n/a".into())
-                );
-            }
         }
         Command::Enrich(args) => {
             let request = read_request(&args)?;
@@ -703,9 +888,20 @@ async fn main() -> Result<()> {
                 args.threshold,
                 store,
             )?;
-            let response = tokio::time::timeout(Duration::from_secs(55), enricher.enrich(&request))
+            let response = if args.details {
+                let (response, details) = tokio::time::timeout(
+                    Duration::from_secs(55),
+                    enricher.enrich_with_details(&request),
+                )
                 .await
-                .context("merchant evaluation timed out")??;
+                .context("merchant evaluation timed out")?;
+                output::enrichment_details(&details)?;
+                response?
+            } else {
+                tokio::time::timeout(Duration::from_secs(55), enricher.enrich(&request))
+                    .await
+                    .context("merchant evaluation timed out")??
+            };
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Command::EnrichBatch(args) => {
@@ -766,6 +962,7 @@ async fn main() -> Result<()> {
             match command {
                 MerchantCommand::Dedupe {
                     dry_run,
+                    json,
                     model,
                     threshold,
                     max_pairs,
@@ -780,12 +977,18 @@ async fn main() -> Result<()> {
                         max_pairs as usize,
                     )
                     .await?;
-                    let json = serde_json::to_string_pretty(&report)?;
+                    let report_json = serde_json::to_string_pretty(&report)?;
                     if let Some(path) = output {
-                        std::fs::write(&path, &json)
+                        std::fs::write(&path, &report_json)
                             .with_context(|| format!("cannot write {}", path.display()))?;
                     }
-                    println!("{json}");
+                    output::merchant_dedupe(&report, json)?;
+                    if report.errors > 0 {
+                        bail!(
+                            "{} invalid Jev dedupe answers; no merges applied. See pair diagnostics above or use --output FILE to retain the full answers",
+                            report.errors
+                        );
+                    }
                 }
                 MerchantCommand::Stats { json } => {
                     output::merchant_stats(&store.stats()?, json)?;
@@ -830,27 +1033,23 @@ async fn main() -> Result<()> {
                     description,
                     country,
                     limit,
+                    json,
                 } => {
                     if !(1..=254).contains(&limit) {
                         bail!("limit must be between 1 and 254");
                     }
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&store.search(
-                            &description,
-                            country.as_deref(),
-                            limit
-                        )?)?
-                    );
+                    let candidates = store.search(&description, country.as_deref(), limit)?;
+                    output::merchant_search(&description, &candidates, json)?;
                 }
                 MerchantCommand::Import {
                     file,
                     format,
                     source,
+                    dedupe,
                 } => {
                     let contents = std::fs::read_to_string(&file)
                         .with_context(|| format!("cannot read {}", file.display()))?;
-                    let records = match format {
+                    let mut records = match format {
                         ImportFormat::Native => {
                             ultrafinance_core::import::catalog(&contents, &source)?
                         }
@@ -858,10 +1057,14 @@ async fn main() -> Result<()> {
                             ultrafinance_core::import::merchant_studio(&contents)?
                         }
                     };
-                    store.import(&records)?;
+                    let selection = dedupe.select(&mut records);
+                    let count = records.len();
+                    let attribution = records.first().map(|r| r.attribution.clone());
+                    let result =
+                        ultrafinance_core::dedupe::import(store, records, dedupe.options()).await?;
                     println!(
                         "{}",
-                        serde_json::json!({"imported":records.len(),"attributions":records.first().map(|r|&r.attribution)})
+                        serde_json::json!({"imported":if result.dedupe.dry_run {0} else {count},"attributions":attribution,"reconciliation":result,"selection":selection})
                     );
                 }
                 MerchantCommand::Link {

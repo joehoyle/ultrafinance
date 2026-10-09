@@ -141,11 +141,37 @@ pub enum MerchantReference {
     Source { source: String, external_id: String },
 }
 
+/// Source provenance retained when several source records describe one outlet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationProvenance {
+    pub source: String,
+    pub external_id: String,
+    pub attribution: String,
+    pub license: String,
+    pub url: String,
+    pub transaction_pattern: Option<String>,
+}
+impl From<&LocationRecord> for LocationProvenance {
+    fn from(r: &LocationRecord) -> Self {
+        Self {
+            source: r.source.clone(),
+            external_id: r.external_id.clone(),
+            attribution: r.attribution.clone(),
+            license: r.license.clone(),
+            url: r.url.clone(),
+            transaction_pattern: r.transaction_pattern.clone(),
+        }
+    }
+}
+
 /// Reviewed outlet knowledge, imported explicitly. Source keys preserve local IDs
 /// on refresh. Neither company addresses nor all upstream children are outlets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocationRecord {
+    /// Populated on consolidated reads; raw source records remain separately stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<LocationProvenance>,
     pub source: String,
     pub external_id: String,
     pub merchant: MerchantReference,
@@ -219,131 +245,28 @@ impl LocationRecord {
     }
 }
 
-// Explicit locality/region/country triples avoid guessing where the merchant
-// name stops and the city begins. Extend using reviewed examples, not suffix words.
-const LOCALITIES: &[(&str, &str, &str)] = &[
-    ("HIALEAH", "FL", "US"),
-    ("MIAMI", "FL", "US"),
-    ("FT LAUDERDALE", "FL", "US"),
-    ("FORT LAUDERDALE", "FL", "US"),
-    ("ORLANDO", "FL", "US"),
-    ("LAKE BUENA VISTA", "FL", "US"),
-    ("NEW YORK", "NY", "US"),
-    ("SAN FRANCISCO", "CA", "US"),
-    ("LOS ANGELES", "CA", "US"),
-    ("SAN DIEGO", "CA", "US"),
-    ("CHICAGO", "IL", "US"),
-    ("HOUSTON", "TX", "US"),
-    ("TORONTO", "ON", "CA"),
-    ("MONTREAL", "QC", "CA"),
-    ("BROMONT", "QC", "CA"),
-    ("VANCOUVER", "BC", "CA"),
-    ("OTTAWA", "ON", "CA"),
-    ("CALGARY", "AB", "CA"),
-    ("CANBERRA", "ACT", "AU"),
-    ("SYDNEY", "NSW", "AU"),
-    ("BONDI BEACH", "NSW", "AU"),
-    ("CHIPPENDALE", "NSW", "AU"),
-];
-
 fn descriptor_geography(description: &str) -> LocationHint {
-    let text = normalize(description).to_ascii_uppercase();
-    // These descriptors frequently carry billing/processor cities, not purchase
-    // geography. Structured caller evidence can still be supplied separately.
-    let billing = [
-        "GOOGLE",
-        "PAYPAL",
-        "SUBSCRIPTION",
-        "SUBSCR",
-        "ONLINE",
-        "OPENAI",
-        "ANTHROPIC",
-        "CLAUDE",
-        "HULU",
-        "NETFLIX",
-        "DISNEY PLUS",
-        "QANTAS",
-    ];
-    let padded = format!(" {text} ");
-    if billing.iter().any(|s| padded.contains(&format!(" {s} "))) || text.contains("APPLE COM BILL")
-    {
+    if crate::descriptor_location::billing_description(description) {
         return LocationHint::default();
     }
+    let request: EnrichRequest =
+        serde_json::from_value(serde_json::json!({"description": description}))
+            .expect("descriptor request");
+    let extracted = crate::descriptor_location::extract(description, &request);
     let mut result = LocationHint::default();
-    for &(city, region, country) in LOCALITIES {
-        let suffix = format!("{city} {region}");
-        if [
-            &suffix,
-            &format!("{suffix} {country}"),
-            &format!(
-                "{suffix} {}",
-                if country == "US" {
-                    "USA"
-                } else if country == "AU" {
-                    "AUS"
-                } else {
-                    "CAN"
-                }
-            ),
-        ]
-        .into_iter()
-        .any(|suffix| text == *suffix || text.ends_with(&format!(" {suffix}")))
-        {
-            result.city = Some(
-                city.split_whitespace()
-                    .map(|word| {
-                        let mut chars = word.chars();
-                        format!(
-                            "{}{}",
-                            chars.next().unwrap(),
-                            chars.as_str().to_ascii_lowercase()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-            result.region = Some(region.into());
-            result.country = Some(country.into());
-            break;
+    if let [location] = extracted.as_slice()
+        && location.geoname_ids.len() <= 1
+    {
+        result = location.hint.clone();
+        if let Some(city) = location.canonical_city {
+            result.city = Some(city.into());
         }
     }
-    // Do not extract an arbitrary numeric token: dates, cards, and phones abound.
-    static STORE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let store =
-        STORE.get_or_init(|| regex::Regex::new(r"(?i)(?:#|\bSTORE\s+)([A-Z0-9]{1,16})\b").unwrap());
-    let identifiers: std::collections::BTreeSet<_> = store
-        .captures_iter(description)
-        .filter_map(|captures| {
-            let found = captures.get(0)?;
-            let prefix = &description[..found.start()];
-            // A hash embedded in a card/reference token is not a store marker.
-            if found.as_str().starts_with('#')
-                && prefix.chars().last().is_some_and(|c| !c.is_whitespace())
-            {
-                return None;
-            }
-            let preceding = prefix
-                .split_whitespace()
-                .last()
-                .unwrap_or("")
-                .to_ascii_uppercase();
-            if [
-                "CARD", "ACCOUNT", "AUTH", "ORDER", "REF", "RECEIPT", "PHONE",
-            ]
-            .contains(&preceding.as_str())
-            {
-                return None;
-            }
-            Some(captures[1].to_ascii_uppercase())
-        })
-        .collect();
-    if identifiers.len() == 1 {
-        result.store_number = identifiers.into_iter().next();
-    }
+    result.store_number = crate::descriptor_location::store_number(description);
     result
 }
 
-fn compatible(a: &LocationHint, b: &LocationHint) -> bool {
+pub(crate) fn compatible(a: &LocationHint, b: &LocationHint) -> bool {
     // Caller evidence is authoritative for conflict detection. No partial
     // matches (e.g. "123 Main" versus "123 Main Street") are assumed.
     [
@@ -392,8 +315,14 @@ pub(crate) fn enrich(
             let alias = record.aliases.iter().any(|a| normalize(a) == query);
             let pattern = record
                 .transaction_pattern
-                .as_ref()
-                .is_some_and(|p| regex_rules::match_length(p, &request.description).is_some());
+                .iter()
+                .chain(
+                    record
+                        .provenance
+                        .iter()
+                        .filter_map(|p| p.transaction_pattern.as_ref()),
+                )
+                .any(|p| regex_rules::match_length(p, &request.description).is_some());
             // A merchant-scoped store number or structured street address can
             // identify an outlet without a matching descriptor alias.
             let store = geography.store_number.is_some()

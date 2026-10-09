@@ -43,7 +43,13 @@ pub(crate) fn dataset_region(record: &SourceRecord) -> Option<String> {
     if record.source != "open-enrichment" {
         return None;
     }
-    let region = record.version.as_deref()?.split_once(':')?.0;
+    let version = record.version.as_deref()?;
+    // Prepared bundles use fnv1a64:HASH:REGION:EXAMPLES; direct imports use REGION:VERSION.
+    let region = if version.starts_with("fnv1a64:") {
+        version.split(':').nth(2)?
+    } else {
+        version.split_once(':')?.0
+    };
     (!region.is_empty()).then(|| region.to_owned())
 }
 pub(crate) fn source_region(record: &SourceRecord) -> Option<String> {
@@ -247,6 +253,21 @@ mod tests {
     use super::*;
     use crate::{import, store::MerchantStore};
     use serde_json::json;
+
+    #[test]
+    fn prepared_bundle_versions_retain_dataset_region() -> anyhow::Result<()> {
+        let studio =
+            r#"{"schemaVersion":"1.1.0","merchants":[{"id":"brand","canonicalName":"Brand"}]}"#;
+        let mut record = import::merchant_studio(studio)?.remove(0);
+        record.source = "open-enrichment".into();
+        record.version = Some("fnv1a64:12345678:us:".into());
+        assert_eq!(dataset_region(&record).as_deref(), Some("us"));
+        assert_eq!(source_region(&record).as_deref(), Some("US"));
+        record.version = Some("fnv1a64:abcdef:global:fnv1a64:12345678".into());
+        assert_eq!(dataset_region(&record).as_deref(), Some("global"));
+        assert!(source_region(&record).is_none());
+        Ok(())
+    }
 
     #[test]
     fn market_evidence_combines_sources_outlets_and_manual_declarations() -> anyhow::Result<()> {

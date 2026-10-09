@@ -293,6 +293,33 @@ mod tests {
         Ok(())
     }
     #[tokio::test]
+    async fn evaluation_discovery_matches_do_not_import_or_remember_evidence() -> Result<()> {
+        let store = MerchantStore::temporary()?;
+        let before = store.fingerprint()?;
+        let mut enricher = Enricher::for_evaluation(
+            Some("test-key".into()),
+            "jev-latest".into(),
+            0.95,
+            store.clone(),
+        )?;
+        let (url, discovery_rx) = server(listing(), 200, 1);
+        enricher.discovery = Some(Discovery { url, api_key: None });
+        let (url, provider_rx) = server(provider("candidate_0"), 200, 1);
+        enricher.provider_url = url;
+        let request = serde_json::from_value(json!({"description":"opaque zxmq","country":"CA"}))?;
+        assert!(matches!(
+            enricher.enrich(&request).await?.merchant,
+            MerchantResult::Matched { .. }
+        ));
+        discovery_rx.recv().unwrap();
+        provider_rx.recv().unwrap();
+        assert_eq!(store.fingerprint()?, before);
+        assert_eq!(store.stats()?.total, 0);
+        assert!(store.resolutions(None, 10)?.is_empty());
+        assert!(store.enrichment_logs(None, None, 10, 0)?.is_empty());
+        Ok(())
+    }
+    #[tokio::test]
     async fn rejected_and_invalid_discoveries_do_not_pollute_the_catalog() -> Result<()> {
         for (response, status, choice, error) in [
             (listing(), 200, "none", false),

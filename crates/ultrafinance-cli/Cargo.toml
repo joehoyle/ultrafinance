@@ -19,6 +19,8 @@ comfy-table = "8"
 base64 = "0.22"
 tempfile = "3"
 regex.workspace = true
+reqwest.workspace = true
+csv = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

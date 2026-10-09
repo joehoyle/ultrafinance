@@ -6,6 +6,7 @@ use std::{
 };
 mod aws;
 mod cleanup;
+mod import_db;
 mod release;
 mod shell;
 
@@ -36,6 +37,8 @@ enum InfraCommand {
         #[arg(long)]
         latest: bool,
     },
+    /// Copy the full production database into the default local PostgreSQL database.
+    ImportDb,
     /// Stop all production CLI tasks, including any active shell sessions.
     CliCleanup,
     /// Read Lambda application logs from CloudWatch (not enrichment history).
@@ -131,6 +134,7 @@ pub fn run(args: InfraArgs) -> Result<()> {
             };
             shell::open(&root, selection)
         }
+        InfraCommand::ImportDb => import_db::run(&root),
         InfraCommand::CliCleanup => cleanup::run(&root),
         InfraCommand::Logs { since, follow } => {
             let profile = output(&root, "aws_profile")?;

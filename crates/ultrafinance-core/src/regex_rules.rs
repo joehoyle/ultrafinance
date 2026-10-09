@@ -38,54 +38,179 @@ fn compiled(pattern: &str) -> Option<Regex> {
 
 // Common global processor codes from Open Enrichment's CC0 payment_processors.csv.
 // Require the separator, so merchant names starting with these letters survive.
-const PROCESSORS: &[(&str, char)] = &[
-    ("SQ", '*'),
-    ("SMP", '*'),
-    ("LSP", '*'),
-    ("LIGHTSPEED", '*'),
-    ("CKO", '*'),
-    ("FSPRG", '*'),
-    ("FS", '*'),
-    ("VIVA", '*'),
-    ("PAYPAL", '*'),
-    ("PP", '*'),
-    ("SP", '*'),
-    ("VISA", '-'),
-    ("LS", ' '),
-    ("SUMUP", '*'),
-    ("Zettle_", '*'),
-    ("EB", '*'),
-    ("PADDLE.NET", '*'),
-    ("BT", '*'),
-    ("3CPAYMENT", '*'),
-    ("WINDCAVE", '*'),
-    ("UZR", '*'),
-    ("NET", '*'),
-    ("FH", '*'),
-    ("WEB", '*'),
+#[derive(Debug, serde::Serialize)]
+pub struct ProcessorFormat {
+    pub code: &'static str,
+    pub separator: char,
+    pub processor: &'static str,
+}
+
+const PROCESSORS: &[ProcessorFormat] = &[
+    ProcessorFormat {
+        code: "SQ",
+        separator: '*',
+        processor: "Square",
+    },
+    ProcessorFormat {
+        code: "TST",
+        separator: '*',
+        processor: "Toast",
+    },
+    ProcessorFormat {
+        code: "GOSQ.COM",
+        separator: ' ',
+        processor: "Square",
+    },
+    ProcessorFormat {
+        code: "SMP",
+        separator: '*',
+        processor: "SMP",
+    },
+    ProcessorFormat {
+        code: "LSP",
+        separator: '*',
+        processor: "Lightspeed",
+    },
+    ProcessorFormat {
+        code: "LIGHTSPEED",
+        separator: '*',
+        processor: "Lightspeed",
+    },
+    ProcessorFormat {
+        code: "CKO",
+        separator: '*',
+        processor: "Checkout.com",
+    },
+    ProcessorFormat {
+        code: "FSPRG",
+        separator: '*',
+        processor: "FastSpring",
+    },
+    ProcessorFormat {
+        code: "FS",
+        separator: '*',
+        processor: "FastSpring",
+    },
+    ProcessorFormat {
+        code: "VIVA",
+        separator: '*',
+        processor: "VIVA",
+    },
+    ProcessorFormat {
+        code: "PAYPAL",
+        separator: '*',
+        processor: "PayPal",
+    },
+    ProcessorFormat {
+        code: "PP",
+        separator: '*',
+        processor: "PayPal",
+    },
+    ProcessorFormat {
+        code: "SP",
+        separator: '*',
+        processor: "Shopify",
+    },
+    ProcessorFormat {
+        code: "VISA",
+        separator: '-',
+        processor: "VISA",
+    },
+    ProcessorFormat {
+        code: "LS",
+        separator: ' ',
+        processor: "Lightspeed",
+    },
+    ProcessorFormat {
+        code: "SUMUP",
+        separator: '*',
+        processor: "SumUp",
+    },
+    ProcessorFormat {
+        code: "Zettle_",
+        separator: '*',
+        processor: "Zettle_",
+    },
+    ProcessorFormat {
+        code: "EB",
+        separator: '*',
+        processor: "EB",
+    },
+    ProcessorFormat {
+        code: "PADDLE.NET",
+        separator: '*',
+        processor: "Paddle",
+    },
+    ProcessorFormat {
+        code: "BT",
+        separator: '*',
+        processor: "BT",
+    },
+    ProcessorFormat {
+        code: "3CPAYMENT",
+        separator: '*',
+        processor: "3CPAYMENT",
+    },
+    ProcessorFormat {
+        code: "WINDCAVE",
+        separator: '*',
+        processor: "WINDCAVE",
+    },
+    ProcessorFormat {
+        code: "UZR",
+        separator: '*',
+        processor: "UZR",
+    },
+    ProcessorFormat {
+        code: "NET",
+        separator: '*',
+        processor: "NET",
+    },
+    ProcessorFormat {
+        code: "FH",
+        separator: '*',
+        processor: "FH",
+    },
+    ProcessorFormat {
+        code: "WEB",
+        separator: '*',
+        processor: "WEB",
+    },
 ];
+
+pub(crate) fn processor_formats() -> &'static [ProcessorFormat] {
+    PROCESSORS
+}
+
+/// A separator is mandatory: SQUID, SPAR and standalone LS are not processors.
+pub(crate) fn processor_prefix(text: &str) -> Option<(&'static str, &str)> {
+    let text = text.trim_start();
+    PROCESSORS.iter().find_map(|rule| {
+        let code = rule.code;
+        let separator = rule.separator;
+        if !text.get(..code.len())?.eq_ignore_ascii_case(code) {
+            return None;
+        }
+        let rest = &text[code.len()..];
+        let rest = if separator == ' ' {
+            rest
+        } else {
+            rest.trim_start()
+        };
+        let rest = rest.strip_prefix(separator)?.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        Some((rule.processor, rest))
+    })
+}
 
 fn strip_processors(mut text: &str) -> &str {
     text = text.trim_start();
-    loop {
-        let stripped = PROCESSORS.iter().find_map(|(code, separator)| {
-            let prefix = text.get(..code.len())?;
-            if !prefix.eq_ignore_ascii_case(code) {
-                return None;
-            }
-            let rest = &text[code.len()..];
-            let rest = if *separator == ' ' {
-                rest
-            } else {
-                rest.trim_start()
-            };
-            rest.strip_prefix(*separator).map(str::trim_start)
-        });
-        match stripped {
-            Some(rest) => text = rest,
-            None => return text,
-        }
+    while let Some((_, rest)) = processor_prefix(text) {
+        text = rest;
     }
+    text
 }
 
 pub(crate) fn valid_pattern(pattern: &str) -> bool {
@@ -110,6 +235,8 @@ mod tests {
     use super::*;
     #[test]
     fn descriptors_flags_boundaries_and_processors() {
+        assert_eq!(match_length(r"(?i)^ALDI\b", "TST * ALDI"), Some(4));
+        assert_eq!(match_length(r"(?i)^ALDI\b", "gosq.com ALDI"), Some(4));
         assert_eq!(
             match_length(r"(?i)^7-ELEVEN\b", "sq * PAYPAL * 7-eleven #999"),
             Some(8)

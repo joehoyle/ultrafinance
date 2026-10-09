@@ -37,6 +37,227 @@ fn run(args: &[&str], stdin: Option<&str>) -> std::process::Output {
 }
 
 #[test]
+fn interpret_lists_live_formats_without_database_or_provider() {
+    let output = run(
+        &[
+            "--database-url",
+            "postgresql://unused",
+            "interpret",
+            "--list-formats",
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("ach-fields"));
+    assert!(text.contains("north-american-phones"));
+    assert!(text.contains("terminal-numbers"));
+    assert!(text.contains("Descriptor rules ("));
+    assert!(text.contains("Processor prefixes ("));
+    assert!(text.contains("validated-location-suffixes"));
+    assert!(text.contains("Offline gazetteer:"));
+    assert!(text.contains("\"SQ*\""));
+    assert!(text.contains("\"LS \""));
+    assert!(text.contains("Pattern: none (preservation rule)"));
+    for format in ultrafinance_core::interpretation::formats().formats {
+        if let Some(pattern) = format.pattern {
+            assert!(text.contains(pattern), "missing pattern for {}", format.id);
+        }
+    }
+    let output = run(&["interpret", "--list-formats", "--json"], None);
+    assert!(output.status.success());
+    let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        inventory,
+        serde_json::to_value(ultrafinance_core::interpretation::formats()).unwrap()
+    );
+    assert!(
+        inventory["formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["id"] == "labelled-references" && rule["pattern"].is_string())
+    );
+    for args in [
+        vec!["interpret"],
+        vec!["interpret", "--json"],
+        vec!["interpret", "ACME", "--list-formats"],
+    ] {
+        assert!(!run(&args, None).status.success(), "{args:?}");
+    }
+    let output = run(&["interpret", "PAYPAL *CARVANA 402-935-7733 AZ"], None);
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["processor_hint"], "PayPal");
+    assert_eq!(parsed["hypotheses"][1]["merchant_text"], "CARVANA");
+    let output = run(&["interpret", "SQ *CAFE STORE 00482 TORONTO ON CAN"], None);
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let hypothesis = parsed["hypotheses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["location_hint"].is_object())
+        .unwrap();
+    assert_eq!(hypothesis["merchant_text"], "CAFE");
+    assert_eq!(hypothesis["location_hint"]["city"], "TORONTO");
+    assert_eq!(hypothesis["location_hint"]["country"], "CA");
+    assert_eq!(hypothesis["location_hint"]["store_number"], "00482");
+}
+
+#[test]
+fn gazetteer_lookup_reports_snapshot_and_retains_ambiguity_offline() {
+    let output = run(
+        &[
+            "--database-url",
+            "postgresql://unused",
+            "locations",
+            "gazetteer",
+            "Springfield",
+            "--country",
+            "USA",
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["gazetteer"]["records"].as_u64().unwrap() > 180_000);
+    assert!(result["matches"].as_array().unwrap().len() > 1);
+    assert!(result["gazetteer"]["sha256"].is_string());
+    let output = run(
+        &[
+            "locations",
+            "gazetteer",
+            "Toronto",
+            "--country",
+            "CA",
+            "--region",
+            "ON",
+            "--json",
+        ],
+        None,
+    );
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!result["matches"].as_array().unwrap().is_empty());
+    assert!(
+        result["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|city| city["region"] == "ON")
+    );
+    let output = run(&["interpret", "CAFE / Springfield / USA"], None);
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        result["hypotheses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hypothesis| hypothesis["geoname_ids"]
+                .as_array()
+                .is_some_and(|ids| ids.len() > 1))
+    );
+}
+
+#[test]
+fn gazetteer_list_is_paginated_filtered_and_separate_from_city_lookup() {
+    let page = |offset: &str| {
+        let output = run(
+            &[
+                "--database-url",
+                "postgresql://unused",
+                "locations",
+                "gazetteer",
+                "list",
+                "--country",
+                "CA",
+                "--region",
+                "ON",
+                "--limit",
+                "2",
+                "--offset",
+                offset,
+                "--json",
+            ],
+            None,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let first = page("0");
+    let second = page("2");
+    assert!(first["total"].as_u64().unwrap() > 2);
+    assert_eq!(first["total"], second["total"]);
+    assert_eq!(first["matches"].as_array().unwrap().len(), 2);
+    assert_ne!(
+        first["matches"][0]["geoname_id"],
+        second["matches"][0]["geoname_id"]
+    );
+    assert!(
+        first["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|city| city["country"] == "CA" && city["region"] == "ON")
+    );
+    let output = run(
+        &[
+            "locations",
+            "gazetteer",
+            "lookup",
+            "List",
+            "--country",
+            "DE",
+            "--json",
+        ],
+        None,
+    );
+    assert!(output.status.success());
+    let lookup: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(lookup["matches"][0]["city"], "List");
+    let output = run(&["locations", "gazetteer", "list", "--limit", "2"], None);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("2 shown"));
+    assert!(text.contains("--offset 2"));
+}
+
+#[test]
+fn root_help_lists_nested_command_paths() {
+    for args in [vec![], vec!["-h"], vec!["--help"], vec!["help"]] {
+        let output = run(&args, None);
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        for path in [
+            "sources download",
+            "sources eval",
+            "sources raw",
+            "merchants search",
+            "database init",
+            "infra deploy",
+        ] {
+            assert!(help.contains(path), "missing {path} in {help}");
+        }
+        assert!(help.contains("for options"));
+    }
+}
+
+#[test]
 fn missing_subcommands_show_contextual_help() {
     for group in [
         None,
@@ -242,6 +463,74 @@ fn short_descriptor_remains_unresolved_without_provider_credentials() {
 }
 
 #[test]
+fn enrich_details_explains_abstention_and_preserves_response_json() {
+    let catalog = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/merchants.example.json"
+    );
+    let output = run(
+        &[
+            "enrich",
+            "LS",
+            "--country",
+            "US",
+            "--merchants",
+            catalog,
+            "--details",
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["merchant"]["status"], "unresolved");
+    assert_eq!(result["location"]["status"], "unresolved");
+    let steps = String::from_utf8(output.stderr).unwrap();
+    assert!(steps.contains("1. Interpret descriptor"));
+    assert!(steps.contains("Name: LS"));
+    assert!(steps.contains("0 shortlisted"));
+    assert!(steps.contains("Method: no_candidates"));
+    assert!(steps.contains("4. Resolve location independently"));
+    let output = run(
+        &[
+            "enrich",
+            "Example Café",
+            "--merchants",
+            catalog,
+            "--details",
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["merchant"]["status"], "matched");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Method: exact"));
+    let output = run(
+        &[
+            "enrich",
+            "Example Café PAYMENT",
+            "--merchants",
+            catalog,
+            "--details",
+        ],
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let steps = String::from_utf8_lossy(&output.stderr);
+    assert!(steps.contains("Retrieve merchant candidates"));
+    assert!(steps.contains("Method: provider"));
+    assert!(steps.contains("Jev is not configured"));
+}
+
+#[test]
 fn database_persists_aliases_and_exact_matches_without_a_key() {
     let directory =
         std::env::temp_dir().join(format!("ultrafinance-test-{}", uuid::Uuid::new_v4()));
@@ -276,6 +565,25 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
             "merchants",
             "search",
             "Julus cafe",
+            "--country",
+            "CA",
+        ],
+        None,
+    );
+    assert!(searched.status.success());
+    let readable = String::from_utf8(searched.stdout).unwrap();
+    assert!(readable.contains("Julius Café"));
+    assert!(readable.contains("Search similarity"));
+    assert!(readable.contains("Fuzzy"));
+    assert!(readable.contains("Jev was not called"));
+    let searched = run(
+        &[
+            "--database-url",
+            db,
+            "merchants",
+            "search",
+            "Julus cafe",
+            "--json",
             "--country",
             "CA",
         ],
@@ -825,13 +1133,76 @@ fn infra_cli_latest_is_documented_and_conflicts_with_explicit_image() {
 }
 
 #[test]
+fn dedupe_table_distinguishes_previews_merges_and_survivors() {
+    let dir = std::env::temp_dir().join(format!(
+        "ultrafinance-dedupe-table-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let db = database.temporary_url();
+    let file = dir.join("merchants.json");
+    std::fs::write(&file, r#"[{"id":"a","name":"Uber","website":"https://uber.com","markets":["CA"]},{"id":"b","name":"Uber","website":"https://www.uber.com","markets":["US"]}]"#).unwrap();
+    // Seed a legacy duplicate catalog deliberately: normal imports now dedupe.
+    let records =
+        ultrafinance_core::import::catalog(&std::fs::read_to_string(&file).unwrap(), "catalog")
+            .unwrap();
+    database.import(&records).unwrap();
+    let saved = dir.join("report.json");
+    let preview = run(
+        &[
+            "--database-url",
+            db,
+            "merchants",
+            "dedupe",
+            "--dry-run",
+            "--output",
+            saved.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let text = String::from_utf8(preview.stdout).unwrap();
+    assert!(text.contains("Dedupe preview"));
+    assert!(text.contains("Would merge"));
+    assert!(text.contains("Would keep (survivor)"));
+    assert!(text.contains("CA, US"));
+    assert!(text.contains("Name + website"));
+    assert_eq!(database.stats().unwrap().total, 2);
+    let report: Value = serde_json::from_slice(&std::fs::read(saved).unwrap()).unwrap();
+    assert_eq!(report["merchants"].as_array().unwrap().len(), 2);
+    let survivor = report["groups"][0][0].as_str().unwrap();
+    let applied = run(&["--database-url", db, "merchants", "dedupe"], None);
+    assert!(applied.status.success());
+    let text = String::from_utf8(applied.stdout).unwrap();
+    assert!(text.contains("Kept (survivor)"));
+    assert!(text.contains("Merged"));
+    assert!(text.contains(survivor));
+    assert_eq!(database.stats().unwrap().total, 1);
+    let empty = run(&["--database-url", db, "merchants", "dedupe"], None);
+    assert!(
+        String::from_utf8(empty.stdout)
+            .unwrap()
+            .contains("No duplicate candidates found")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn dedupe_cli_empty_catalog_and_provider_failure_are_safe() {
     let dir =
         std::env::temp_dir().join(format!("ultrafinance-dedupe-cli-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let database = ultrafinance_core::store::MerchantStore::temporary().unwrap();
     let db = database.temporary_url();
-    let output = run(&["--database-url", db, "merchants", "dedupe"], None);
+    let output = run(
+        &["--database-url", db, "merchants", "dedupe", "--json"],
+        None,
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -841,21 +1212,12 @@ fn dedupe_cli_empty_catalog_and_provider_failure_are_safe() {
     assert_eq!(report["candidates"], 0);
     assert_eq!(report["dry_run"], false);
     let file = dir.join("merchants.json");
-    std::fs::write(&file,r#"[{"id":"a","name":"Brand","website":"https://example.com"},{"id":"b","name":"Brand","website":"https://www.example.com"}]"#).unwrap();
-    assert!(
-        run(
-            &[
-                "--database-url",
-                db,
-                "merchants",
-                "import",
-                file.to_str().unwrap()
-            ],
-            None
-        )
-        .status
-        .success()
-    );
+    std::fs::write(&file,r#"[{"id":"a","name":"Brand","website":"https://example.com"},{"id":"b","name":"Brend","website":"https://www.example.com"}]"#).unwrap();
+    // Seed a legacy duplicate catalog deliberately: normal imports now dedupe.
+    let records =
+        ultrafinance_core::import::catalog(&std::fs::read_to_string(&file).unwrap(), "catalog")
+            .unwrap();
+    database.import(&records).unwrap();
     for extra in [
         vec![],
         vec!["--dry-run"],
@@ -980,4 +1342,322 @@ fn interpretation_and_reviewed_resolution_commands_preserve_context_and_allow_re
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn infra_import_db_overwrites_locally_and_cleans_up_on_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("infra")).unwrap();
+    std::fs::create_dir(root.join("bin")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(root.join("infra/outputs.tf"), "").unwrap();
+    // All external processes are isolated fixtures, including a real loopback listener.
+    let python = Command::new("/usr/bin/env")
+        .args(["python3", "-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    assert!(python.status.success());
+    let python = String::from_utf8(python.stdout).unwrap();
+    let fixture = format!("#!{}\n", python.trim())
+        + r#"
+import json,os,socket,sys,time
+from pathlib import Path
+name=Path(sys.argv[0]).name
+args=sys.argv[1:]
+root=Path(os.environ['IMPORT_FIXTURE'])
+with (root/'calls').open('a') as f: f.write(json.dumps([name]+args)+'\n')
+if name=='pg_dump':
+ if '--version' in args: print('pg_dump (PostgreSQL) 17.5')
+ else:
+  if os.environ.get('IMPORT_FAIL')=='dump': sys.exit(1)
+  assert os.environ['PGPASSWORD']=='PRIVATE_FIXTURE_PASSWORD'
+  assert os.environ['PGSSLMODE']=='require'
+  Path(args[args.index('--file')+1]).write_bytes(b'snapshot')
+elif name=='psql': print('1')
+elif name=='pg_restore':
+ assert '--single-transaction' in args
+ assert '--no-owner' in args and '--no-privileges' in args
+ assert '127.0.0.1:55432' in args[args.index('--dbname')+1]
+ assert 'PGPASSWORD' not in os.environ
+ assert Path(args[-1]).read_bytes()==b'snapshot'
+ if os.environ.get('IMPORT_FAIL')=='restore':
+  print('PRIVATE_FIXTURE_PASSWORD',file=sys.stderr)
+  sys.exit(1)
+elif name=='tofu':
+ if args[-1]=='cli_runner': print(json.dumps(dict(cluster='cluster',task_definition='definition',database_secret='secret',function_name='function',subnets=['private'],security_groups=['db'])))
+ else: print('fixture')
+elif name=='aws':
+ # Remove the configured profile/region, leaving the service and action.
+ args=args[4:]
+ action=args[1]
+ if action=='start-session':
+  params=json.loads(args[args.index('--parameters')+1])
+  assert args[args.index('--target')+1]=='ecs:cluster_task_runtime'
+  s=socket.socket();s.bind(('127.0.0.1',int(params['localPortNumber'][0])));s.listen()
+  while True: c,_=s.accept();c.close()
+ elif action=='describe-task-definition':
+  print(json.dumps({'taskDefinition':{'family':'cli','containerDefinitions':[{'name':'cli','environment':[{'name':'ULTRAFINANCE_DATABASE_HOST','value':'database.internal'},{'name':'ULTRAFINANCE_DATABASE_NAME','value':'finance'}],'secrets':[{'name':'ULTRAFINANCE_ADMIN_USERNAME'},{'name':'ULTRAFINANCE_ADMIN_PASSWORD'}]}]}}))
+ elif action=='get-secret-value': print(json.dumps({'SecretString':json.dumps(dict(username='admin',password='PRIVATE_FIXTURE_PASSWORD'))}))
+ elif action=='get-function': print(json.dumps('123456789012.dkr.ecr.ca-central-1.amazonaws.com/ultrafinance@sha256:'+'a'*64))
+ elif action=='register-task-definition': print(json.dumps({'taskDefinition':{'taskDefinitionArn':'revision'}}))
+ elif action=='run-task': print(json.dumps({'tasks':[{'taskArn':'task'}]}))
+ elif action=='describe-tasks': print(json.dumps({'tasks':[{'lastStatus':'RUNNING','containers':[{'name':'cli','runtimeId':'runtime','managedAgents':[{'name':'ExecuteCommandAgent','lastStatus':'RUNNING'}]}]}]}))
+ else: print('{}')
+"#;
+    for name in [
+        "pg_dump",
+        "pg_restore",
+        "psql",
+        "session-manager-plugin",
+        "aws",
+        "tofu",
+    ] {
+        let path = root.join("bin").join(name);
+        std::fs::write(&path, &fixture).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let invoke = |fail: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ultrafinance"));
+        command
+            .current_dir(root)
+            .env("PATH", root.join("bin"))
+            .env("IMPORT_FIXTURE", root)
+            .env("IMPORT_FAIL", fail)
+            .env("AWS_PROFILE", "fixture")
+            .env("AWS_REGION", "fixture")
+            .env(
+                "ULTRAFINANCE_DATABASE_URL",
+                "postgresql://production-should-not-be-restored",
+            )
+            .args(["infra", "import-db"]);
+        command.output().unwrap()
+    };
+    let failed = invoke("restore");
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("rolled back"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&failed.stderr).contains("PRIVATE_FIXTURE_PASSWORD"));
+    assert!(!String::from_utf8_lossy(&failed.stdout).contains("PRIVATE_FIXTURE_PASSWORD"));
+    let calls = std::fs::read_to_string(root.join("calls")).unwrap();
+    assert!(calls.contains("stop-task"));
+    assert!(calls.contains("deregister-task-definition"));
+    assert!(!calls.contains("PRIVATE_FIXTURE_PASSWORD"));
+    assert!(!calls.contains("production-should-not-be-restored"));
+    for fail in ["dump", ""] {
+        std::fs::write(root.join("calls"), "").unwrap();
+        let result = invoke(fail);
+        assert_eq!(
+            result.status.success(),
+            fail.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let calls = std::fs::read_to_string(root.join("calls")).unwrap();
+        assert!(calls.contains("stop-task"));
+        assert!(calls.contains("deregister-task-definition"));
+        assert_eq!(calls.contains("\"pg_restore\""), fail.is_empty());
+        let dump_call: Vec<serde_json::Value> = calls
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let dump = dump_call
+            .iter()
+            .find(|call| {
+                call[0] == "pg_dump" && call.as_array().unwrap().iter().any(|arg| arg == "--file")
+            })
+            .unwrap();
+        let path = dump.as_array().unwrap().last().unwrap().as_str().unwrap();
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "temporary dump should be removed"
+        );
+    }
+}
+
+#[test]
+fn merchant_and_dataset_imports_reconcile_deterministically_and_retain_ambiguity() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let file = root.path().join("merchants.json");
+    std::fs::write(&file,r#"[{"id":"a","name":"Brand","website":"https://brand.test","markets":["CA"]},{"id":"b","name":"BRAND","website":"https://www.brand.test","markets":["US"]}]"#).unwrap();
+    let result = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "merchants",
+            "import",
+            file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(store.stats().unwrap().total, 1);
+    let id = store.resolve_source("catalog", "a").unwrap().unwrap();
+    assert_eq!(
+        store.resolve_source("catalog", "b").unwrap(),
+        Some(id.clone())
+    );
+    let records = ultrafinance_core::import::catalog(
+        r#"[{"id":"c","name":"Brand","website":"https://brand.test/ca"}]"#,
+        "another",
+    )
+    .unwrap();
+    let knowledge = root.path().join("knowledge.json");
+    std::fs::write(&knowledge, serde_json::to_vec(&records).unwrap()).unwrap();
+    let result = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "datasets",
+            "apply",
+            knowledge.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(store.resolve_source("another", "c").unwrap(), Some(id));
+    assert_eq!(store.stats().unwrap().total, 1);
+    std::fs::write(
+        &file,
+        r#"[{"id":"distinct","name":"Brand Eats","website":"https://brand.test"}]"#,
+    )
+    .unwrap();
+    let result = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "merchants",
+            "import",
+            file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        store
+            .resolve_source("catalog", "distinct")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.stats().unwrap().total, 2);
+}
+
+#[test]
+fn file_import_limits_apply_to_native_and_prepared_datasets_before_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog =
+        r#"[{"id":"a","name":"Alpha"},{"id":"b","name":"Beta"},{"id":"c","name":"Gamma"}]"#;
+    let native = root.path().join("catalog.json");
+    std::fs::write(&native, catalog).unwrap();
+    let prepared = root.path().join("knowledge.json");
+    let records = ultrafinance_core::import::catalog(catalog, "fixture").unwrap();
+    std::fs::write(&prepared, serde_json::to_vec(&records).unwrap()).unwrap();
+    for (command, file, source) in [
+        (vec!["merchants", "import"], &native, "catalog"),
+        (vec!["datasets", "apply"], &prepared, "fixture"),
+    ] {
+        let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+        let execute = |extra: &[&str]| {
+            let mut args = vec!["--database-url", store.temporary_url()];
+            args.extend_from_slice(&command);
+            args.push(file.to_str().unwrap());
+            args.extend_from_slice(extra);
+            let output = run(&args, None);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        };
+        let preview = execute(&["--limit", "2", "--dedupe-dry-run"]);
+        assert_eq!(preview["selection"]["selected_records"], 2);
+        assert_eq!(preview["imported"], 0);
+        assert_eq!(store.stats().unwrap().total, 0);
+        assert_eq!(execute(&["--limit", "2"])["imported"], 2);
+        assert_eq!(store.stats().unwrap().total, 2);
+        assert!(store.resolve_source(source, "c").unwrap().is_none());
+        assert_eq!(
+            execute(&["--limit", "99"])["selection"]["selected_records"],
+            3
+        );
+        assert_eq!(store.stats().unwrap().total, 3);
+        let mut invalid = vec!["--database-url", store.temporary_url()];
+        invalid.extend_from_slice(&command);
+        invalid.extend([file.to_str().unwrap(), "--limit", "0"]);
+        assert!(!run(&invalid, None).status.success());
+    }
+}
+
+#[test]
+fn locations_cli_lists_consolidated_outlets_raw_sources_and_dedupe_previews() {
+    let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let merchant =
+        serde_json::from_value(serde_json::json!({"id":"brand","name":"Starbucks"})).unwrap();
+    store.put(&merchant).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("outlets.json");
+    let outlet = |source: &str| serde_json::json!({"source":source,"external_id":"bromont","merchant":{"merchant_id":"brand"},"location":{"id":null,"precision":"outlet","address":"1 Main St","city":"Bromont","region":"QC","postal_code":null,"country":"CA","store_number":null},"aliases":["STARBUCKS BROMONT"],"attribution":source,"license":"test","url":"https://example.test"});
+    std::fs::write(
+        &file,
+        serde_json::to_vec(&vec![outlet("one"), outlet("two")]).unwrap(),
+    )
+    .unwrap();
+    let imported = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "locations",
+            "import",
+            file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let execute = |args: &[&str]| {
+        let mut command = vec!["--database-url", store.temporary_url(), "locations"];
+        command.extend_from_slice(args);
+        let result = run(&command, None);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    let consolidated = execute(&["list", "brand"]);
+    assert_eq!(consolidated.as_array().unwrap().len(), 1);
+    assert_eq!(consolidated[0]["provenance"].as_array().unwrap().len(), 2);
+    let raw = execute(&["list", "brand", "--raw"]);
+    assert_eq!(raw.as_array().unwrap().len(), 2);
+    let before = store.fingerprint().unwrap();
+    let report = execute(&["dedupe", "--merchant-id", "brand", "--dry-run"]);
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["locations_before"], 1);
+    assert_eq!(report["source_records"], 2);
+    assert_eq!(store.fingerprint().unwrap(), before);
+    let report = execute(&["dedupe"]);
+    assert_eq!(report["locations_after"], 1);
 }

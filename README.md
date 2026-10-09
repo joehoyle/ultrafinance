@@ -161,6 +161,14 @@ cargo run -- enrich 'LS' --country CA --dry-run
 cargo run -- enrich --help
 ```
 
+Use `--details` to inspect the actual enrichment steps: descriptor hypotheses,
+the candidate shortlist, the exact/provider decision and independent location
+resolution. Readable details go to stderr; stdout keeps the usual response JSON.
+
+```sh
+cargo run --locked -- enrich 'Startbucks ON CAN' --details
+```
+
 Enrich multiple transactions through the same core batching path:
 
 ```sh
@@ -324,7 +332,116 @@ The Lambda runtime role also needs `SELECT` on `location_records`;
 the import role needs `SELECT`, `INSERT`, and `UPDATE`. This change does not run
 migrations against production or modify infrastructure grants.
 
+## Integrated source management
+
+The built-in registry lists supported datasets and their purpose. Original downloads
+are kept in immutable, fingerprinted snapshots under `data/sources/` (Git-ignored).
+These commands do not require a database:
+
+```sh
+cargo run -- sources list
+cargo run -- sources list --json
+cargo run -- sources show merchant-studio
+cargo run -- sources download merchant-studio
+cargo run -- sources raw merchant-studio --limit 20 --offset 0
+cargo run -- sources raw merchant-studio --examples --limit 20
+```
+
+`raw` shows original upstream rows, including fields and examples excluded from
+merchant imports. `show` prints upstream URLs, licensing, and the latest local
+snapshot path; its `download.json` records file URLs, sizes, and fingerprints.
+Identical downloads reuse the snapshot. Downloads validate file structure and
+publish the latest pointer only after all files succeed. Original files are not
+bundled in the executable.
+
+Download and import current merchant knowledge into the configured database:
+
+```sh
+cargo run -- sources import merchant-studio
+cargo run -- sources import open-enrichment --region us
+# Prepare and inspect without changing the database:
+cargo run -- sources import merchant-studio --dry-run
+# Reapply the latest local snapshot without network access:
+cargo run -- sources import merchant-studio --offline
+# Inspect retained imported payloads and their local merchant mappings:
+cargo run -- sources records merchant-studio --limit 20
+cargo run -- sources records merchant-studio --external-id amazon
+```
+
+Imports prepare the same versioned bundles as `datasets import`, then atomically
+apply their saved `knowledge.json`. They report `added`, `updated`, and `unchanged`
+source-record counts. Unchanged payloads are skipped, including changes only to
+whole-file version metadata; skipped rows retain their original import version.
+Changed rows replace prior source evidence and rebuild matching indexes. Merchant
+IDs, explicit source links, and manual corrections survive refreshes. Missing rows
+are retained, and merchants from different sources are not merged by name. This is
+an on-demand refresh; no scheduler or background updater is installed.
+
+Open Enrichment defaults to `global`; import each desired region separately using
+its lowercase upstream code (for example `us`, `uk`, or `au`). Other sources use
+`global`. DoDataThings and MoneyVis prepare evaluation samples and add no merchant
+knowledge. BusinessTransactions allows downloads and raw browsing, but applying
+its synthetic names-only reference catalog requires `--evaluation`; use a separate
+evaluation database. Generated descriptions never become aliases.
+
+MoneyVis downloads the CSV published in the research group's
+[GitHub repository](https://github.com/thevisgroup/MoneyVis/blob/master/data/data.csv).
+The Mendeley page remains the dataset citation, but its download service can
+return HTTP 403. Download and prepare the research group's CSV directly:
+
+```sh
+cargo run -- sources import moneyvis --dry-run
+cargo run -- sources raw moneyvis --limit 20
+```
+
+Evaluate a registered source directly, without looking up bundle paths:
+
+```sh
+cargo run -- sources eval moneyvis
+cargo run -- sources eval moneyvis --mode enrich --limit 50
+cargo run -- sources eval moneyvis --mode enrich --details
+cargo run -- sources eval moneyvis --offline
+cargo run -- sources eval moneyvis --refresh
+```
+
+`--details` prints each evaluation input, ranked candidate names, IDs and search
+scores, and the matched merchant or unresolved/error status after the run. The
+JSON report also retains the input and candidate records. Use `--limit` for a
+smaller run.
+
+`sources eval` uses the latest cached raw snapshot, downloading it on first use,
+and prepares its holdout automatically. `--refresh` fetches current upstream files;
+`--offline` requires a cached download. It evaluates against the configured merchant
+database without applying source knowledge. Evaluation does not learn descriptor
+resolutions, import discovered merchants, or write enrichment history; external
+catalog changes still invalidate the run. Reports default to
+`evals/reports/SOURCE-REGION-holdout-MODE.json`; `--output FILE` changes the report
+path and `--datasets-dir DIR` changes prepared bundle storage. Existing prepared
+bundles and manually edited labels are preserved. Search mode requires no provider;
+enrich mode uses the existing Jev configuration. Unlabeled sources such as MoneyVis
+measure candidate and resolution coverage, not merchant accuracy.
+
+All sources accept `--input FILE` for a manual download; Merchant Studio also
+requires `--examples FILE`. Use `--cache-dir DIR` to change snapshot storage and
+`import --output DIR` to change prepared bundle storage. The original `datasets`
+commands remain available for explicit offline preparation and application.
+
 ## Repeatable dataset imports
+
+Foursquare OS Places also supports merchant-only preparation from a filtered CSV
+export, with optional reviewed brand grouping and source place IDs retained as
+evidence. See [Foursquare merchant imports](docs/foursquare.md) for export format,
+dry-run/apply commands, attribution, and refresh limitations. Location records are
+not imported.
+
+Authenticated Foursquare downloads require the DuckDB CLI. On macOS, install
+it with `brew install duckdb` ([Homebrew package](https://formulae.brew.sh/formula/duckdb)).
+Ensure `duckdb` is on your `PATH`, or set `ULTRAFINANCE_DUCKDB_CLI` / `--duckdb-cli`.
+Foursquare imports using `--offline` or `--input` do not need DuckDB; other
+source adapters do not need it either. The downloader installs DuckDB's `httpfs`
+and `iceberg` extensions on first use. Downloads include all open places in the
+selected region by default; use `--foursquare-limit X` for an optional download
+cap. Large exports are still loaded into memory during preparation.
 
 Prepare a local download with a source-specific adapter:
 
@@ -568,6 +685,33 @@ The PostgreSQL integration test runs against an **empty disposable database**:
 ```sh
 ./dev/postgres.sh test
 ```
+
+## Copy production data locally
+
+Start local PostgreSQL, then import a consistent snapshot of the full production database:
+
+```sh
+docker compose up -d --wait postgres
+cargo run -- infra import-db
+cargo run -- merchants search 'DOORDASH.COM' --country CA
+cargo run -- merchants search 'DOORDASH.COM' --country CA --json
+```
+
+`infra import-db` restores into `127.0.0.1:55432/ultrafinance` with the local
+`ultrafinance` login, regardless of `ULTRAFINANCE_DATABASE_URL` or `--database-url`.
+It overwrites tables present in the production snapshot by default; unrelated
+local tables remain. Restore runs in one transaction, rolling back on failure.
+The full snapshot includes merchants, outlets, remembered resolutions, and private
+enrichment history. It reads production without modifying it, omits production
+ownership and grants, and deletes the temporary dump when finished.
+
+Install AWS CLI, Session Manager plugin, and PostgreSQL client tools (`pg_dump`
+17 or newer, matching `pg_restore`, and `psql`) on your PATH. On macOS, Homebrew's
+`libpq` package provides current clients; add its `bin` directory to PATH if an
+older PostgreSQL install takes precedence. The command uses existing OpenTofu
+outputs and a temporary Fargate task to tunnel to private Aurora, with TLS and
+administrator credentials retrieved from Secrets Manager. The tunnel and task
+are cleaned up after success, failure, or Ctrl-C.
 
 ## Merchant database and search
 
@@ -912,3 +1056,152 @@ The development profile optimizes the enrichment core and JSON/edit-distance dep
 while retaining debug symbols, so offline evals are practical with `cargo run`.
 Search reuses query tokenization and similarity scores within each request and
 scores each retrieved merchant once. For production timing, use `cargo run --release`.
+
+Lunch Money is also available as a private real-transaction source:
+
+```sh
+cargo run -- sources download lunchmoney
+cargo run -- sources raw lunchmoney --limit 20
+cargo run -- sources import lunchmoney --offline --dry-run
+cargo run -- sources eval lunchmoney --mode enrich
+```
+
+The downloader invokes the installed `lunchmoney` executable from lunchmoney-cli
+using its existing authentication, requests all pages for the previous year
+through today (UTC), and saves the unmodified response as `input.json` under
+`data/sources/lunchmoney/global/snapshot-…/`. Use `--lunchmoney-cli PATH` or
+`ULTRAFINANCE_LUNCHMONEY_CLI` to select another executable. Raw snapshots and
+prepared datasets are gitignored. `sources eval lunchmoney --refresh` downloads
+the current year window again; otherwise evaluation reuses the cached snapshot.
+
+Prepared development/holdout JSONL uses `original_name` from posted Plaid
+transactions, falling back to Plaid metadata’s `original_description` or `name`
+for older records. Missing originals, manual transactions, group parents and split
+children are skipped; original split parents and grouped bank transactions are
+included. Repeated normalized descriptions become one case. Edited payee names
+are retained in the raw JSON but are neither labels nor aliases. The source
+imports no merchant knowledge; evaluation reports matches/coverage, not accuracy.
+
+Evaluation `--details` prints each description above a candidate table with
+separate search similarity and Jev probability columns. Enrich mode also shows
+Jev's choice, confidence and the match threshold, including why a choice was
+left unresolved. Trusted exact matches and search mode explicitly indicate when
+Jev was not called. Reports retain this evidence in each case's `enrichment`
+field; rerun evaluation to obtain it for older reports.
+
+Merchant search displays a ranked table by default. Add `--json` to retain the
+complete candidate array and source evidence for scripts. Search similarity
+scores are local retrieval scores; merchant search does not call Jev.
+
+Dedupe first accepts records with the same canonical merchant name and business
+website host (normalizing legal suffixes, `www.`, scheme and URL path, while
+excluding shared platforms). Missing or different markets are
+compatible; merges retain the union of markets and their evidence. Other pairs
+are assessed by Jev using the configured probability/confidence threshold.
+Decisions identify their `method` as `rule` or `jev`; rule decisions include the
+rule name rather than fabricated model probabilities. Existing safeguards for
+conflicting manual records and complete pairwise agreement still apply.
+
+`merchants dedupe` defaults to a table of merchants involved in candidate pairs,
+marking merged records and the surviving IDs. Survivor rows show combined
+markets. `--dry-run` marks proposed changes without applying them; `--json`
+prints the full report, and `--output FILE` saves JSON alongside readable output.
+
+Dedupe tolerates up to 0.02 of rounding error in the four Jev probabilities'
+total without rescaling values or changing the merge threshold. Invalid answers
+are retained with pair-specific errors in the report. If any answer is invalid,
+no merges are applied, the CLI exits unsuccessfully after printing diagnostics,
+and `--output FILE` still saves every returned answer for inspection.
+
+Dedupe tables group both merchants in each candidate pair under a shared pair
+number, with that pair's rule or Jev decision. A merchant can appear in multiple
+pairs, making each comparison explicit.
+
+Merchant imports (`sources import`, `datasets apply`, and `merchants import`)
+use deterministic reconciliation only, with zero Jev requests regardless of
+provider credentials. Source IDs preserve known identities. New identities are
+grouped by a conservative canonical name plus business website host: case,
+accents, punctuation, `www.`, HTTP/HTTPS, URL paths and trailing legal suffixes
+(`Inc`, `LLC`, `Ltd`, `Corp`, etc.) are normalized. Shared social platforms,
+directories, delivery/booking sites, shorteners and shared hosting domains are
+excluded from these automatic matches. A common name or domain alone does not
+establish brand identity. Product names, locality suffixes and store numbers are
+not stripped. Uncertain matches remain separate for explicit review.
+
+Indexed identity buckets replace import-time fuzzy/all-pairs scans. Every member
+of an accepted bucket shares the same key, so the audit needs only one edge per
+retired identity instead of every possible pair. Multiple manual identities in a
+bucket prevent its automatic consolidation. Established IDs and manual
+corrections are preserved; new duplicate source records link directly to the
+survivor, retaining raw evidence, aliases, markets and other metadata. Existing
+merchants can be merged with redirects and references updated atomically.
+
+Use `--dedupe-dry-run` to preview deterministic reconciliation without database
+writes or provider calls. For `sources import`, plain `--dry-run` remains bundle
+preparation only. Provider-assisted fuzzy review remains an explicit separate
+`merchants dedupe` operation, with its own model, threshold and pair budget.
+
+All three import commands accept `--limit X` (a positive integer). This selects
+the first X prepared source records in bundle/file order before reconciliation,
+including records that update or match existing merchants. It does not promise
+X newly created merchants. The limit works with every registered source,
+`--offline`, file inputs and previews; omitted limits import all records. Cached
+snapshots and saved bundles remain complete. Repeating a limited import selects
+the same prefix, rather than advancing to the next batch. JSON output reports
+available and selected counts under `selection`.
+
+```sh
+cargo run -- sources import foursquare --region ca --offline --limit 1000
+cargo run -- merchants import merchants.json --limit 1000
+cargo run -- datasets apply <BUNDLE>/knowledge.json --limit 1000
+```
+
+This caps reconciliation, not downloading. Source imports reuse a prepared
+bundle when input, review mappings, region and adapter version match. With a
+limit, they scan the complete knowledge JSON for syntax and counts but allocate
+only the selected source records. First-time preparation still processes the
+full input. Foursquare's separate `--foursquare-limit` controls how many places
+are downloaded.
+
+This removes provider cost and quadratic candidate expansion from imports. The
+pipeline still loads a full catalog snapshot and writes source records through
+individual SQL operations; country/batch streaming and database-side bulk writes
+remain necessary before claiming end-to-end ingestion of millions is tuned.
+The guarded import transaction exempts itself from request statement and idle
+transaction timeouts, preserving the lock timeout and restoring normal settings
+after commit/rollback. Import writes reuse the validated snapshot for existing
+source identities and refresh market evidence in batches of 1,000 merchants.
+
+Jev dedupe questions use a compact identity view: merchant and source names,
+websites, aliases, markets and market evidence, plus source IDs and URLs. Raw
+import payloads and media fields remain stored locally but are not sent in these
+questions. Oversized identity evidence reports the affected pair and byte count.
+
+Imports report phase progress on stderr, keeping JSON results on stdout. Terminal
+progress updates in place with processed/total counts, percentages and elapsed
+time; redirected output uses throttled progress lines. Source writes, search
+rebuilding and duplicate merges are staged inside the transaction. The final
+`Import: committed` message appears only after a successful database commit.
+
+Location identity is reconciled separately from merchant identity. `locations import`
+and accepted merchant merges automatically consolidate duplicate outlets for the
+same resolved merchant. Shared external place IDs, compatible merchant-scoped store
+numbers, or matching full addresses with city and country can establish a duplicate.
+Conflicting store numbers, geography, provider IDs or distant coordinates veto a
+merge. City/coordinate proximity alone never establishes outlet identity; groups
+require pairwise agreement and preserve conflicting reviewed corrections.
+
+```sh
+cargo run -- locations dedupe --dry-run
+cargo run -- locations dedupe
+cargo run -- locations dedupe --merchant-id mer_YOUR_ID
+cargo run -- locations list mer_YOUR_ID
+cargo run -- locations list mer_YOUR_ID --raw
+```
+
+Consolidated reads return one canonical outlet with combined aliases, missing
+fields filled from compatible evidence, and `provenance` for each source. Every
+original source record remains stored and inspectable with `--raw`. Source refreshes
+preserve their identity mappings and reviewed overrides. Merchant dedupe also runs
+outlet dedupe after reassigning location references. The full Foursquare download
+has not yet been imported as locations by these commands.

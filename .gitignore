@@ -23,6 +23,7 @@ __pycache__/
 *.pyc
 
 /data/datasets/
+/data/sources/
 
 # Local infrastructure metadata and authentication configuration.
 **/.terraform.lock.hcl

@@ -173,3 +173,19 @@ tofu fmt -check -recursive
 tofu validate
 tofu test
 ```
+
+## Import production into local PostgreSQL
+
+Run `docker compose up -d --wait postgres`, then `cargo run -- infra import-db` from the workspace. This copies the full production database into the
+default local database, including private enrichment history, overwriting local
+copies of production tables. The command ignores application database URL overrides.
+
+Install PostgreSQL client tools (`pg_dump` 17+, matching `pg_restore`, `psql`), AWS
+CLI, and Session Manager plugin. Alongside the existing CLI runner permissions,
+the operator needs `secretsmanager:GetSecretValue` for the RDS administrator
+secret and `ssm:StartSession` for the ECS target and
+`AWS-StartPortForwardingSessionToRemoteHost` document. The existing task role
+already permits SSM channels. No infrastructure change or application release is
+needed. A temporary ECS task provides the tunnel to private Aurora. Production
+is only read; the local restore strips ownership/grants and uses one transaction.
+Temporary dumps, the tunnel, and the ECS task are cleaned up when the command ends.
