@@ -76,23 +76,3 @@ pub(crate) fn postgres_resolutions(c: &mut impl GenericClient, id: &str, data: &
     c.execute(r#"INSERT INTO descriptor_resolutions(id,merchant_id,description,country,amount,currency,location_present,location_address,location_city,location_region,location_postal_code,location_country,location_store_number,extra_json,provenance_json,verified,review_evidence) VALUES($1,($2::text::jsonb #>> '{merchant,id}'),($2::text::jsonb #>> '{context,description}'),($2::text::jsonb #>> '{context,country}'),($2::text::jsonb #>> '{context,amount}'),($2::text::jsonb #>> '{context,currency}'),COALESCE(jsonb_typeof($2::text::jsonb #> '{context,location}')='object',false),($2::text::jsonb #>> '{context,location,address}'),($2::text::jsonb #>> '{context,location,city}'),($2::text::jsonb #>> '{context,location,region}'),($2::text::jsonb #>> '{context,location,postal_code}'),($2::text::jsonb #>> '{context,location,country}'),($2::text::jsonb #>> '{context,location,store_number}'),COALESCE(NULLIF(($2::text::jsonb #> '{context,extra}'), 'null'::jsonb)::text,'{}'),COALESCE(NULLIF(($2::text::jsonb #> '{provenance}'), 'null'::jsonb)::text,'[]'),COALESCE((($2::text::jsonb #>> '{verified}'))::boolean,false),($2::text::jsonb #>> '{evidence}')) ON CONFLICT(id) DO UPDATE SET merchant_id=excluded.merchant_id,description=excluded.description,country=excluded.country,amount=excluded.amount,currency=excluded.currency,location_present=excluded.location_present,location_address=excluded.location_address,location_city=excluded.location_city,location_region=excluded.location_region,location_postal_code=excluded.location_postal_code,location_country=excluded.location_country,location_store_number=excluded.location_store_number,extra_json=excluded.extra_json,provenance_json=excluded.provenance_json,verified=excluded.verified,review_evidence=excluded.review_evidence,updated_at=(clock_timestamp())"#, &[&id,&data])?;
     Ok(())
 }
-
-/// Canonical application serialization makes fingerprints independent of SQL JSON formatting.
-pub(crate) fn canonical_document(data: &str) -> Result<String> {
-    let value: serde_json::Value = serde_json::from_str(data)?;
-    Ok(if value.get("context").is_some() {
-        serde_json::to_string(&serde_json::from_value::<crate::resolution::Resolution>(
-            value,
-        )?)?
-    } else if value.get("location").is_some() {
-        serde_json::to_string(&serde_json::from_value::<crate::location::LocationRecord>(
-            value,
-        )?)?
-    } else if value.get("external_id").is_some() {
-        serde_json::to_string(&serde_json::from_value::<crate::store::SourceRecord>(
-            value,
-        )?)?
-    } else {
-        serde_json::to_string(&serde_json::from_value::<crate::Merchant>(value)?)?
-    })
-}

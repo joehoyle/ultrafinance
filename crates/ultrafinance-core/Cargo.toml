@@ -25,3 +25,7 @@ native-tls.workspace = true
 
 [dev-dependencies]
 strsim.workspace = true
+
+[[bench]]
+name = "enrich"
+harness = false

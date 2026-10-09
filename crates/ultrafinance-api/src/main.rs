@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
             .unwrap_or(ultrafinance_core::store::LOCAL_DATABASE_URL),
     )?;
     let threshold = env::var("ULTRAFINANCE_MATCH_THRESHOLD")
-        .unwrap_or_else(|_| "0.95".into())
+        .unwrap_or_else(|_| "0.90".into())
         .parse()?;
     let enricher = Enricher::with_store(
         env::var("TYPESAFE_API_KEY").ok(),

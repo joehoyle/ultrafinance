@@ -103,9 +103,9 @@ pub(crate) fn exercise(store: &crate::store::MerchantStore) -> Result<()> {
         verified: false,
         evidence: None,
     };
-    let before = store.fingerprint()?;
+    assert!(store.resolutions(None, 10)?.is_empty());
     assert!(store.save_resolution(&resolution)?);
-    assert_ne!(before, store.fingerprint()?);
+    assert_eq!(store.resolutions(Some(&resolution.id), 1)?.len(), 1);
     let candidates = store.search_request(&request, 10)?;
     assert_eq!(candidates[0].merchant.id, "resolution-cafe");
     assert!(!candidates[0].exact && !candidates[0].trusted);
@@ -155,11 +155,7 @@ pub(crate) fn exercise(store: &crate::store::MerchantStore) -> Result<()> {
     let old_mapping = Resolution::supported(&merge_request, store.get(&retired)?.unwrap(), vec![]);
     store.save_resolution(&old_mapping)?;
     let snapshot = store.dedupe_snapshot()?;
-    store.apply_dedupe(
-        &snapshot,
-        &[vec!["resolution-cafe".into(), retired]],
-        &json!({"fixture":"mapping foreign key"}),
-    )?;
+    store.apply_dedupe(&snapshot, &[vec!["resolution-cafe".into(), retired]])?;
     assert_eq!(
         store.resolutions(Some(&old_mapping.id), 1)?[0].merchant.id,
         "resolution-cafe"

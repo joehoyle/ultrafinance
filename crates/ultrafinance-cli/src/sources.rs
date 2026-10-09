@@ -303,7 +303,7 @@ async fn download(
         let url = format!(
             "https://catalog.h3-hub.foursquare.com/iceberg?warehouse=places&table=datasets.places_os&region={region}&limit={limit_label}"
         );
-        return save_foursquare_snapshot(root,r,region,&export.path().join("places.csv"),url);
+        return save_foursquare_snapshot(root, r, region, &export.path().join("places.csv"), url);
     }
     let files = urls(r.source, region)?;
     if matches!(r.source, Source::LunchMoney) {
@@ -545,7 +545,7 @@ fn snapshot_files(path: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
             bail!("invalid download filename");
         }
         let file = path.join(name);
-        let fingerprint=ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&file)?)?;
+        let fingerprint = ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&file)?)?;
         if json!(fingerprint) != entry["fingerprint"] {
             bail!("downloaded file changed: {name}");
         }
@@ -779,8 +779,16 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
             if examples.is_some() && input.is_none() && !matches!(r.source, Source::Foursquare) {
                 bail!("--examples without --input is supported only for Foursquare");
             }
-            let (input, examples) = if let (Source::Foursquare,Some(input),None)=(r.source,input.as_ref(),examples.as_ref()) {
-                snapshot_files(&save_foursquare_snapshot(root,&r,&region,input,format!("local:{}",input.display()))?)?
+            let (input, examples) = if let (Source::Foursquare, Some(input), None) =
+                (r.source, input.as_ref(), examples.as_ref())
+            {
+                snapshot_files(&save_foursquare_snapshot(
+                    root,
+                    &r,
+                    &region,
+                    input,
+                    format!("local:{}", input.display()),
+                )?)?
             } else if let Some(input) = input {
                 let name = if matches!(r.source, Source::MerchantStudio | Source::LunchMoney) {
                     "input.json"
@@ -839,42 +847,56 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     snapshot_files(&path)?
                 }
             };
-            let (path,manifest)=if matches!(r.source,Source::Foursquare) && examples.is_none() {
-                datasets::prepare_foursquare_file(&input,&output,&region)?
+            let (path, manifest) = if matches!(r.source, Source::Foursquare) && examples.is_none() {
+                datasets::prepare_foursquare_file(&input, &output, &region)?
             } else {
                 let contents = std::fs::read_to_string(input)?;
-            let examples = examples.map(std::fs::read_to_string).transpose()?;
-            let (path, manifest) = if let Some(cached) =
-                datasets::cached_bundle(&output, r.source, &contents, examples.as_deref(), &region)?
-            {
-                eprintln!(
-                    "Import: reusing prepared {} merchant bundle",
-                    r.source.name()
-                );
-                cached
-            } else {
-                eprintln!("Import: preparing {} merchant bundle", r.source.name());
-                let bundle = datasets::prepare(r.source, &contents, examples.as_deref(), &region)?;
-                eprintln!(
-                    "Import: saving bundle ({} source records)",
-                    bundle.records.len()
-                );
-                let path = bundle.save(&output)?;
-                (path, bundle.manifest)
-            };
-                (path,manifest)
+                let examples = examples.map(std::fs::read_to_string).transpose()?;
+                let (path, manifest) = if let Some(cached) = datasets::cached_bundle(
+                    &output,
+                    r.source,
+                    &contents,
+                    examples.as_deref(),
+                    &region,
+                )? {
+                    eprintln!(
+                        "Import: reusing prepared {} merchant bundle",
+                        r.source.name()
+                    );
+                    cached
+                } else {
+                    eprintln!("Import: preparing {} merchant bundle", r.source.name());
+                    let bundle =
+                        datasets::prepare(r.source, &contents, examples.as_deref(), &region)?;
+                    eprintln!(
+                        "Import: saving bundle ({} source records)",
+                        bundle.records.len()
+                    );
+                    let path = bundle.save(&output)?;
+                    (path, bundle.manifest)
+                };
+                (path, manifest)
             };
             let mut report = json!({"bundle": path, "manifest": manifest, "dry_run": dry_run});
             // Limit the selected records, leaving the complete cached snapshot
             // and prepared bundle intact for later uncapped imports.
             eprintln!("Import: reading prepared source records");
             if dry_run {
-                let (available, selected) = datasets::stream_records(&path.join("knowledge.json"), dedupe.limit, dedupe.chunk_size as usize, |_| Ok(()))?;
+                let (available, selected) = datasets::stream_records(
+                    &path.join("knowledge.json"),
+                    dedupe.limit,
+                    dedupe.chunk_size as usize,
+                    |_| Ok(()),
+                )?;
                 report["selection"] = dedupe.selection(available, selected);
             } else {
                 let (result, available, selected) = ultrafinance_core::dedupe::import_file(
-                    MerchantStore::configured(database_url)?, path.join("knowledge.json"), dedupe.limit, dedupe.options(),
-                ).await?;
+                    MerchantStore::configured(database_url)?,
+                    path.join("knowledge.json"),
+                    dedupe.limit,
+                    dedupe.options(),
+                )
+                .await?;
                 report["selection"] = dedupe.selection(available, selected);
                 report["dry_run"] = json!(result.dedupe.dry_run);
                 report["delta"] = json!(result.delta);

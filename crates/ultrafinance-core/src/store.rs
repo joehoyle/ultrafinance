@@ -128,13 +128,20 @@ impl MerchantStore {
         if let Some(mapping) = mapping
             && let Some(merchant) = self.get(&mapping.merchant.id)?
         {
+            // Remembered decisions may contain legacy branch-by-branch evidence.
+            // Use the current catalog contribution without rewriting audit data.
+            let current = self.merchant_provenance(&merchant.id)?;
             let candidate = Candidate {
                 merchant,
                 score: 1.0,
                 exact: mapping.verified,
                 trusted: mapping.verified,
                 regex_match_length: None,
-                provenance: mapping.provenance,
+                provenance: if current.is_empty() {
+                    mapping.provenance
+                } else {
+                    current
+                },
                 resolution_id: Some(id),
                 pending_import: false,
                 interpretation_evidence: vec![],
@@ -179,14 +186,16 @@ impl MerchantStore {
         for candidate in &mut found {
             let needs_outlets = interpretation.hypotheses.iter().any(|hypothesis| {
                 (hypothesis.possible_location.is_some() || hypothesis.location_hint.is_some())
-                    && std::iter::once(&candidate.merchant.name)
-                        .chain(&candidate.merchant.aliases)
-                        .any(|name| normalize(name) == normalize(&hypothesis.merchant_text))
+                    && crate::interpretation::supporting_name(
+                        &candidate.merchant,
+                        &hypothesis.merchant_text,
+                    )
+                    .is_some()
             });
             let outlets = if needs_outlets {
-                self.locations(&candidate.merchant.id)?
+                self.cached_locations(&candidate.merchant.id)?
             } else {
-                vec![]
+                std::sync::Arc::new(vec![])
             };
             candidate.interpretation_evidence = crate::interpretation::catalog_support(
                 &interpretation,
@@ -200,7 +209,7 @@ impl MerchantStore {
             // Evidence affects retrieval priority, never automatic trust.
             if candidate.resolution_id.is_none() {
                 for support in &candidate.interpretation_evidence {
-                    if support.possible_location.is_none() {
+                    if support.name_exact && support.possible_location.is_none() {
                         candidate.score = candidate.score.max(0.96);
                     } else if support.outlet.is_some() {
                         candidate.score = candidate.score.max(0.91);
@@ -218,16 +227,27 @@ impl MerchantStore {
         ))
     }
 
-    pub(crate) fn write_log(
+    pub(crate) fn write_logs(
         &self,
-        id: &str,
-        batch: &str,
-        status: &str,
-        merchant: Option<&str>,
-        data: &Value,
+        entries: Vec<(String, String, Value)>,
+        finished: bool,
     ) -> Result<()> {
-        self.0
-            .write_log(id, batch, status, merchant, &serde_json::to_string(data)?)
+        let records = entries
+            .into_iter()
+            .map(|(id, batch, data)| {
+                let status = if finished {
+                    data["status"].as_str().unwrap()
+                } else {
+                    "started"
+                }
+                .to_owned();
+                let merchant = data["response"]["merchant"]["data"]["id"]
+                    .as_str()
+                    .map(str::to_owned);
+                Ok((id, batch, status, merchant, serde_json::to_string(&data)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.0.write_logs(records)
     }
     pub fn enrichment_logs(
         &self,
@@ -252,6 +272,9 @@ impl MerchantStore {
     }
     pub fn location_sources(&self, id: &str) -> Result<Vec<LocationRecord>> {
         self.0.location_sources(&self.resolve_merchant_id(id)?)
+    }
+    pub(crate) fn cached_locations(&self, id: &str) -> Result<std::sync::Arc<Vec<LocationRecord>>> {
+        self.0.cached_locations(&self.resolve_merchant_id(id)?)
     }
     pub fn dedupe_locations(
         &self,
@@ -297,10 +320,14 @@ impl MerchantStore {
         records: &[SourceRecord],
         identities: &[String],
         groups: &[Vec<String>],
-        audit: &Value,
     ) -> Result<(ImportDelta, Option<String>)> {
         self.0
-            .apply_reconciled_import(expected, staged, records, identities, groups, audit)
+            .apply_reconciled_import(expected, staged, records, identities, groups)
+    }
+    /// Consolidated merchant evidence; upstream place mappings remain available
+    /// through source_records and physical branch details through locations.
+    pub fn merchant_provenance(&self, id: &str) -> Result<Vec<SourceRecord>> {
+        self.0.merchant_provenance(&self.resolve_merchant_id(id)?)
     }
     /// Browse original imported evidence independently of candidate retrieval.
     pub fn source_records(
@@ -336,15 +363,11 @@ impl MerchantStore {
         &self,
         expected: &crate::dedupe::Snapshot,
         groups: &[Vec<String>],
-        audit: &Value,
     ) -> Result<String> {
-        self.0.apply_dedupe(expected, groups, audit)
+        self.0.apply_dedupe(expected, groups)
     }
     pub fn resolve_merchant_id(&self, id: &str) -> Result<String> {
         self.0.resolve_merchant_id(id)
-    }
-    pub fn fingerprint(&self) -> Result<String> {
-        self.0.fingerprint()
     }
     pub fn stats(&self) -> Result<MerchantStats> {
         self.0.stats()
@@ -376,6 +399,7 @@ pub struct Candidate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regex_match_length: Option<usize>,
     pub trusted: bool,
+    /// Merchant-level source contributions, not one document per linked outlet.
     pub provenance: Vec<SourceRecord>,
 }
 
@@ -533,15 +557,23 @@ pub(crate) fn validate(merchant: &Merchant) -> Result<()> {
 }
 
 fn excluded(query: &str, records: &[SourceRecord]) -> bool {
+    excluded_aliases(
+        query,
+        records.iter().flat_map(|r| {
+            r.raw["negativeAliases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        }),
+    )
+}
+fn excluded_aliases<'a>(query: &str, mut aliases: impl Iterator<Item = &'a str>) -> bool {
     // Imported negative aliases are whole phrases, never arbitrary substrings.
     let query = format!(" {query} ");
-    records.iter().any(|r| {
-        r.raw["negativeAliases"].as_array().is_some_and(|aliases| {
-            aliases.iter().filter_map(Value::as_str).any(|a| {
-                let a = normalize(a);
-                !a.is_empty() && query.contains(&format!(" {a} "))
-            })
-        })
+    aliases.any(|a| {
+        let a = normalize(a);
+        !a.is_empty() && query.contains(&format!(" {a} "))
     })
 }
 pub(crate) fn location_reference(
@@ -709,6 +741,81 @@ mod tests {
                 .all(|e| e.outlet.is_none())
         );
         assert!(store.get("short")?.unwrap().aliases.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn fuzzy_names_use_source_linked_city_evidence_without_becoming_trusted() -> Result<()> {
+        let store = MerchantStore::temporary()?;
+        let csv = "fsq_place_id,name,country,address,locality,region,latitude,longitude,fsq_category_ids,date_closed\njulius,Julius Cafe,CA,35 John-Savage Rue,Bromont,QC,45.3,-72.6,\"[\"\"restaurant\"\"]\",\npizza,Julius Pizza,CA,1 Main St,Toronto,ON,43.6,-79.4,\"[\"\"restaurant\"\"]\",\nhotel,Hotel Bromont,CA,2 Main St,Bromont,QC,45.3,-72.6,\"[\"\"hotel\"\"]\",\n";
+        let records = crate::foursquare::prepare(csv, None, "ca")?.0;
+        store.import(&records)?;
+        let request: crate::EnrichRequest = serde_json::from_value(serde_json::json!({
+            "description":"SQ* JULIUS BROMONT"
+        }))?;
+        let candidates = store.search_request(&request, 10)?;
+        assert_eq!(candidates[0].merchant.name, "Julius Cafe");
+        let cafe = &candidates[0];
+        assert!(!cafe.exact && !cafe.trusted);
+        let support = cafe
+            .interpretation_evidence
+            .iter()
+            .find(|e| e.merchant_text == "JULIUS")
+            .unwrap();
+        assert!(!support.name_exact);
+        assert_eq!(support.matched_name, "Julius Cafe");
+        assert_eq!(support.outlet.as_ref().unwrap().city, "Bromont");
+        assert!(
+            candidates
+                .iter()
+                .find(|c| c.merchant.name == "Julius Pizza")
+                .unwrap()
+                .interpretation_evidence
+                .is_empty()
+        );
+        assert!(
+            candidates
+                .iter()
+                .find(|c| c.merchant.name == "Hotel Bromont")
+                .unwrap()
+                .interpretation_evidence
+                .is_empty()
+        );
+        let typo = serde_json::from_value(serde_json::json!({"description":"SQ* JULUIS BROMONT"}))?;
+        let typo_support = crate::interpretation::catalog_support(
+            &crate::interpretation::interpret(&typo),
+            &cafe.merchant,
+            &store.cached_locations(&cafe.merchant.id)?,
+            None,
+        );
+        assert!(
+            typo_support
+                .iter()
+                .any(|e| !e.name_exact && e.outlet.is_some())
+        );
+        for body in [
+            serde_json::json!({"description":"SQ* JULIUS BROMONT", "country":"US"}),
+            serde_json::json!({"description":"SQ* JULIUS MONTREAL"}),
+            serde_json::json!({"description":"SQ* JULIUS"}),
+        ] {
+            let request = serde_json::from_value(body)?;
+            assert!(
+                store
+                    .search_request(&request, 10)?
+                    .iter()
+                    .all(|c| c.interpretation_evidence.is_empty())
+            );
+        }
+        assert_eq!(
+            store.get(&cafe.merchant.id)?.unwrap().aliases,
+            cafe.merchant.aliases
+        );
+        assert!(
+            !cafe
+                .merchant
+                .aliases
+                .iter()
+                .any(|a| normalize(a) == "julius")
+        );
         Ok(())
     }
     #[test]

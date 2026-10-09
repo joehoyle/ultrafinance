@@ -157,7 +157,6 @@ pub async fn run(options: Options) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     let store = MerchantStore::configured(options.database_url.as_deref())?;
-    let fingerprint = store.fingerprint()?;
     let directory = options.output.join(format!("run-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&directory)?;
     let terminal = io::stderr().is_terminal();
@@ -248,9 +247,6 @@ pub async fn run(options: Options) -> Result<()> {
             }
         }
     }
-    if store.fingerprint()? != fingerprint {
-        bail!("database changed during batch evaluation; reports cannot be compared as one run");
-    }
     let metrics = if results.is_empty() {
         None
     } else {
@@ -264,7 +260,7 @@ pub async fn run(options: Options) -> Result<()> {
     fs::write(
         &summary,
         serde_json::to_vec_pretty(
-            &json!({"version":1,"mode":options.mode,"database_fingerprint":fingerprint,"limit_per_suite":options.limit,"metrics":metrics,"suites":summaries,"failures":failures}),
+            &json!({"version":1,"mode":options.mode,"limit_per_suite":options.limit,"metrics":metrics,"suites":summaries,"failures":failures}),
         )?,
     )?;
     let rendered = format!(

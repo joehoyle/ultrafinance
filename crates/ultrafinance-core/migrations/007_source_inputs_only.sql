@@ -8,16 +8,6 @@ UPDATE source_records SET negative_aliases=ARRAY(
  ) v WHERE jsonb_typeof(v)='string'
 ) WHERE strpos(raw_json,'"negativeAliases"')>0;
 ALTER TABLE source_records DROP COLUMN merchant_json, DROP COLUMN raw_json;
--- Historical merge audits may also contain copied upstream payloads. Keep
--- their identity history and matching fields without the downloadable blobs.
-UPDATE merchant_merge_runs SET data=jsonb_set(data::jsonb,'{before,sources}',
- COALESCE((SELECT jsonb_agg(jsonb_set(item,'{1,raw}',jsonb_strip_nulls(jsonb_build_object(
-  'countryHints',item#>'{1,raw,countryHints}',
-  'negativeAliases',item#>'{1,raw,negativeAliases}',
-  'transaction_text_regexp',item#>'{1,raw,transaction_text_regexp}',
-  'parent_id',item#>'{1,raw,parent_id}'
- )))) FROM jsonb_array_elements(data::jsonb#>'{before,sources}') item),'[]'::jsonb)
-)::text WHERE jsonb_typeof(data::jsonb#>'{before,sources}')='array';
 CREATE VIEW source_records_documents AS SELECT s.*, jsonb_build_object(
  'source',source,'external_id',external_id,
  'merchant',jsonb_build_object(

@@ -3,6 +3,73 @@ use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use std::io::{self, IsTerminal, Write};
 use ultrafinance_core::store::{Candidate, MerchantPage, MerchantStats};
 
+pub fn enrichment(
+    description: &str,
+    response: &ultrafinance_core::EnrichResponse,
+    json: bool,
+) -> Result<()> {
+    use ultrafinance_core::{MerchantResult, location::LocationResult};
+    if json {
+        return write_output(&serde_json::to_string_pretty(response)?);
+    }
+    let mut rendered = format!("Transaction: {}\n", text(description));
+    match &response.merchant {
+        MerchantResult::Matched { data } => {
+            rendered.push_str(&format!("Merchant:    {}\n", text(&data.name)));
+            if let Some(website) = &data.website {
+                rendered.push_str(&format!("Website:     {}\n", text(website)));
+            }
+            if !data.markets.is_empty() {
+                rendered.push_str(&format!(
+                    "Markets:     {}\n",
+                    text(&data.markets.join(", "))
+                ));
+            }
+        }
+        MerchantResult::Unresolved { .. } => rendered.push_str("Merchant:    Unresolved\n"),
+    }
+    match &response.location {
+        LocationResult::Unresolved { .. } => rendered.push_str("Location:    Unresolved\n"),
+        LocationResult::Matched { data } | LocationResult::Extracted { data } => {
+            let label = if matches!(response.location, LocationResult::Matched { .. }) {
+                "Matched outlet"
+            } else {
+                "Extracted geography"
+            };
+            let address = [
+                &data.name,
+                &data.address,
+                &data.city,
+                &data.region,
+                &data.postal_code,
+                &data.country,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|v| text(v))
+            .collect::<Vec<_>>()
+            .join(", ");
+            rendered.push_str(&format!("Location:    {label}\n"));
+            if !address.is_empty() {
+                rendered.push_str(&format!("             {address}\n"));
+            }
+            if let Some(number) = &data.store_number {
+                rendered.push_str(&format!("Store:       {}\n", text(number)));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for credit in &response.attributions {
+        if seen.insert(credit) {
+            if seen.len() == 1 {
+                rendered.push_str("\nAttributions:\n");
+            }
+            rendered.push_str(&format!("  • {}\n", text(credit)));
+        }
+    }
+    write_output(rendered.trim_end())
+}
+
 pub fn interpretation_formats(
     inventory: &ultrafinance_core::interpretation::Formats,
     json: bool,
@@ -264,7 +331,11 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
     if let Some(candidates) = candidates {
         let mut table = Table::new();
         table.load_style(UTF8_FULL_CONDENSED).set_header([
-            "Choice",
+            if details.get("provider_choices").is_some() {
+                "Record"
+            } else {
+                "Choice"
+            },
             "Merchant",
             "Similarity",
             "Exact",
@@ -281,7 +352,11 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
                         .count()
                 });
             table.add_row([
-                format!("candidate_{index}"),
+                if details.get("provider_choices").is_some() {
+                    format!("record_{index}")
+                } else {
+                    format!("candidate_{index}")
+                },
                 text(candidate["merchant"]["name"].as_str().unwrap_or("")),
                 format!("{:.3}", candidate["score"].as_f64().unwrap_or(0.0)),
                 candidate["exact"].to_string(),
@@ -304,17 +379,79 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
             details["threshold"]
         ));
     }
+    if let Some(choices) = details["provider_choices"].as_array() {
+        let mut table = Table::new();
+        table.load_style(UTF8_FULL_CONDENSED).set_header([
+            "Brand choice",
+            "Merchant",
+            "Catalog records",
+            "Record resolution",
+        ]);
+        for (index, choice) in choices.iter().enumerate() {
+            table.add_row([
+                format!("candidate_{index}"),
+                text(choice["merchant"]["name"].as_str().unwrap_or("")),
+                choice["record_ids"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+                    .to_string(),
+                text(choice["catalog_resolution"].as_str().unwrap_or("")),
+            ]);
+        }
+        rendered.push_str(&format!(
+            "   {} distinct merchant-name choices:\n{table}\n",
+            choices.len()
+        ));
+    }
+    if let Some(requests) = details["provider_requests"].as_array() {
+        for request in requests {
+            if request.get("body").is_none()
+                && request["request_id"].is_string()
+                && request["owner_log_id"].is_null()
+            {
+                rendered.push_str(&format!(
+                    "\n   Shared Jev request {} · full body recorded once in the batch report\n",
+                    text(request["request_id"].as_str().unwrap())
+                ));
+                continue;
+            }
+            if let Some(owner) = request["owner_log_id"].as_str() {
+                rendered.push_str(&format!(
+                    "\n   Shared Jev request {} ({}) · full body in log {}\n",
+                    text(request["request_id"].as_str().unwrap_or("")),
+                    text(request["status"].as_str().unwrap_or("unavailable")),
+                    text(owner)
+                ));
+                continue;
+            }
+            rendered.push_str(&format!(
+                "\n   Jev request body ({}, {} bytes):\n{}\n\n",
+                text(request["status"].as_str().unwrap_or("unavailable")),
+                serde_json::to_vec(&request["body"])?.len(),
+                serde_json::to_string_pretty(&request["body"])?
+            ));
+        }
+    } else {
+        rendered.push_str("   No Jev request was sent.\n");
+    }
     for (key, label) in [
         ("catalog_provider_answer", "Catalog answer"),
         ("provider_answer", "Provider answer"),
     ] {
         if let Some(answer) = details.get(key).filter(|answer| !answer.is_null()) {
             let answer_candidates = if key == "catalog_provider_answer" {
-                candidates
+                details["catalog_provider_choices"]
+                    .as_array()
+                    .or(candidates)
             } else {
-                details["candidates"].as_array()
+                details["provider_choices"]
+                    .as_array()
+                    .or_else(|| details["candidates"].as_array())
             };
             rendered.push_str(&provider_answer(label, answer, answer_candidates));
+            if answer["catalog_resolution"] == "ambiguous" {
+                rendered.push_str("   Merchant name selected, but catalog identity is ambiguous; no record matched.\n");
+            }
         }
     }
     if details["discovery_attempted"] == true {

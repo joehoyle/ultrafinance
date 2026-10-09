@@ -1,0 +1,239 @@
+{
+  "date": "2026-10-09",
+  "revision": "839b527d571a",
+  "workspace_dirty": true,
+  "build": "cargo build --locked --release -p ultrafinance-api",
+  "machine": {
+    "chip": "Apple M1 Max",
+    "cpu_cores": 10,
+    "memory_gb": 64
+  },
+  "catalog_merchants": 1709845,
+  "model": "jev-latest",
+  "audit": {
+    "requests": 1105,
+    "method_provider": 1105,
+    "provider_requests_sent": 1104,
+    "provider_requests_attempted": 1,
+    "error": "Jev connection closed before message completed"
+  },
+  "runs": [
+    {
+      "name": "preflight",
+      "started_at": "2026-10-09T21:14:03.760982+00:00",
+      "finished_at": "2026-10-09T21:14:04.301657+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 1,
+      "requests": 1,
+      "successful": 1,
+      "errors": 0,
+      "elapsed_s": 0.54,
+      "successful_req_s": 1.85,
+      "latency_ms": {
+        "mean": 537.88,
+        "p50": 537.88,
+        "p95": 537.88,
+        "p99": 537.88
+      },
+      "http_statuses": {
+        "200": 1
+      },
+      "merchant_statuses": {
+        "unresolved": 1
+      }
+    },
+    {
+      "name": "c1",
+      "started_at": "2026-10-09T21:14:14.814726+00:00",
+      "finished_at": "2026-10-09T21:14:18.998465+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 1,
+      "requests": 16,
+      "successful": 16,
+      "errors": 0,
+      "elapsed_s": 4.183,
+      "successful_req_s": 3.825,
+      "latency_ms": {
+        "mean": 261.39,
+        "p50": 260.3,
+        "p95": 298.01,
+        "p99": 298.01
+      },
+      "http_statuses": {
+        "200": 16
+      },
+      "merchant_statuses": {
+        "unresolved": 16
+      }
+    },
+    {
+      "name": "c4",
+      "started_at": "2026-10-09T21:14:25.494282+00:00",
+      "finished_at": "2026-10-09T21:14:30.303141+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 4,
+      "requests": 64,
+      "successful": 64,
+      "errors": 0,
+      "elapsed_s": 4.809,
+      "successful_req_s": 13.31,
+      "latency_ms": {
+        "mean": 292.37,
+        "p50": 284.7,
+        "p95": 396.19,
+        "p99": 415.7
+      },
+      "http_statuses": {
+        "200": 64
+      },
+      "merchant_statuses": {
+        "unresolved": 64
+      }
+    },
+    {
+      "name": "c8",
+      "started_at": "2026-10-09T21:14:30.444977+00:00",
+      "finished_at": "2026-10-09T21:14:33.173888+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 8,
+      "requests": 64,
+      "successful": 64,
+      "errors": 0,
+      "elapsed_s": 2.729,
+      "successful_req_s": 23.455,
+      "latency_ms": {
+        "mean": 330.88,
+        "p50": 315.3,
+        "p95": 487.55,
+        "p99": 566.06
+      },
+      "http_statuses": {
+        "200": 64
+      },
+      "merchant_statuses": {
+        "unresolved": 64
+      }
+    },
+    {
+      "name": "c16",
+      "started_at": "2026-10-09T21:14:33.299014+00:00",
+      "finished_at": "2026-10-09T21:14:35.914846+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 16,
+      "requests": 64,
+      "successful": 64,
+      "errors": 0,
+      "elapsed_s": 2.615,
+      "successful_req_s": 24.47,
+      "latency_ms": {
+        "mean": 608.35,
+        "p50": 566.33,
+        "p95": 875.14,
+        "p99": 918.94
+      },
+      "http_statuses": {
+        "200": 64
+      },
+      "merchant_statuses": {
+        "unresolved": 64
+      }
+    },
+    {
+      "name": "c32",
+      "started_at": "2026-10-09T21:14:36.048878+00:00",
+      "finished_at": "2026-10-09T21:14:40.992352+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 32,
+      "requests": 128,
+      "successful": 128,
+      "errors": 0,
+      "elapsed_s": 4.943,
+      "successful_req_s": 25.896,
+      "latency_ms": {
+        "mean": 1176.6,
+        "p50": 1188.83,
+        "p95": 1414.51,
+        "p99": 1519.85
+      },
+      "http_statuses": {
+        "200": 128
+      },
+      "merchant_statuses": {
+        "unresolved": 128
+      }
+    },
+    {
+      "name": "c32-long",
+      "started_at": "2026-10-09T21:14:51.233663+00:00",
+      "finished_at": "2026-10-09T21:15:10.217175+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 32,
+      "requests": 512,
+      "successful": 511,
+      "errors": 1,
+      "elapsed_s": 18.982,
+      "successful_req_s": 26.92,
+      "latency_ms": {
+        "mean": 1169.34,
+        "p50": 1159.78,
+        "p95": 1338.32,
+        "p99": 1386.78
+      },
+      "http_statuses": {
+        "502": 1,
+        "200": 511
+      },
+      "merchant_statuses": {
+        "unresolved": 511
+      }
+    },
+    {
+      "name": "c64",
+      "started_at": "2026-10-09T21:15:10.341396+00:00",
+      "finished_at": "2026-10-09T21:15:19.790485+00:00",
+      "url": "http://127.0.0.1:3001/v1/enrich",
+      "request": {
+        "description": "SQ* JULIUS BROMONT"
+      },
+      "concurrency": 64,
+      "requests": 256,
+      "successful": 256,
+      "errors": 0,
+      "elapsed_s": 9.449,
+      "successful_req_s": 27.094,
+      "latency_ms": {
+        "mean": 2249.59,
+        "p50": 2319.82,
+        "p95": 2468.0,
+        "p99": 2636.23
+      },
+      "http_statuses": {
+        "200": 256
+      },
+      "merchant_statuses": {
+        "unresolved": 256
+      }
+    }
+  ]
+}

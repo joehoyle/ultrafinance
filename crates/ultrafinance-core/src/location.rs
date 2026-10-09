@@ -796,12 +796,10 @@ mod tests {
     }
 
     #[test]
-    fn source_refresh_preserves_manual_corrections_and_fingerprint_tracks_outlets() {
+    fn source_refresh_preserves_manual_corrections() {
         let store = MerchantStore::temporary().unwrap();
         seed(&store);
-        let before = store.fingerprint().unwrap();
         store.import_locations(&records()).unwrap();
-        assert_ne!(before, store.fingerprint().unwrap());
         let mut manual = records().remove(0);
         manual.manual_override = true;
         manual.location.name = Some("Reviewed name".into());

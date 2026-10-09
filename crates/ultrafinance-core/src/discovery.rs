@@ -295,7 +295,6 @@ mod tests {
     #[tokio::test]
     async fn evaluation_discovery_matches_do_not_import_or_remember_evidence() -> Result<()> {
         let store = MerchantStore::temporary()?;
-        let before = store.fingerprint()?;
         let mut enricher = Enricher::for_evaluation(
             Some("test-key".into()),
             "jev-latest".into(),
@@ -313,7 +312,6 @@ mod tests {
         ));
         discovery_rx.recv().unwrap();
         provider_rx.recv().unwrap();
-        assert_eq!(store.fingerprint()?, before);
         assert_eq!(store.stats()?.total, 0);
         assert!(store.resolutions(None, 10)?.is_empty());
         assert!(store.enrichment_logs(None, None, 10, 0)?.is_empty());

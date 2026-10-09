@@ -1861,6 +1861,7 @@ dependencies = [
  "libc",
  "regex",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

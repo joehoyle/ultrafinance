@@ -1,6 +1,6 @@
 # Database lookup columns
 
-Schema version 9 stores fixed catalog and matching fields in columns in
+Schema version 11 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
 indexes. JSON remains for variable evidence, source payloads and arrays whose
 searchable values have relational indexes.
@@ -10,13 +10,14 @@ searchable values have relational indexes.
 | `merchants`, `manual_merchants` | ID, name, website, logo URL/source, markets, aliases and sources; name ordering and country-list indexes on `merchants` |
 | `merchant_identity_keys` | Shared Rust-normalized name and parsed host, plus deterministic name/host keys; B-tree rule lookup and name/host indexes, with a trigram candidate index |
 | `catalog_revision` | Transactional revision advanced by catalog-write triggers; guards provider dedupe against concurrent edits |
+| `merchant_search` | Normalized name/alias text and generated lexeme vector; full-text index retrieves bounded merchant pools |
+| `merchant_search_words` | Distinct search lexemes with B-tree identity and GIN trigram indexes; fuzzy spelling expansion without merchant-sized trigram posting lists |
 | `aliases` | Merchant ID and normalized alias; indexed exact-name lookup |
 | `source_records` | Source identity and metadata; typed input name, website, logo, markets, aliases, sources, country hints and dataset region; composite source identity and pattern-selection index |
 | `location_records` | Source identity, merchant or source-merchant reference, name, precision, address, city, region, postal code, country, store number, coordinates, pattern, manual override and attribution fields; merchant, country/city and merchant/store-number indexes |
 | `descriptor_resolutions` | ID derived from context hash, merchant FK, description, country, amount, currency, supplied location fields, verified flag, review evidence, created and updated timestamps; merchant/status and description/country indexes |
 | `enrichment_log` | Existing ID, batch ID, status, merchant ID and timestamps; status/merchant/time indexes |
 | `merchant_redirects` | Retired ID and surviving merchant ID |
-| `merchant_merge_runs` | Run ID; the remaining audit JSON is not used for filtering |
 
 Source refreshes and import rebuilds read typed fields and country arrays
 without parsing source JSON. Full source payloads and duplicate merchant JSON are not stored. Source identities,
@@ -28,7 +29,8 @@ discarded fields do not trigger catalog updates. Catalog
 arrays preserve declarations and display metadata; alias lookup uses `aliases`
 and country filtering uses the GIN index on `merchants.markets_json::jsonb`. Mapping JSON contains only
 variable `extra` context and provenance, not a duplicated merchant snapshot.
-Historical enrichment and merge logs retain full audit payloads.
+Enrichment logs retain full audit payloads. Merge reports are returned to callers
+and are not stored; merchant and location redirects preserve retired identities.
 
 `*_documents` views reconstruct the existing application JSON representations
 from columns. Their `data` values are computed read projections, not stored
@@ -50,6 +52,17 @@ reviewed identity or silently change an existing mapping to another merchant.
 
 PostgreSQL requires `ultrafinance
 database init` with the schema-owner connection before running this version.
+The version-11 migration backfills `merchant_search_words` from existing search
+vectors and installs statement-level insert/update triggers. Imports and manual
+corrections extend this derived vocabulary in the same transaction as search
+rows; failed imports roll it back. Unused words may remain after deletion or
+renaming, but all merchant IDs and evidence are retrieved from current rows.
+Backfill and index creation take a schema-maintenance lock; run initialization
+with imports stopped. It adds no merchant identities or source evidence.
+The version-10 migration drops `merchant_merge_runs` and `location_merge_runs`,
+including all historical reports and snapshots. Merge and import operations no
+longer recreate or write these tables. Operation `run_id` values remain in returned
+reports for caller correlation, without a persisted audit lookup.
 The version-9 migration removes obsolete market-evidence columns and tables and
 rebuilds document views without the retired `market_evidence` field. It preserves
 merchant country coverage, source links and explicit view privileges, including
@@ -68,13 +81,13 @@ Invalid legacy rows cause rollback. Fingerprints use canonical application
 serialization, so SQL JSON formatting does not change catalog identity.
 
 Grant the runtime role SELECT on the document views and SELECT, INSERT, UPDATE
-and DELETE on the underlying application tables, including the new market, identity-key, catalog-revision and resolution tables.
+and DELETE on the underlying application tables, including `merchant_search_words` and the market, identity-key, catalog-revision and resolution tables.
 Revision triggers require UPDATE on `catalog_revision`. Set the owner's default privileges for future tables/views
 if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 9; coordinate the database upgrade with the new application
+run against version 11; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.
@@ -95,5 +108,4 @@ starts its own disposable server; the runtime image contains no database server.
 
 
 The fresh schema stores operating countries in `markets_json`. Country evidence
-tables and merchant evidence JSON have been removed. No upgrade migration for
-the former evidence layout is provided; existing databases require recreation.
+tables and merchant evidence JSON have been removed. Version 9 migrates the former evidence layout while preserving country coverage.

@@ -140,7 +140,8 @@ cargo run -- enrich 'LS' --country CA --amount 142.97 \
   --currency CAD --extra '{"bank_category":["Food and Drink","Restaurants"]}'
 ```
 
-The CLI prints pretty JSON to stdout, diagnostics to stderr, and exits nonzero on
+The CLI prints a readable merchant and location summary to stdout. Add `--json`
+for the complete response as pretty JSON. Diagnostics go to stderr; it exits nonzero on
 validation, configuration, or provider errors. It uses the same environment
 variables and default local PostgreSQL database as the API. Provide `--merchants FILE`,
 `--model MODEL`, or `--threshold NUMBER` to override settings. Set
@@ -163,7 +164,22 @@ cargo run -- enrich --help
 
 Use `--details` to inspect the actual enrichment steps: descriptor hypotheses,
 the candidate shortlist, the exact/provider decision and independent location
-resolution. Readable details go to stderr; stdout keeps the usual response JSON.
+resolution. It also prints the exact Jev JSON request body, encoded byte count,
+and send status, without authorization headers. Questions rejected by the local
+byte budget show the prepared body as `not_sent`. Readable details go to stderr;
+stdout keeps the readable summary (or response JSON with `--json`). Repeated source matching evidence is
+deduplicated for Jev; full provenance stays in the local audit and attributions.
+In a batch, each shared Jev request body is recorded once. Other transaction
+logs reference its `request_id` and `owner_log_id`; evaluation reports reference
+the same request ID without creating log records. Audit stages write their
+transaction records together rather than issuing one database write per item.
+Jev selects between distinct full merchant-name choices, so duplicate catalog
+records do not split the brand-name probability. Merchant matching does not require
+verified location evidence. Catalog identity is resolved
+separately: a sole established brand record can represent the name alongside
+unlinked place listings, which remain separate records. Conflicting same-name
+business identities remain unresolved even when Jev confidently selects that
+name. `--details` shows both the grouped choices and record-resolution status.
 
 ```sh
 cargo run --locked -- enrich 'Startbucks ON CAN' --details
@@ -206,6 +222,101 @@ Optionally install the binary for shorter commands:
 cargo install --path crates/ultrafinance-cli
 ultrafinance enrich 'LS' --country CA
 ```
+
+## On-demand merchant research
+
+Research one bank description using OpenAI web search and the configured PostgreSQL
+catalog, independently of live enrichment:
+
+```sh
+# Set OPENAI_API_KEY securely in your environment first.
+cargo run --locked -- research 'SQ *JULIUS CAFE BROMONT' --country CA
+cargo run --locked -- research 'SQ *JULIUS CAFE BROMONT' --country CA --json
+cargo run --locked -- research 'SQ *JULIUS CAFE BROMONT' --country CA \
+  --output research-report.json
+```
+
+The model can search the web and query the catalog using discovered business names.
+The model finishes through strict typed tools: `match_merchant` selects a catalog
+ID, `propose_merchant` supplies a new business's name, website and markets, and
+`unresolved` abstains. These tools require no narrative answer. Supporting source
+URLs are retained in the full report. Proposed merchant IDs must come from catalog results;
+supporting URLs must appear in the provider's search sources or citation annotations.
+Equivalent page URLs are normalized; invalid proposals receive correction feedback
+within the same six-step budget rather than immediately failing the command.
+These checks establish provenance, not factual accuracy. Research reports remain
+unverified, and a business listing alone does not establish the transaction counterparty.
+
+By default, research does not write to the database. Add `--create` to save a
+supported new business proposal through the existing source import reconciliation:
+
+```sh
+cargo run --locked -- research 'SQ *JULIUS CAFE BROMONT' --country CA --create
+```
+
+Creation retains a `web-research` source link, model and source URLs;
+repeat imports preserve catalog IDs. Existing-merchant and unresolved proposals
+are not written. Research never learns descriptor aliases or remembered resolutions,
+creates outlets, or writes enrichment history. New businesses become available to
+normal catalog retrieval after creation. Use `--output` to retain the complete report,
+including supporting sources and catalog context. Reports may contain private bank descriptions.
+
+Research first runs read-only local enrichment, without Jev or discovery calls.
+It sends the description, optional country, compact catalog candidates and a small
+local enrichment summary to OpenAI: a local merchant match when available,
+extracted geography, processor hint and up to five competing merchant/location
+interpretations. These interpretations are tentative clues for web research.
+Both the initial shortlist and catalog search tool return at
+most ten merchants, each with ID, name, website, known markets and up to three
+relevant aliases (at most 160 bytes each), plus up to three distinct stored
+city/region/country entries to distinguish same-name businesses. Locations matching
+the query and country are prioritized; these are catalog locations, not confirmed
+purchase geography. Full alias lists, source records, logos,
+full parser traces and internal retrieval metadata are omitted. It requires `OPENAI_API_KEY` separately from Jev's
+credential. The default model is `gpt-6.1-sol`; override it with `--model` or
+`ULTRAFINANCE_RESEARCH_MODEL`. Each run makes at most one hosted web-search call,
+using low search context in the first response. The supplied country also sets
+the search's approximate country hint. Later responses can only search
+the local catalog or return a typed decision; insufficient web evidence produces
+an unresolved result. Runs are limited to six provider responses and a five-minute
+overall provider workflow.
+Catalog lookup calls carry up to three short web-evidence summaries with consulted
+URLs so identifying facts survive into the final decision. These summaries are
+unverified model extractions. Generic or translated descriptions are matched to
+the best-supported business using locality and business-specific evidence; research
+does not require an official site to publish the exact bank descriptor. Comparably
+supported alternatives still produce an unresolved result.
+Progress goes to stderr. Stdout contains only a typed JSON result: `matched` with
+`merchant_id`, `new_merchant` with `merchant: {name, website, markets}`, `created`
+with `merchant_id` after `--create`, or `unresolved`. The default formats JSON for
+readability; `--json` prints the same result on one line. `--output` saves the full
+report separately without expanding stdout.
+
+Add `--details` to trace every LLM request and response JSON body to stderr,
+including instructions, input history, tool schemas, returned hosted web-search
+calls, and local tool calls/results. Validation feedback is shown immediately,
+and accepted terminal decisions are labeled as local results rather than messages
+sent to the LLM. Credentials and HTTP headers are excluded; echoes of the configured
+OpenAI key in JSON bodies are redacted. Traces include the supplied description and
+catalog evidence.
+
+```sh
+cargo run --locked -- research 'SQ GRANBY SWIMMING POOL' --country CA --details
+# Keep the typed result and the trace in separate files:
+cargo run --locked -- research 'SQ GRANBY SWIMMING POOL' --country CA --details \
+  > result.json 2> research-trace.log
+```
+
+
+At the end, stderr shows aggregate input/output tokens, cached input, cache writes,
+reasoning tokens (already included in output), web searches, and estimated USD cost
+across all responses, including correction attempts. Usage also appears in the full
+saved report. Requests select Standard processing. Estimates use the published
+[OpenAI rates](https://developers.openai.com/api/docs/pricing), verified October 9,
+2026, including the web search fee. The supported price table covers GPT-6.1 Sol,
+GPT-6 Sol, Astra and Luna; other models still report tokens but show cost as
+unavailable. Missing usage and interrupted runs are marked partial. Estimates cover
+reported usage, not an authoritative billing total.
 
 ## Automated merchant deduplication
 
@@ -251,17 +362,15 @@ fail without merging. The command rechecks the catalog revision and involved rec
 every group in one transaction; concurrent catalog changes abort the run for a retry.
 `--dry-run` calls Jev but performs no merges.
 
-Each applied run saves its report, involved merchant snapshot and catalog revision in
-`merchant_merge_runs`; the report includes its `run_id`. Retired IDs are recorded
-in `merchant_redirects`, and local outlet imports/listing follow those redirects.
-Manual writes to retired IDs are rejected. The saved snapshot supports recovery, but there is no
-automatic undo command. Neither enrichment history nor old external responses
-are rewritten.
+Applied runs return their report and an operation `run_id` without storing merge
+reports or snapshots in the database. Retired IDs remain in `merchant_redirects`,
+and local outlet imports/listing follow those redirects. Manual writes to retired
+IDs are rejected. Neither enrichment history nor old external responses are rewritten.
 
-PostgreSQL creates these tables through `database init`. The CLI database role needs schema creation
-permission for first-time setup (or have a schema owner run `database init`),
-read access to the new tables, and write/delete access to the catalog tables
-and merge tables. This command does not alter infrastructure grants.
+PostgreSQL creates the redirect tables through `database init`. The CLI database role
+needs schema creation permission for first-time setup (or have a schema owner run
+`database init`), read access to the redirect tables, and write/delete access to the
+catalog and redirect tables. This command does not alter infrastructure grants.
 
 ## Transaction locations
 
@@ -578,7 +687,9 @@ or future training; this importer does not train a model.
 | `ULTRAFINANCE_REQUIRE_POSTGRES` | unset locally; `true` in Docker | Refuse API startup without PostgreSQL |
 | `TYPESAFE_API_KEY` | unset | Jev credential |
 | `JEV_MODEL` | `jev-latest` | Jev model |
-| `ULTRAFINANCE_MATCH_THRESHOLD` | `0.95` | Minimum chosen probability and model confidence |
+| `ULTRAFINANCE_MATCH_THRESHOLD` | `0.90` | Minimum chosen probability and model confidence |
+| `OPENAI_API_KEY` | unset | OpenAI credential for the separate `research` CLI |
+| `ULTRAFINANCE_RESEARCH_MODEL` | `gpt-6.1-sol` | Model for merchant research with web search |
 
 The threshold is provisional, not an accuracy guarantee. Evaluate against labeled
 transactions before trusting matches automatically. Search retrieves the top 10 candidates for Jev, plus any exact alias collisions.
@@ -600,6 +711,16 @@ Initialize with a schema administration role:
 cargo run -- database init
 cargo run -- merchants list --json
 ```
+
+Open the configured database in your default PostgreSQL client:
+
+```sh
+cargo run --locked -- database open
+```
+
+This uses `--database-url`, then `ULTRAFINANCE_DATABASE_URL`, then the local
+default, and opens it using the `postgres://` scheme. Connection credentials and
+query options are preserved in the URL passed to the client and are not printed.
 
 Use PostgreSQL backups for recovery. Import source bundles and manual records
 through the normal CLI commands; a flattened merchant export does not preserve
@@ -654,10 +775,22 @@ Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a specific immutable image.
 Imports validate the batch before writing and commit atomically. Writers use a
 transaction advisory lock to serialize imports, corrections, and links across
 processes. API reads use consistent snapshots and see committed changes on the
-next request. PostgreSQL uses indexed token-prefix and substring-trigram
-retrieval; the final Rust similarity score, provenance, negative aliases, and
-verified exact-match rules remain the same. Candidate ranking may differ from
-other retrieval engines, so compare held-out evaluations when changing search behavior.
+next request. PostgreSQL retrieves at most 100 rows per exact search word
+(up to 16 words). Fuzzy spelling expansion searches a GIN trigram index over
+`merchant_search_words`, selecting at most four similar words per alphabetic
+input token at a 0.3 threshold. Each expanded word retrieves at most 32 merchant
+IDs through the existing full-text index. Dates and store numbers do not expand
+into spelling alternatives. Rust scores name and market columns, then hydrates
+full merchant documents and provenance for the final shortlist. Catalog revision
+checks invalidate cached compiled regex rules, spelling expansions and outlets
+after writes. Spelling expansions retain at most 2,048 input words, including
+negative lookups, so repeated hypotheses reuse their dictionary queries.
+Statement-level insert/update triggers extend the word dictionary during imports
+and corrections, including bulk operations. Unused vocabulary may remain, but
+merchant IDs always come from current search rows. Exact aliases, negative aliases
+and verified-match rules remain separate from fuzzy retrieval; untrusted
+candidates still require provider evaluation. Compare held-out evaluations when
+changing candidate generation.
 
 Schema creation is an explicit CLI operation, never an API startup side effect.
 Use a shared application role with `CONNECT`, schema `USAGE`, and `SELECT`,
@@ -772,11 +905,11 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 8 before running this application. See
+schema version 11 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
-Removing country-evidence storage changes the fresh schema only; existing
-development databases must be recreated. Older application versions cannot run
-against version 8, so application-only rollback across this schema change is unsupported.
+Database initialization upgrades existing schemas, including removal of obsolete
+country evidence and merge-audit tables. Older application versions cannot run
+against version 11, so application-only rollback across this schema change is unsupported.
 
 ## Merchant logos
 
@@ -935,14 +1068,37 @@ Enrichment evals process windows of up to 100 cases and reuse their retrieved
 shortlists. Enrichment case latency includes waiting within that window for
 retrieval and shared provider calls; use the suite wall time to assess throughput.
 Search-only latency remains the individual catalog lookup time.
+Merchant rules and outlet records are reused across hypotheses and transactions.
+Catalog revisions invalidate those reads after imports, corrections or links,
+including writes from another connection. Retained outlet data is bounded, and
+location redirects are read only for the relevant outlets.
 
 Reports include per-case ranks, predictions, correctness, errors, latency,
-suite/database/code fingerprints, model and threshold. Save reports for each
+suite/code fingerprints, model and threshold. Save reports for each
 change and compare the same suite and database snapshot when isolating algorithm
-improvements. Compare database fingerprints too when measuring coverage growth.
-Evaluation fails if the database changes during the run. No aliases or links are
+improvements. Evaluation does not scan or fingerprint the entire database before
+or after a run. No aliases or links are
 learned or modified by evaluation. `evals/private/` and `evals/reports/` are ignored
 by Git; reports still contain labels and merchant identifiers.
+
+## Enrichment performance
+
+Benchmark `SQ* JULIUS BROMONT` against the existing local catalog:
+
+```sh
+cargo bench --locked -p ultrafinance-core --bench enrich
+```
+
+This reports normalization, interpretation, retrieval, and read-only local
+enrichment timings without provider calls or database writes. See the
+[benchmark notes](crates/ultrafinance-core/benches/README.md) for configuration
+and measurement details.
+
+With `TYPESAFE_API_KEY` exported, append `-- --jev` to include three end-to-end
+requests through Jev and persistence against the same local database. Use
+`-- --jev-samples N` to change the count. Each request reports whether Jev ran;
+exact matches can take the normal fast path. These calls use API credits and
+write local enrichment history and supported mappings.
 
 ## Enrichment history
 
@@ -979,7 +1135,8 @@ Run
 ## Current scope
 
 This version stores merchants and aliases in PostgreSQL and evaluates retrieved
-candidates. It does not yet discover merchants through web research, use
+candidates. The separate `research` CLI can investigate merchants through web search;
+the default live pipeline does not perform this research. It does not use
 embeddings, or cache transaction results. Retrieval currently uses the description
 and country; Jev considers all supplied fields and `extra` when evaluating the
 shortlist. No candidates means `unresolved`; fuzzy candidates without a configured
@@ -1132,7 +1289,7 @@ identity. Product names, locality suffixes and store numbers are
 not stripped. Uncertain matches remain separate for explicit review.
 
 Indexed PostgreSQL identity buckets replace import-time fuzzy/all-pairs scans. Every member
-of an accepted bucket shares the same key, so the audit needs only one edge per
+of an accepted bucket shares the same key, so the report needs only one edge per
 retired identity instead of every possible pair. Multiple manual identities in a
 bucket prevent its automatic consolidation. Established IDs and manual
 corrections are preserved; new duplicate source records link directly to the
@@ -1195,12 +1352,11 @@ commit/rollback. Competing writers are serialized. Preview imports run the same
 chunk pipeline and roll back; late malformed JSON or duplicate source keys also
 roll back the entire import. Returned reconciliation details are capped at
 5,000 records/decisions with `details_truncated`; counts cover the whole import,
-and full chunk merge decisions are retained in database audit records.
+and merge decisions are not persisted in the database.
 
 `merchants dedupe` selects candidate pairs using database indexes before loading
 only involved merchant records. Its pair budget bounds the candidate catalog;
 a catalog revision detects concurrent changes before applying decisions.
-Catalog fingerprints stream rows into the hash instead of allocating a catalog.
 
 Compare the streaming importer with the former snapshot strategy on identical
 inputs using disposable databases (three alternating-order trials by default):

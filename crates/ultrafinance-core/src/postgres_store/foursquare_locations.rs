@@ -117,13 +117,22 @@ mod tests {
         let mut merchant = record(0).merchant;
         merchant.id = "existing".into();
         store.put(&merchant)?;
-        let before = store.fingerprint()?;
+        let before = serde_json::to_value((
+            store.list(None, 100, 0)?,
+            store.source_records("foursquare", None, 100, 0)?,
+        ))?;
         store.reconcile_import(
             vec![record(0)],
             true,
             crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE,
         )?;
-        assert_eq!(store.fingerprint()?, before);
+        assert_eq!(
+            serde_json::to_value((
+                store.list(None, 100, 0)?,
+                store.source_records("foursquare", None, 100, 0)?
+            ))?,
+            before
+        );
         store.reconcile_import(
             vec![record(0)],
             false,
@@ -223,7 +232,10 @@ mod tests {
         let mut records: Vec<_> = (0..=crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE)
             .map(record)
             .collect();
-        let before = store.fingerprint()?;
+        let before = serde_json::to_value((
+            store.list(None, 100, 0)?,
+            store.source_records("foursquare", None, 100, 0)?,
+        ))?;
         // First chunk has already written outlets when the final record fails.
         records[crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE].raw["places"][0]["fsq_place_id"] =
             json!(null);
@@ -238,7 +250,13 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(store.fingerprint()?, before);
+        assert_eq!(
+            serde_json::to_value((
+                store.list(None, 100, 0)?,
+                store.source_records("foursquare", None, 100, 0)?
+            ))?,
+            before
+        );
         records[crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE] =
             record(crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE);
         std::fs::write(&path, serde_json::to_vec(&records)?)?;

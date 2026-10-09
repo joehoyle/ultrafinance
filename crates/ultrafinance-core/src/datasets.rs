@@ -10,10 +10,14 @@ use std::{
     path::Path,
 };
 
-#[path="datasets/foursquare_file.rs"]
+#[path = "datasets/foursquare_file.rs"]
 mod foursquare_file;
-pub fn prepare_foursquare_file(input:&Path,output:&Path,region:&str)->Result<(std::path::PathBuf,Manifest)> {
-    foursquare_file::prepare_file(input,output,region)
+pub fn prepare_foursquare_file(
+    input: &Path,
+    output: &Path,
+    region: &str,
+) -> Result<(std::path::PathBuf, Manifest)> {
+    foursquare_file::prepare_file(input, output, region)
 }
 
 #[derive(Clone, Copy)]
@@ -244,16 +248,25 @@ pub(crate) fn count_records(path: &Path) -> Result<usize> {
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("an array of source records")
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<usize, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<usize, A::Error> {
             let mut count = 0;
-            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() { count += 1; }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                count += 1;
+            }
             Ok(count)
         }
     }
     let file = std::fs::File::open(path)?;
     let bytes = usize::try_from(file.metadata()?.len())?;
-    let reader = crate::import_progress::Reader::new(file, "counting prepared records (bytes)", bytes);
-    let mut decoder = serde_json::Deserializer::from_reader(std::io::BufReader::with_capacity(1024 * 1024, reader));
+    let reader =
+        crate::import_progress::Reader::new(file, "counting prepared records (bytes)", bytes);
+    let mut decoder = serde_json::Deserializer::from_reader(std::io::BufReader::with_capacity(
+        1024 * 1024,
+        reader,
+    ));
     let count = decoder.deserialize_seq(Count)?;
     decoder.end()?;
     Ok(count)
@@ -318,8 +331,10 @@ pub fn stream_records(
     }
     let file = std::fs::File::open(path)?;
     let bytes = usize::try_from(file.metadata()?.len())?;
-    let reader = std::io::BufReader::with_capacity(1024 * 1024,
-        crate::import_progress::Reader::new(file, "reading prepared records (bytes)", bytes));
+    let reader = std::io::BufReader::with_capacity(
+        1024 * 1024,
+        crate::import_progress::Reader::new(file, "reading prepared records (bytes)", bytes),
+    );
     let mut decoder = serde_json::Deserializer::from_reader(reader);
     let mut failure = None;
     let result = decoder.deserialize_seq(Stream {
@@ -831,8 +846,8 @@ mod tests {
     use super::*;
     #[test]
     fn legacy_market_evidence_bundles_are_rebuilt_without_overwriting() -> Result<()> {
-        let root = std::env::temp_dir()
-            .join(format!("ultra-dataset-schema-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("ultra-dataset-schema-{}", uuid::Uuid::new_v4()));
         let input = r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha","countryHints":["CA"]}]}"#;
         let examples = r#"{"schemaVersion":"1.0","descriptors":[]}"#;
         let mut legacy = prepare(Source::MerchantStudio, input, Some(examples), "global")?;
@@ -844,8 +859,14 @@ mod tests {
         std::fs::write(legacy_path.join("knowledge.json"), &legacy_bytes)?;
         assert!(read_selected_records(&legacy_path.join("knowledge.json"), None).is_err());
         assert!(
-            cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?
-                .is_none()
+            cached_bundle(
+                &root,
+                Source::MerchantStudio,
+                input,
+                Some(examples),
+                "global"
+            )?
+            .is_none()
         );
 
         let rebuilt = prepare(Source::MerchantStudio, input, Some(examples), "global")?;
@@ -861,9 +882,15 @@ mod tests {
             legacy_bytes
         );
         assert_eq!(
-            cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?
-                .unwrap()
-                .0,
+            cached_bundle(
+                &root,
+                Source::MerchantStudio,
+                input,
+                Some(examples),
+                "global"
+            )?
+            .unwrap()
+            .0,
             path
         );
         // All adapters share the changed Merchant schema, including the file

@@ -121,7 +121,10 @@ fn foursquare_import_refresh_keeps_brand_and_location_identities() {
     assert_eq!(store.get(&id).unwrap().unwrap().markets, ["CA"]);
     assert_eq!(store.import_delta(&bundle.records).unwrap().unchanged, 1);
     let refreshed = store.locations(&id).unwrap();
-    assert_eq!(locations.iter().map(|r| &r.location.id).collect::<Vec<_>>(), refreshed.iter().map(|r| &r.location.id).collect::<Vec<_>>());
+    assert_eq!(
+        locations.iter().map(|r| &r.location.id).collect::<Vec<_>>(),
+        refreshed.iter().map(|r| &r.location.id).collect::<Vec<_>>()
+    );
     let updated = review.replace("\"name\":\"Starbucks\"", "\"name\":\"Starbucks Coffee\"");
     let bundle = ultrafinance_core::datasets::prepare(
         ultrafinance_core::datasets::Source::Foursquare,
@@ -685,7 +688,9 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
             .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url());
         let output = command.output().unwrap();
         if !extra.contains(&"--dry-run") {
-            let expected = extra.windows(2).find(|pair| pair[0] == "--limit")
+            let expected = extra
+                .windows(2)
+                .find(|pair| pair[0] == "--limit")
                 .map_or("3", |pair| pair[1]);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains(&format!("3 available source records; {expected} selected")));

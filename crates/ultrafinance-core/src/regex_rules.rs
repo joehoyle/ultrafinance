@@ -217,17 +217,28 @@ pub(crate) fn valid_pattern(pattern: &str) -> bool {
     compiled(pattern).is_some()
 }
 
+pub(crate) struct Pattern(Regex);
+
+impl Pattern {
+    pub(crate) fn compile(pattern: &str) -> Option<Self> {
+        compiled(pattern).map(Self)
+    }
+
+    pub(crate) fn match_length(&self, description: &str) -> Option<usize> {
+        // Try raw text first, as upstream does, then the processor-stripped form.
+        [description, strip_processors(description)]
+            .into_iter()
+            .find_map(|text| {
+                self.0
+                    .find(text)
+                    .filter(|m| !m.is_empty())
+                    .map(|m| m.as_str().chars().count())
+            })
+    }
+}
+
 pub(crate) fn match_length(pattern: &str, description: &str) -> Option<usize> {
-    let regex = compiled(pattern)?;
-    // Try raw text first, as upstream does, then the processor-stripped form.
-    [description, strip_processors(description)]
-        .into_iter()
-        .find_map(|text| {
-            regex
-                .find(text)
-                .filter(|m| !m.is_empty())
-                .map(|m| m.as_str().chars().count())
-        })
+    Pattern::compile(pattern)?.match_length(description)
 }
 
 #[cfg(test)]

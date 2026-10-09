@@ -2,6 +2,7 @@
 use super::*;
 use crate::dedupe::{Decision, ImportReport, Report, Snapshot};
 use postgres::{binary_copy::BinaryCopyInWriter, types::Type};
+#[cfg(test)]
 use serde_json::json;
 
 pub(super) const BATCH: usize = crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE;
@@ -144,15 +145,6 @@ impl<'a, 'b> Import<'a, 'b> {
             })
             .collect();
         self.report.candidates += decisions.len();
-        // Store every bounded merge plan in PostgreSQL; returned detail is capped.
-        self.tx.execute(
-            "INSERT INTO merchant_merge_runs(id,data) VALUES($1,$2)",
-            &[
-                &format!("{}:{}", self.run_id, self.report.candidates),
-                &json!({"kind":"source-import-chunk","group":group,"decisions":decisions})
-                    .to_string(),
-            ],
-        )?;
         if self.report.decisions.len() + decisions.len() <= DETAILS
             && self.report.merchants.len() + members.len() <= DETAILS
         {
@@ -327,7 +319,6 @@ SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE
     pub(super) fn finish(mut self) -> Result<ImportReport> {
         self.progress.report(self.selected);
         if self.report.candidates > 0 && !self.report.dry_run {
-            self.tx.execute("INSERT INTO merchant_merge_runs(id,data) VALUES($1,$2)", &[&self.run_id,&json!({"kind":"source-import","candidates":self.report.candidates,"details_truncated":self.report.details_truncated}).to_string()])?;
             self.report.run_id = Some(self.run_id);
         }
         if self.report.dry_run {
@@ -355,7 +346,10 @@ mod tests {
         let path = directory.join("knowledge.json");
         let mut records: Vec<_> = (0..(BATCH + 1)).map(record).collect();
         std::fs::write(&path, serde_json::to_vec(&records)?)?;
-        let before = store.fingerprint()?;
+        let before = serde_json::to_value((
+            store.list(None, 100, 0)?,
+            store.source_records("stream-fixture", None, 100, 0)?,
+        ))?;
         let (preview, available, selected) = store.reconcile_file(
             path.clone(),
             None,
@@ -365,7 +359,13 @@ mod tests {
         assert_eq!((available, selected), (BATCH + 1, BATCH + 1));
         assert_eq!(preview.dedupe.candidates, BATCH);
         assert!(preview.dedupe.details_truncated);
-        assert_eq!(store.fingerprint()?, before);
+        assert_eq!(
+            serde_json::to_value((
+                store.list(None, 100, 0)?,
+                store.source_records("stream-fixture", None, 100, 0)?
+            ))?,
+            before
+        );
         assert_eq!(store.stats()?.total, 0);
         // A duplicate source key after the first completed chunk must roll back it.
         records[BATCH] = records[0].clone();
@@ -380,7 +380,13 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(store.fingerprint()?, before);
+        assert_eq!(
+            serde_json::to_value((
+                store.list(None, 100, 0)?,
+                store.source_records("stream-fixture", None, 100, 0)?
+            ))?,
+            before
+        );
         records[BATCH] = record(BATCH);
         let encoded = serde_json::to_string(&records)?;
         std::fs::write(&path, format!("{encoded} trailing garbage"))?;
@@ -394,7 +400,13 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(store.fingerprint()?, before);
+        assert_eq!(
+            serde_json::to_value((
+                store.list(None, 100, 0)?,
+                store.source_records("stream-fixture", None, 100, 0)?
+            ))?,
+            before
+        );
         std::fs::write(&path, encoded)?;
         let (result, _, _) = store.reconcile_file(
             path.clone(),
@@ -434,11 +446,20 @@ mod tests {
             assert_eq!(result.delta.added, 19);
             assert_eq!(result.dedupe.candidates, 18);
             assert_eq!(store.stats()?.total, 1);
-            let before = store.fingerprint()?;
+            let before = serde_json::to_value((
+                store.list(None, 100, 0)?,
+                store.source_records("stream-fixture", None, 100, 0)?,
+            ))?;
             let mut invalid = records.clone();
             invalid.push(records[0].clone());
             assert!(store.reconcile_import(invalid, false, size).is_err());
-            assert_eq!(store.fingerprint()?, before);
+            assert_eq!(
+                serde_json::to_value((
+                    store.list(None, 100, 0)?,
+                    store.source_records("stream-fixture", None, 100, 0)?
+                ))?,
+                before
+            );
             assert_eq!(
                 store
                     .reconcile_import(records, false, size)?
@@ -481,7 +502,7 @@ mod tests {
             assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
             let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00004999'",&[])?;
             assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),9);
+            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),11);
             Ok(())
         })
     }

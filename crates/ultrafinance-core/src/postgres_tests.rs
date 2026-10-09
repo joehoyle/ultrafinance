@@ -188,20 +188,66 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         store.resolve_source("pre-market-source", "external")?,
         Some("pre-market".into())
     );
-    let fingerprint = store.fingerprint()?;
+    let before = serde_json::to_value(store.list(None, 10, 0)?)?;
     assert_eq!(
-        MerchantStore::initialize_postgres(url)?.fingerprint()?,
-        fingerprint
+        serde_json::to_value(MerchantStore::initialize_postgres(url)?.list(None, 10, 0)?)?,
+        before
     );
     assert_eq!(
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        9
+        11
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);
     store.revoke_resolution(&resolution.id)?;
     client.batch_execute("DELETE FROM source_records WHERE source='pre-market-source'; DELETE FROM manual_merchants WHERE id='pre-market'; DELETE FROM merchants WHERE id='pre-market';")?;
+    Ok(())
+}
+
+#[test]
+fn fuzzy_retrieval_keeps_typos_amid_shared_character_fragments() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let mut catalog: Vec<_> = (0..1500)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("decoy-{index}"),
+                "name": format!("Remarkable hospital unrelated business {index}"),
+            })
+        })
+        .collect();
+    catalog.push(serde_json::json!({
+        "id":"target", "name":"Marketella", "markets":["CA"],
+        "website":"https://marketella.example", "logo_url":"https://marketella.example/logo.svg",
+        "logo_source":"https://marketella.example"
+    }));
+    catalog.push(serde_json::json!({
+        "id":"abbreviation", "name":"CHUM - Centre Hospitalier de l'Université de Montréal"
+    }));
+    store.import(&crate::import::catalog(
+        &serde_json::to_string(&catalog)?,
+        "fixture",
+    )?)?;
+    let hits = store.search("Marktella", None, 10)?;
+    assert_eq!(hits[0].merchant.name, "Marketella");
+    assert!(!hits[0].exact && !hits[0].trusted);
+    assert_eq!(
+        hits[0].merchant.website.as_deref(),
+        Some("https://marketella.example")
+    );
+    assert_eq!(
+        serde_json::to_value(&hits[0].merchant)?,
+        serde_json::to_value(store.get(&hits[0].merchant.id)?.unwrap())?
+    );
+    // A frequent word must not crowd a rare exact word out of the pool.
+    assert!(
+        store
+            .search("CTR HOSPITAL UNIV MTL - CHUM", None, 10)?
+            .iter()
+            .any(|candidate| candidate.merchant.name.starts_with("CHUM -"))
+    );
+    // Short descriptors must not expand into fuzzy letter-only matches.
+    assert!(store.search("Ma", None, 10)?.is_empty());
     Ok(())
 }

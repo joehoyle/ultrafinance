@@ -1,8 +1,10 @@
 mod batch;
 mod build_metadata;
+mod database;
 mod foursquare_download;
 mod infra;
 mod output;
+mod research;
 mod sources;
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -81,6 +83,8 @@ enum Command {
     },
     /// Enrich a description or a complete JSON request without starting the API.
     Enrich(Box<EnrichArgs>),
+    /// Research a transaction description using web search and the merchant catalog.
+    Research(research::Args),
     /// Enrich up to 100 transactions using shared provider batches.
     EnrichBatch(BatchEnrichArgs),
     /// Benchmark labeled suites or measure coverage of dataset samples.
@@ -107,7 +111,7 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
         model: String,
-        #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.95")]
+        #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
         threshold: f64,
     },
     /// Prepare repeatable dataset snapshots, development data, and evals.
@@ -194,6 +198,8 @@ enum GazetteerCommand {
 enum DatabaseCommand {
     /// Apply PostgreSQL schema migrations (safe to repeat).
     Init,
+    /// Open the configured database in the default postgres:// handler.
+    Open,
 }
 
 #[derive(Subcommand)]
@@ -400,6 +406,9 @@ enum ImportFormat {
 
 #[derive(Args)]
 struct EnrichArgs {
+    /// Print the full response as JSON instead of a readable summary.
+    #[arg(long)]
+    json: bool,
     /// Raw bank transaction description.
     #[arg(required_unless_present = "input", conflicts_with = "input")]
     description: Option<String>,
@@ -428,7 +437,7 @@ struct EnrichArgs {
     #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
     model: String,
     /// Minimum chosen probability and model confidence; provisional, not measured accuracy.
-    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.95")]
+    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
     threshold: f64,
     /// Validate and print the request without reading a catalog or calling Jev.
     #[arg(long)]
@@ -445,7 +454,7 @@ struct BatchEnrichArgs {
     input: PathBuf,
     #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
     model: String,
-    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.95")]
+    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
     threshold: f64,
     #[arg(long)]
     dry_run: bool,
@@ -596,6 +605,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Sources(args) => sources::run(args, cli.database_url.as_deref()).await?,
         Command::Infra(args) => infra::run(args)?,
+        Command::Research(args) => research::run(args, cli.database_url.as_deref()).await?,
         Command::Interpret {
             description,
             list_formats,
@@ -671,6 +681,7 @@ async fn main() -> Result<()> {
                     MerchantStore::initialize_postgres(url)?;
                     println!("PostgreSQL schema is ready");
                 }
+                DatabaseCommand::Open => database::open(url)?,
             }
         }
         Command::Locations { command } => match command {
@@ -790,8 +801,12 @@ async fn main() -> Result<()> {
             }
             DatasetCommand::Apply { file, dedupe } => {
                 let (result, available, count) = ultrafinance_core::dedupe::import_file(
-                    MerchantStore::configured(cli.database_url.as_deref())?, file, dedupe.limit, dedupe.options(),
-                ).await?;
+                    MerchantStore::configured(cli.database_url.as_deref())?,
+                    file,
+                    dedupe.limit,
+                    dedupe.options(),
+                )
+                .await?;
                 let selection = dedupe.selection(available, count);
                 println!(
                     "{}",
@@ -900,7 +915,7 @@ async fn main() -> Result<()> {
                     .await
                     .context("merchant evaluation timed out")??
             };
-            println!("{}", serde_json::to_string_pretty(&response)?);
+            output::enrichment(&request.description, &response, args.json)?;
         }
         Command::EnrichBatch(args) => {
             let request = read_batch_request(&args.input)?;

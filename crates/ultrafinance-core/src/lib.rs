@@ -16,6 +16,7 @@ pub mod location_dedupe;
 pub mod markets;
 pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
 mod pipeline;
+pub use pipeline::{LocalEnrichment, enrich_locally};
 mod regex_rules;
 pub mod resolution;
 mod search_score;

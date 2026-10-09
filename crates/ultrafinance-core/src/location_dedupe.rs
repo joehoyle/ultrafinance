@@ -6,7 +6,7 @@ use crate::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS location_redirects(retired_id TEXT PRIMARY KEY REFERENCES location_records(id), location_id TEXT NOT NULL REFERENCES location_records(id)); CREATE TABLE IF NOT EXISTS location_merge_runs(id TEXT PRIMARY KEY, data TEXT NOT NULL);";
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS location_redirects(retired_id TEXT PRIMARY KEY REFERENCES location_records(id), location_id TEXT NOT NULL REFERENCES location_records(id));";
 
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -312,11 +312,11 @@ mod tests {
             crate::location::enrich(&request, &canonical).0,
             LocationResult::Matched { .. }
         ));
-        let before = db.fingerprint()?;
+        let before = serde_json::to_value(db.location_sources("brand")?)?;
         let preview = db.dedupe_locations(Some("brand"), true)?;
         assert!(preview.dry_run);
         assert!(preview.groups.is_empty());
-        assert_eq!(before, db.fingerprint()?);
+        assert_eq!(before, serde_json::to_value(db.location_sources("brand")?)?);
         db.import_locations(&[a, b.clone()])?;
         assert_eq!(db.locations("brand")?[0].location.id, id);
         let mut correction = b.clone();
@@ -363,11 +363,7 @@ mod tests {
         db.import_locations(&[a, b])?;
         let snapshot = db.dedupe_snapshot()?;
         assert_eq!(snapshot.locations.len(), 2);
-        db.apply_dedupe(
-            &snapshot,
-            &[vec![first.clone(), second.clone()]],
-            &json!({"test":true}),
-        )?;
+        db.apply_dedupe(&snapshot, &[vec![first.clone(), second.clone()]])?;
         assert_eq!(db.locations(&first)?.len(), 1);
         assert_eq!(db.locations(&second)?.len(), 1);
         assert_eq!(db.location_sources(&first)?.len(), 2);

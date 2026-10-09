@@ -1,9 +1,6 @@
 //! Merchant and outlet import of a bounded, filtered FSQ OS Places CSV export.
 //! Brand membership is explicitly reviewed, never inferred from name/domain equality.
-use crate::{
-    Merchant,
-    store::SourceRecord,
-};
+use crate::{Merchant, store::SourceRecord};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};

@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 ultrafinance-core = { path = "../ultrafinance-core" }
 uuid.workspace = true

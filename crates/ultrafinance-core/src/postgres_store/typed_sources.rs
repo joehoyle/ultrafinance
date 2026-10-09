@@ -69,18 +69,11 @@ mod tests {
             let stored=tx.query_one("SELECT merchant_json,raw_json FROM source_records",&[])?;
             assert_eq!(stored.get::<_,String>(0),merchant_doc);
             assert_eq!(stored.get::<_,String>(1),raw_doc);
-            let audit=serde_json::json!({"report":{"kept":true},"before":{"sources":[["canonical",{"merchant":merchant,"raw":raw}]]}}).to_string();
-            tx.execute("INSERT INTO merchant_merge_runs(id,data) VALUES('audit',$1)",&[&audit])?;
             tx.batch_execute("CREATE VIEW source_records_documents AS SELECT merchant_json AS data FROM source_records")?;
             tx.batch_execute(include_str!("../../migrations/007_source_inputs_only.sql"))?;
             let doc:String=tx.query_one("SELECT data FROM source_records_documents",&[])?.get(0);
             let compact:SourceRecord=serde_json::from_str(&doc)?;
             assert_eq!(compact.raw,serde_json::json!({"countryHints":["CA","US"]}));
-            let audit:String=tx.query_one("SELECT data FROM merchant_merge_runs WHERE id='audit'",&[])?.get(0);
-            let audit:serde_json::Value=serde_json::from_str(&audit)?;
-            assert_eq!(audit["report"]["kept"],true);
-            assert!(audit["before"]["sources"][0][1]["raw"].get("payload").is_none());
-
             assert_eq!(serde_json::to_value(compact.merchant)?,serde_json::to_value(&merchant)?);
             tx.execute("DELETE FROM source_records",&[])?;
             assert!(tx.query_one("SELECT to_regclass('source_market_inputs') IS NULL", &[])?.get::<_,bool>(0));

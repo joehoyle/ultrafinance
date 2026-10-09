@@ -17,17 +17,42 @@ location `BROMONT`, plus the original description. Trailing one- and two-word
 spans are possible localities, not confirmed geographic facts. These hypotheses
 are copied from the descriptor; Jev evaluates them alongside candidates and the
 original transaction. Retrieval compares each hypothesis with catalog names and
-aliases. For an equal name, it also checks the proposed locality against the
-merchant's stored outlet cities, respecting the transaction country. It attaches
-the matching name and supporting outlet source, identifier and attribution to the
-candidate supplied to Jev. No matching outlet leaves the locality unconfirmed;
-missing coverage is not contradictory evidence.
+aliases. For retrieved candidates, it also checks the proposed locality against
+the merchant's stored outlet cities, respecting the transaction country and any
+structured region or store clues. An abbreviated or fuzzy name can supply
+location support too: `JULIUS BROMONT` can carry the catalog evidence for
+`Julius Cafe` in Bromont. Every descriptor name token must match a catalog name
+token, allowing close spelling differences for tokens of at least four
+characters. This requires an unambiguous matching outlet; shared geography
+alone does not promote unrelated names or establish name equality. Evidence marks
+`name_exact` and supplies supporting outlet source, city and country for Jev to
+evaluate. The catalog name is carried by the candidate; a distinct matching alias
+is included when relevant. Outlet identifiers, license, attribution and source
+documentation URL remain in local evidence and are omitted from the Jev request.
+No matching outlet leaves the locality unconfirmed; missing coverage
+is not contradictory evidence.
 
 A complete-name match ranks above a name/locality split supported by an outlet.
 Both candidates remain available for evaluation, and this support never grants
 an automatic trusted match. Hypotheses never become trusted aliases or location
 records. This mechanism uses the existing merchant and outlet tables; it requires
 no discovery service or additional business database.
+
+Jev receives explicit evidence projections rather than serialized catalog
+records. Candidate fields are names, distinct aliases, known markets, websites,
+source names, matching rules, exclusions and interpretation/location evidence.
+Internal merchant/place/parent/gazetteer IDs, scores, logos, source bookkeeping,
+null or empty service fields and repeated evidence are omitted. Same-name
+identity variants retain only distinct evidence; the application still resolves
+the catalog identity locally using the original records. Choice keys such as
+`candidate_0` route the answer without exposing catalog IDs.
+
+Transaction description, supplied amount/currency/date/country, structured
+location clues and caller-provided `extra` remain available. Nested caller
+evidence is preserved verbatim, including explicit nulls or empty arrays; only
+absent or empty service-owned fields are compacted. Full catalog evidence and
+request context remain in the local audit; responses retain catalog identities
+and attributions.
 
 The rules intentionally do not attempt arbitrary date/amount removal, expand
 unknown abbreviations, or generate new business names. All original text remains
@@ -124,5 +149,5 @@ and provenance remain JSON. Grant the runtime role the required table and view
 permissions. See [database schema](database-schema.md) for the complete schema,
 migration and release requirements.
 
-Canonical catalog fingerprints include mappings and verification state. Mapping data is private transaction
+Mapping data is private transaction
 context and should be handled alongside private enrichment history.

@@ -447,14 +447,7 @@ mod tests {
             })
             .collect();
         staged.sources = ids.iter().cloned().zip(records.iter().cloned()).collect();
-        let (delta, _) = store.apply_reconciled_import(
-            &expected,
-            &staged,
-            &records,
-            &ids,
-            &[],
-            &serde_json::json!({}),
-        )?;
+        let (delta, _) = store.apply_reconciled_import(&expected, &staged, &records, &ids, &[])?;
         assert_eq!(delta.added, BATCH + 1);
         let first = store.get(&ids[0])?.unwrap();
         assert!(first.aliases.contains(&"BANK FIRST".into()));
@@ -499,7 +492,6 @@ mod tests {
             &[refresh],
             &[ids[0].clone()],
             &[],
-            &serde_json::json!({}),
         )?;
         assert_eq!(delta.updated, 1);
         assert!(
@@ -601,20 +593,13 @@ mod tests {
         let mut staged = expected.clone();
         staged.merchants = records.iter().map(|r| r.merchant.clone()).collect();
         staged.sources = ids.iter().cloned().zip(records.iter().cloned()).collect();
-        let result = store.apply_reconciled_import(
-            &expected,
-            &staged,
-            &records,
-            &ids,
-            &[],
-            &serde_json::json!({}),
-        );
+        let result = store.apply_reconciled_import(&expected, &staged, &records, &ids, &[]);
         assert!(result.is_err());
         let after = store.dedupe_snapshot()?;
         assert!(after.merchants.is_empty());
         assert!(after.sources.is_empty());
         store.run(|client| {
-            for table in ["aliases", "merchant_search"] {
+            for table in ["aliases", "merchant_search", "merchant_search_words"] {
                 let count: i64 = client
                     .query_one(&format!("SELECT count(*) FROM {table}"), &[])?
                     .get(0);

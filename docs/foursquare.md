@@ -5,6 +5,17 @@ Eligible places with a usable street address and country also create linked
 location records. No merchant descriptor aliases, matching regexes or logos are generated.
 Foursquare fills business coverage gaps; it supplies no transaction ground truth.
 
+After reconciliation links places to a merchant, candidate `provenance` contains
+consolidated Foursquare merchant evidence rather than one document per branch.
+Distinct attribution URLs and matching rules remain separate. The contribution's
+`raw.source_record_count` records how many upstream mappings it represents;
+its external ID is a representative existing source key, preferring a reviewed
+`brand:` key when present. Consolidation does not review or merge identities.
+Per-place keys remain available through source browsing for refreshes, relinking
+and audit, while outlet records retain addresses, coordinates and place IDs.
+The projection also applies to existing imports and remembered matches without
+a data migration or reimport.
+
 ## Export and prepare
 
 Current releases require access through the [Places Portal](https://places.foursquare.com/)
@@ -167,7 +178,7 @@ Later chunks reuse earlier matches. A preview runs this same pipeline and rolls
 back. Duplicate source keys or malformed JSON discovered late also roll back
 every earlier chunk. Reconciliation details returned in JSON are capped at
 5,000 records/decisions with `details_truncated`; total counts remain complete,
-and database audit records retain the full bounded merge decisions.
+and merge decisions are not persisted in the database.
 Import progress on stderr starts with an exact count of the prepared bundle
 and the selected total after `--limit`. Counting uses a bounded streaming pass
 before opening the database write transaction, so edited bundles are counted

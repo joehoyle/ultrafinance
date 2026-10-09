@@ -249,6 +249,7 @@ fn root_help_lists_nested_command_paths() {
             "sources raw",
             "merchants search",
             "database init",
+            "database open",
             "infra deploy",
         ] {
             assert!(help.contains(path), "missing {path} in {help}");
@@ -393,6 +394,7 @@ fn flags_and_stdin_preserve_nested_evidence() {
     let output = run(
         &[
             "enrich",
+            "--json",
             "LS",
             "--country",
             "CA",
@@ -413,7 +415,7 @@ fn flags_and_stdin_preserve_nested_evidence() {
     assert_eq!(value["extra"]["bank"]["category"][0], "Restaurants");
     assert_eq!(value["amount"], "-142.97");
     let output = run(
-        &["enrich", "--input", "-", "--dry-run"],
+        &["enrich", "--json", "--input", "-", "--dry-run"],
         Some(r#"{"description":"LS","extra":{"counterparties":[{"name":"Cafe"}]}}"#),
     );
     assert!(output.status.success());
@@ -424,16 +426,16 @@ fn flags_and_stdin_preserve_nested_evidence() {
 #[test]
 fn invalid_requests_and_conflicting_modes_exit_nonzero() {
     for args in [
-        vec!["enrich", " ", "--dry-run"],
-        vec!["enrich", "LS", "--extra", "[]", "--dry-run"],
-        vec!["enrich", "--input", "-", "--country", "CA"],
+        vec!["enrich", "--json", " ", "--dry-run"],
+        vec!["enrich", "--json", "LS", "--extra", "[]", "--dry-run"],
+        vec!["enrich", "--json", "--input", "-", "--country", "CA"],
     ] {
         let output = run(&args, Some(r#"{"description":"LS"}"#));
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
     }
     let output = run(
-        &["enrich", "--input", "-", "--dry-run"],
+        &["enrich", "--json", "--input", "-", "--dry-run"],
         Some(r#"{"description":"LS","contry":"CA"}"#),
     );
     assert!(!output.status.success());
@@ -457,8 +459,8 @@ fn short_descriptor_remains_unresolved_without_provider_credentials() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}})
+        String::from_utf8(output.stdout).unwrap(),
+        "Transaction: LS\nMerchant:    Unresolved\nLocation:    Unresolved\n"
     );
 }
 
@@ -471,6 +473,7 @@ fn enrich_details_explains_abstention_and_preserves_response_json() {
     let output = run(
         &[
             "enrich",
+            "--json",
             "LS",
             "--country",
             "US",
@@ -497,6 +500,7 @@ fn enrich_details_explains_abstention_and_preserves_response_json() {
     let output = run(
         &[
             "enrich",
+            "--json",
             "Example Café",
             "--merchants",
             catalog,
@@ -515,6 +519,7 @@ fn enrich_details_explains_abstention_and_preserves_response_json() {
     let output = run(
         &[
             "enrich",
+            "--json",
             "Example Café PAYMENT",
             "--merchants",
             catalog,
@@ -598,6 +603,7 @@ fn database_persists_aliases_and_exact_matches_without_a_key() {
             "--database-url",
             db,
             "enrich",
+            "--json",
             "julius café bromont",
             "--country",
             "CA",
@@ -962,6 +968,7 @@ fn locations_import_list_eval_and_structured_flags_work() {
     let output = run(
         &[
             "enrich",
+            "--json",
             "UNKNOWN",
             "--location",
             r#"{"city":"Toronto","country":"CA"}"#,
@@ -1095,6 +1102,7 @@ fn merchant_markets_flags_replace_country_and_exact_matches_remain_eligible() {
             "--database-url",
             db,
             "enrich",
+            "--json",
             "Example Brand",
             "--country",
             "DE",
@@ -1312,6 +1320,7 @@ fn interpretation_and_reviewed_resolution_commands_preserve_context_and_allow_re
         "--database-url",
         db,
         "enrich",
+        "--json",
         "opaque zxmq",
         "--country",
         "CA",
@@ -1321,6 +1330,7 @@ fn interpretation_and_reviewed_resolution_commands_preserve_context_and_allow_re
         "--database-url",
         db,
         "enrich",
+        "--json",
         "opaque zxmq",
         "--country",
         "US",
@@ -1654,12 +1664,118 @@ fn locations_cli_lists_consolidated_outlets_raw_sources_and_dedupe_previews() {
     assert_eq!(consolidated[0]["provenance"].as_array().unwrap().len(), 2);
     let raw = execute(&["list", "brand", "--raw"]);
     assert_eq!(raw.as_array().unwrap().len(), 2);
-    let before = store.fingerprint().unwrap();
+    let before = serde_json::to_value(store.location_sources("brand").unwrap()).unwrap();
     let report = execute(&["dedupe", "--merchant-id", "brand", "--dry-run"]);
     assert_eq!(report["dry_run"], true);
     assert_eq!(report["locations_before"], 1);
     assert_eq!(report["source_records"], 2);
-    assert_eq!(store.fingerprint().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(store.location_sources("brand").unwrap()).unwrap(),
+        before
+    );
     let report = execute(&["dedupe"]);
     assert_eq!(report["locations_after"], 1);
+}
+
+#[test]
+fn research_help_validation_and_missing_key_do_not_require_database() {
+    let help = run(&["research", "--help"], None);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(
+        text.contains("--create")
+            && text.contains("--country")
+            && text.contains("--json")
+            && text.contains("--details")
+    );
+    for (args, expected) in [
+        (vec!["research", ""], "description must contain"),
+        (
+            vec!["research", "CAFE", "--country", "Canada"],
+            "two-letter uppercase",
+        ),
+        (vec!["research", "CAFE"], "research requires OPENAI_API_KEY"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .args(args)
+            .env_remove("OPENAI_API_KEY")
+            .env("ULTRAFINANCE_DATABASE_URL", "postgresql://unused")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn database_open_launches_postgres_url_without_connecting_or_printing_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let capture = directory.path().join("arguments");
+    let launcher = directory.path().join(if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    });
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ULTRAFINANCE_OPEN_CAPTURE\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let execute = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .args(arguments)
+            .env("PATH", directory.path())
+            .env("ULTRAFINANCE_OPEN_CAPTURE", &capture)
+            .env_remove("ULTRAFINANCE_DATABASE_URL")
+            .output()
+            .unwrap()
+    };
+    let url = "postgresql://fixture:test%40password@localhost:12345/testdb?sslmode=require&application_name=fixture";
+    let output = execute(&["--database-url", url, "database", "open"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args = std::fs::read_to_string(&capture).unwrap();
+    assert_eq!(
+        args.lines().last().unwrap(),
+        url.replacen("postgresql://", "postgres://", 1)
+    );
+    let displayed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!displayed.contains("password"));
+    assert!(!displayed.contains("testdb"));
+    let output = execute(&["database", "open"]);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+        ultrafinance_core::store::LOCAL_DATABASE_URL.replacen("postgresql://", "postgres://", 1)
+    );
+    std::fs::remove_file(&capture).unwrap();
+    let output = execute(&[
+        "--database-url",
+        "https://fixture:testpassword@localhost/testdb",
+        "database",
+        "open",
+    ]);
+    assert!(!output.status.success());
+    assert!(!capture.exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("testpassword"));
+    std::fs::write(&launcher, "#!/bin/sh\necho \"$@\" >&2\nexit 1\n").unwrap();
+    let output = execute(&["--database-url", url, "database", "open"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("configure an application"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("password"));
 }

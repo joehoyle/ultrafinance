@@ -101,7 +101,6 @@ pub struct Report {
     pub started_at_unix: u64,
     pub suite: String,
     pub suite_fingerprint: String,
-    pub database_fingerprint: String,
     pub code_version: String,
     pub code_fingerprint: String,
     pub mode: Mode,
@@ -193,7 +192,6 @@ pub async fn run_with_progress(
     progress: Option<&std::sync::atomic::AtomicUsize>,
 ) -> Result<Report> {
     let suite = parse_suite(contents)?;
-    let database_fingerprint = store.fingerprint()?;
     let started_at_unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let enricher = if mode == Mode::Enrich {
         Some(Enricher::for_evaluation(
@@ -292,16 +290,12 @@ pub async fn run_with_progress(
             }
         }
     }
-    if store.fingerprint()? != database_fingerprint {
-        bail!("database changed during evaluation; rerun against an unchanged snapshot");
-    }
     let metrics = summarize(&results, mode);
     Ok(Report {
         report_version: 1,
         started_at_unix,
         suite: suite.name,
         suite_fingerprint: fingerprint(contents.as_bytes()),
-        database_fingerprint,
         code_version: env!("CARGO_PKG_VERSION").into(),
         code_fingerprint: fingerprint(
             concat!(
@@ -310,6 +304,8 @@ pub async fn run_with_progress(
                 include_str!("store.rs"),
                 include_str!("postgres_store.rs"),
                 include_str!("../migrations/001_postgres.sql"),
+                include_str!("../migrations/011_search_words.sql"),
+                include_str!("postgres_store/read_cache.rs"),
                 include_str!("search_score.rs"),
                 include_str!("regex_rules.rs"),
                 include_str!("import.rs"),

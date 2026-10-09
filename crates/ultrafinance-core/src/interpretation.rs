@@ -100,6 +100,7 @@ pub struct CatalogSupport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub geoname_ids: Vec<u32>,
     pub matched_name: String,
+    pub name_exact: bool,
     pub outlet: Option<OutletSupport>,
 }
 
@@ -114,7 +115,29 @@ pub struct OutletSupport {
     pub url: String,
 }
 
-/// Name equality and stored city equality support an interpretation, not trust.
+/// Partial names must account for every descriptor name token; shared geography
+/// alone must not promote unrelated businesses from the retrieval pool.
+pub(crate) fn supporting_name<'a>(merchant: &'a crate::Merchant, text: &str) -> Option<&'a String> {
+    let query = normalize(text);
+    std::iter::once(&merchant.name)
+        .chain(&merchant.aliases)
+        .find(|name| {
+            let known = normalize(name);
+            !query.is_empty()
+                && (query == known
+                    || query.split_whitespace().all(|token| {
+                        known.split_whitespace().any(|word| {
+                            token == word
+                                || token.chars().count() >= 4
+                                    && word.chars().count() >= 4
+                                    && rapidfuzz::fuzz::ratio(token.chars(), word.chars()) >= 0.8
+                        })
+                    }))
+        })
+}
+
+/// Name equality or retrieved-name plus stored city agreement support an
+/// interpretation, not trust. Fuzzy names require catalog location evidence.
 /// No geography is inferred from a suffix alone, or written back to the catalog.
 pub(crate) fn catalog_support(
     interpretation: &Interpretation,
@@ -126,9 +149,10 @@ pub(crate) fn catalog_support(
         .hypotheses
         .iter()
         .filter_map(|hypothesis| {
-            let name = std::iter::once(&merchant.name)
+            let name = supporting_name(merchant, &hypothesis.merchant_text)?;
+            let exact_name = std::iter::once(&merchant.name)
                 .chain(&merchant.aliases)
-                .find(|name| normalize(name) == normalize(&hypothesis.merchant_text))?;
+                .find(|name| normalize(name) == normalize(&hypothesis.merchant_text));
             let mut matching = outlets.iter().filter(|record| {
                 if record.location.city.is_none()
                     || country
@@ -185,12 +209,18 @@ pub(crate) fn catalog_support(
                     license: record.license.clone(),
                     url: record.url.clone(),
                 });
+            // Retrieved fuzzy names are candidates, not confirmed aliases.
+            // Include them only with independent, unambiguous location support.
+            if exact_name.is_none() && outlet.is_none() {
+                return None;
+            }
             Some(CatalogSupport {
                 merchant_text: hypothesis.merchant_text.clone(),
                 possible_location: hypothesis.possible_location.clone(),
                 location_hint: hypothesis.location_hint.clone(),
                 geoname_ids: hypothesis.geoname_ids.clone(),
-                matched_name: name.clone(),
+                matched_name: exact_name.unwrap_or(name).clone(),
+                name_exact: exact_name.is_some(),
                 outlet,
             })
         })

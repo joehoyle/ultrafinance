@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS merchant_redirects(retired_id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS merchant_merge_runs(id TEXT PRIMARY KEY, data TEXT NOT NULL);";
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS merchant_redirects(retired_id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL);";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -419,18 +419,17 @@ async fn run_at(
         bail!("dedupe threshold must be between 0.5 and 1");
     }
     let s = store.clone();
-    let (snapshot,pairs) = tokio::task::spawn_blocking(move || s.dedupe_candidates(max_pairs)).await??;
+    let (snapshot, pairs) =
+        tokio::task::spawn_blocking(move || s.dedupe_candidates(max_pairs)).await??;
     let mut report = evaluate(
         &snapshot, pairs, key, model, threshold, dry_run, max_pairs, endpoint,
     )
     .await?;
     if !dry_run && report.errors == 0 && !report.groups.is_empty() {
         eprintln!("Dedupe: applying {} merge groups", report.groups.len());
-        let audit = json!({"report":report,"before":snapshot});
         let groups = report.groups.clone();
         report.run_id = Some(
-            tokio::task::spawn_blocking(move || store.apply_dedupe(&snapshot, &groups, &audit))
-                .await??,
+            tokio::task::spawn_blocking(move || store.apply_dedupe(&snapshot, &groups)).await??,
         );
     }
     Ok(report)
@@ -798,7 +797,10 @@ pub async fn import_file(
     limit: Option<u32>,
     options: ImportOptions,
 ) -> Result<(ImportReport, usize, usize)> {
-    tokio::task::spawn_blocking(move || store.reconcile_file(path, limit, options.dry_run, options.chunk_size)).await?
+    tokio::task::spawn_blocking(move || {
+        store.reconcile_file(path, limit, options.dry_run, options.chunk_size)
+    })
+    .await?
 }
 
 async fn import_at(
@@ -806,8 +808,10 @@ async fn import_at(
     records: Vec<SourceRecord>,
     options: ImportOptions,
 ) -> Result<ImportReport> {
-    tokio::task::spawn_blocking(move || store.reconcile_import(records, options.dry_run, options.chunk_size)).await?
-
+    tokio::task::spawn_blocking(move || {
+        store.reconcile_import(records, options.dry_run, options.chunk_size)
+    })
+    .await?
 }
 
 pub(crate) fn validate_plan(
@@ -1009,27 +1013,31 @@ mod tests {
                     for phase in ["fresh", "refresh"] {
                         let start = std::time::Instant::now();
                         let delta = if streaming {
-                            import_file(db.clone(), path.clone(), None, ImportOptions {
-                                chunk_size: std::env::var("ULTRAFINANCE_IMPORT_BENCH_CHUNK_SIZE")
-                                    .ok().and_then(|v| v.parse().ok())
+                            import_file(
+                                db.clone(),
+                                path.clone(),
+                                None,
+                                ImportOptions {
+                                    chunk_size: std::env::var(
+                                        "ULTRAFINANCE_IMPORT_BENCH_CHUNK_SIZE",
+                                    )
+                                    .ok()
+                                    .and_then(|v| v.parse().ok())
                                     .unwrap_or(DEFAULT_IMPORT_CHUNK_SIZE),
-                                ..Default::default()
-                            })
-                                .await?
-                                .0
-                                .delta
+                                    ..Default::default()
+                                },
+                            )
+                            .await?
+                            .0
+                            .delta
                         } else {
                             let records = crate::datasets::read_selected_records(&path, None)?.0;
                             let snapshot = db.dedupe_snapshot()?;
                             let (staged, ids, touched) = stage(&snapshot, &records)?;
                             let report = deterministic_plan(&snapshot, &staged, &touched, false);
                             let groups = report.groups.clone();
-                            let audit =
-                                json!({"kind":"source-import","report":report,"before":snapshot});
-                            db.apply_reconciled_import(
-                                &snapshot, &staged, &records, &ids, &groups, &audit,
-                            )?
-                            .0
+                            db.apply_reconciled_import(&snapshot, &staged, &records, &ids, &groups)?
+                                .0
                         };
                         let elapsed = start.elapsed().as_secs_f64();
                         if phase == "fresh" {
@@ -1167,7 +1175,15 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let preview = import(db.clone(), records.clone(), ImportOptions { dry_run: true, ..Default::default() }).await?;
+        let preview = import(
+            db.clone(),
+            records.clone(),
+            ImportOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .await?;
         assert_eq!(preview.dedupe.groups.len(), 1);
         assert_eq!(preview.dedupe.groups[0].len(), 200);
         assert_eq!(preview.dedupe.decisions.len(), 199);
@@ -1275,7 +1291,15 @@ mod tests {
         b.merchant.logo_url = Some("https://uber.com/logo.png".into());
         b.merchant.logo_source = Some("test".into());
         let input = vec![a.clone(), b.clone()];
-        let preview = import_at(db.clone(), input.clone(), ImportOptions { dry_run: true, ..Default::default() }).await?;
+        let preview = import_at(
+            db.clone(),
+            input.clone(),
+            ImportOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .await?;
         assert_eq!(preview.dedupe.groups.len(), 1);
         assert_eq!(db.stats()?.total, 1);
         assert!(db.resolve_source("test", "a")?.is_none());
@@ -1405,15 +1429,8 @@ mod tests {
             "https://unrelated.test",
         ))?;
         assert!(
-            db.apply_reconciled_import(
-                &before,
-                &staged,
-                &incoming,
-                &ids,
-                &report.groups,
-                &json!({})
-            )
-            .is_err()
+            db.apply_reconciled_import(&before, &staged, &incoming, &ids, &report.groups,)
+                .is_err()
         );
         assert!(db.resolve_source("test", "g")?.is_none());
         Ok(())
@@ -1540,8 +1557,7 @@ mod tests {
         )?;
         db.import_locations(std::slice::from_ref(&outlet))?;
         let before = db.dedupe_snapshot()?;
-        let audit = json!({"before":before});
-        db.apply_dedupe(&before, &[vec![target.clone(), retired.clone()]], &audit)?;
+        db.apply_dedupe(&before, &[vec![target.clone(), retired.clone()]])?;
         assert_eq!(db.stats()?.total, 1);
         assert_eq!(db.resolve_source("test", "b")?, Some(target.clone()));
         assert_eq!(db.resolve_merchant_id(&retired)?, target);
@@ -1565,10 +1581,7 @@ mod tests {
         );
         assert!(merged.markets.contains(&"CA".into()));
         assert!(!db.search("BANK BRAND", None, 10)?[0].trusted);
-        assert!(
-            db.apply_dedupe(&before, &[vec![target, retired]], &audit)
-                .is_err()
-        );
+        assert!(db.apply_dedupe(&before, &[vec![target, retired]]).is_err());
         Ok(())
     }
     #[test]
@@ -1582,16 +1595,8 @@ mod tests {
         let a = db.resolve_source("test", "a")?.unwrap();
         let b = db.resolve_source("test", "b")?.unwrap();
         let c = db.resolve_source("test", "c")?.unwrap();
-        db.apply_dedupe(
-            &db.dedupe_snapshot()?,
-            &[vec![a.clone(), b.clone()]],
-            &json!({}),
-        )?;
-        db.apply_dedupe(
-            &db.dedupe_snapshot()?,
-            &[vec![c.clone(), a.clone()]],
-            &json!({}),
-        )?;
+        db.apply_dedupe(&db.dedupe_snapshot()?, &[vec![a.clone(), b.clone()]])?;
+        db.apply_dedupe(&db.dedupe_snapshot()?, &[vec![c.clone(), a.clone()]])?;
         assert_eq!(db.resolve_merchant_id(&b)?, c);
         assert_eq!(db.resolve_merchant_id(&a)?, c);
         db.put(&merchant("other", "Other", "https://other.example.com"))?;
@@ -1761,7 +1766,7 @@ mod tests {
         let before = db.dedupe_snapshot()?;
         let group = before.merchants.iter().map(|m| m.id.clone()).collect();
         db.put(&merchant("new", "New", "https://new.example.com"))?;
-        assert!(db.apply_dedupe(&before, &[group], &json!({})).is_err());
+        assert!(db.apply_dedupe(&before, &[group]).is_err());
         assert_eq!(db.stats()?.total, 3);
         Ok(())
     }

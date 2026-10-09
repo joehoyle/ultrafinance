@@ -1,7 +1,8 @@
 //! Synchronous store on a dedicated worker: postgres owns a Tokio runtime and
 //! must never be constructed or dropped on the API/CLI's async runtime threads.
 use super::{
-    Candidate, Merchant, MerchantPage, SourceRecord, excluded, normalize, rank_candidates, validate,
+    Candidate, Merchant, MerchantPage, SourceRecord, excluded_aliases, normalize, rank_candidates,
+    validate,
 };
 use super::{MerchantSourceStats, MerchantStats, STATS_SOURCES, STATS_TOTALS, location_reference};
 use crate::location::LocationRecord;
@@ -11,16 +12,23 @@ use postgres::{Client, GenericClient, IsolationLevel, Transaction};
 use postgres_native_tls::MakeTlsConnector;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
+#[path = "postgres_store/foursquare_locations.rs"]
+mod foursquare_locations;
 #[path = "postgres_store/import_bulk.rs"]
 mod import_bulk;
 #[path = "postgres_store/indexed_import.rs"]
 mod indexed_import;
-#[path = "postgres_store/foursquare_locations.rs"]
-mod foursquare_locations;
+#[path = "postgres_store/merchant_provenance.rs"]
+mod merchant_provenance;
+#[path = "postgres_store/read_cache.rs"]
+mod read_cache;
+#[cfg(test)]
+#[path = "postgres_store/read_cache_tests.rs"]
+mod read_cache_tests;
 #[path = "postgres_store/typed_sources.rs"]
 mod typed_sources;
 
@@ -28,6 +36,7 @@ type Job = Box<dyn FnOnce(Result<&mut Client>) + Send>;
 #[derive(Clone)]
 pub(super) struct PostgresStore(Arc<Worker>);
 struct Worker {
+    reads: Mutex<read_cache::ReadCache>,
     sender: Option<mpsc::Sender<Job>>,
     thread: Option<std::thread::JoinHandle<()>>,
     temporary: Option<TemporaryDatabase>,
@@ -182,7 +191,7 @@ impl PostgresStore {
                     if version <= 2 { migrate_markets(&mut tx)?; }
                     tx.batch_execute(crate::dedupe::SCHEMA)?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)?;
-                    if version > 9 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 11 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -208,12 +217,19 @@ impl PostgresStore {
                     if version < 9 {
                         tx.batch_execute(include_str!("../migrations/009_remove_market_evidence.sql"))?;
                     }
+                    if version < 10 {
+                        tx.batch_execute(include_str!("../migrations/010_remove_merge_audits.sql"))?;
+                    }
+                    if version < 11 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/011_search_words.sql"))?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 9 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 11 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -239,6 +255,7 @@ impl PostgresStore {
             .recv()
             .context("PostgreSQL worker stopped during startup")??;
         Ok(Self(Arc::new(Worker {
+            reads: Mutex::new(read_cache::ReadCache::default()),
             sender: Some(sender),
             thread: Some(thread),
             temporary,
@@ -259,23 +276,20 @@ impl PostgresStore {
             .map_err(|_| anyhow::anyhow!("PostgreSQL worker stopped"))?;
         receiver.recv().context("PostgreSQL worker stopped")?
     }
-    pub fn write_log(
+    pub fn write_logs(
         &self,
-        id: &str,
-        batch: &str,
-        status: &str,
-        merchant: Option<&str>,
-        data: &str,
+        entries: Vec<(String, String, String, Option<String>, String)>,
     ) -> Result<()> {
-        let (id, batch, status, merchant, data) = (
-            id.to_owned(),
-            batch.to_owned(),
-            status.to_owned(),
-            merchant.map(str::to_owned),
-            data.to_owned(),
-        );
+        if entries.is_empty() {
+            return Ok(());
+        }
         self.run(move |client| {
-            client.execute("INSERT INTO enrichment_log(id,batch_id,status,merchant_id,data,finished_at) VALUES($1,$2,$3,$4,$5,CASE WHEN $3='started' THEN NULL ELSE clock_timestamp() END) ON CONFLICT(id) DO UPDATE SET status=excluded.status,merchant_id=excluded.merchant_id,data=excluded.data,finished_at=excluded.finished_at", &[&id,&batch,&status,&merchant,&data])?;
+            let ids: Vec<_> = entries.iter().map(|r| &r.0).collect();
+            let batches: Vec<_> = entries.iter().map(|r| &r.1).collect();
+            let statuses: Vec<_> = entries.iter().map(|r| &r.2).collect();
+            let merchants: Vec<_> = entries.iter().map(|r| &r.3).collect();
+            let documents: Vec<_> = entries.iter().map(|r| &r.4).collect();
+            client.execute("INSERT INTO enrichment_log(id,batch_id,status,merchant_id,data,finished_at) SELECT id,batch_id,status,merchant_id,data,CASE WHEN status='started' THEN NULL ELSE clock_timestamp() END FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[]) AS rows(id,batch_id,status,merchant_id,data) ON CONFLICT(id) DO UPDATE SET status=excluded.status,merchant_id=excluded.merchant_id,data=excluded.data,finished_at=excluded.finished_at", &[&ids,&batches,&statuses,&merchants,&documents])?;
             Ok(())
         })
     }
@@ -323,19 +337,18 @@ impl PostgresStore {
         })
     }
     pub fn locations(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
+        Ok(self.cached_locations(merchant_id)?.as_ref().clone())
+    }
+    pub fn cached_locations(&self, merchant_id: &str) -> Result<Arc<Vec<LocationRecord>>> {
         let merchant_id = merchant_id.to_owned();
+        let owner = self.0.clone();
         self.run(move |client| {
             let mut tx = client
                 .build_transaction()
                 .isolation_level(IsolationLevel::RepeatableRead)
                 .read_only(true)
                 .start()?;
-            let records = location_rows(&mut tx, Some(&merchant_id))?
-                .into_iter()
-                .map(|(_, r)| r)
-                .collect();
-            let output =
-                crate::location_dedupe::consolidate(records, &location_redirects(&mut tx)?);
+            let output = owner.reads.lock().unwrap().outlets(&mut tx, &merchant_id)?;
             tx.commit()?;
             Ok(output)
         })
@@ -412,6 +425,14 @@ impl PostgresStore {
             client.query("SELECT merchant_id,data FROM source_records_documents WHERE source=$1 AND ($2::text IS NULL OR external_id=$2) ORDER BY external_id LIMIT $3 OFFSET $4", &[&source,&external_id,&limit,&offset])?.into_iter().map(|row| {
                 Ok(serde_json::json!({"merchant_id": row.get::<_,String>(0), "record": serde_json::from_str::<serde_json::Value>(&row.get::<_,String>(1))?}))
             }).collect()
+        })
+    }
+    pub fn merchant_provenance(&self, id: &str) -> Result<Vec<SourceRecord>> {
+        let id = id.to_owned();
+        self.run(move |c| {
+            Ok(merchant_provenance::read(c, std::slice::from_ref(&id))?
+                .remove(&id)
+                .unwrap_or_default())
         })
     }
     pub fn import(&self, records: &[SourceRecord]) -> Result<super::ImportDelta> {
@@ -560,9 +581,8 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         &self,
         expected: &crate::dedupe::Snapshot,
         groups: &[Vec<String>],
-        audit: &serde_json::Value,
     ) -> Result<String> {
-        let (expected, groups, audit) = (expected.clone(), groups.to_vec(), audit.clone());
+        let (expected, groups) = (expected.clone(), groups.to_vec());
         self.run(move |client| {
             let mut tx = client.transaction()?;
             write_lock(&mut tx)?;
@@ -573,7 +593,6 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             let current = postgres_snapshot_for_ids(&mut tx, &ids)?;
             crate::dedupe::validate_plan(&expected, &current, &groups)?;
             let run_id = uuid::Uuid::new_v4().to_string();
-            tx.execute("INSERT INTO merchant_merge_runs VALUES($1,$2)", &[&run_id,&serde_json::to_string(&audit)?])?;
             merge_groups(&mut tx, &groups)?;
             tx.commit()?;
             Ok(run_id)
@@ -585,7 +604,9 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         dry_run: bool,
         chunk_size: usize,
     ) -> Result<crate::dedupe::ImportReport> {
-        if chunk_size == 0 { bail!("import chunk size must be greater than zero"); }
+        if chunk_size == 0 {
+            bail!("import chunk size must be greater than zero");
+        }
         self.run(move |client| {
             let mut tx = import_transaction(client)?;
             write_lock(&mut tx)?;
@@ -616,7 +637,9 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         dry_run: bool,
         chunk_size: usize,
     ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
-        if chunk_size == 0 { bail!("import chunk size must be greater than zero"); }
+        if chunk_size == 0 {
+            bail!("import chunk size must be greater than zero");
+        }
         self.run(move |client| {
             let total = crate::datasets::count_records(&path)?;
             let selected_total = limit.map_or(total, |n| total.min(n as usize));
@@ -642,15 +665,13 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         records: &[SourceRecord],
         identities: &[String],
         groups: &[Vec<String>],
-        audit: &serde_json::Value,
     ) -> Result<(super::ImportDelta, Option<String>)> {
-        let (expected, staged, records, identities, groups, audit) = (
+        let (expected, staged, records, identities, groups) = (
             expected.clone(),
             staged.clone(),
             records.to_vec(),
             identities.to_vec(),
             groups.to_vec(),
-            audit.clone(),
         );
         if records.len() != identities.len() {
             bail!("invalid import identity plan");
@@ -678,7 +699,6 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             let delta = import_records(&mut tx, &records, Some(&identities), Some(&expected))?;
             let run_id = if groups.is_empty() { None } else {
                 let run_id = uuid::Uuid::new_v4().to_string();
-                tx.execute("INSERT INTO merchant_merge_runs VALUES($1,$2)", &[&run_id,&serde_json::to_string(&audit)?])?;
                 merge_groups(&mut tx, &persisted_groups)?;
                 Some(run_id)
             };
@@ -686,18 +706,6 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             tx.commit()?;
             eprintln!("Import: committed — {} added, {} updated, {} unchanged", delta.added, delta.updated, delta.unchanged);
             Ok((delta, run_id))
-        })
-    }
-    pub fn fingerprint(&self) -> Result<String> {
-        self.run(|client| {
-            let mut tx = client
-                .build_transaction()
-                .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()?;
-            let fingerprint = fingerprint(&mut tx)?;
-            tx.commit()?;
-            Ok(fingerprint)
         })
     }
     pub fn stats(&self) -> Result<MerchantStats> {
@@ -779,58 +787,105 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         }
         let country = country.map(str::to_owned);
         let description = description.to_owned();
+        let owner = self.0.clone();
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
-            let exact = tx.query("SELECT m.data FROM merchants_documents m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
+            let exact = tx.query("SELECT m.id,m.name,m.aliases_json,m.markets_json FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
             for row in exact {
-                add_candidate(&mut tx, &mut found, row.get(0), &query, true, None, &mut scorer)?;
+                add_candidate(&mut found, &row, true, None, &mut scorer)?;
             }
             let mut matches: HashMap<String, usize> = HashMap::new();
-            for row in tx.query("SELECT s.merchant_id,s.transaction_pattern FROM source_records s JOIN merchants m ON m.id=s.merchant_id WHERE s.source='open-enrichment' AND coalesce(s.parent_id,'')='' AND s.transaction_pattern IS NOT NULL", &[])? {
-                let id: String = row.get(0);
-                if let Some(length) = crate::regex_rules::match_length(row.get(1), &description) {
-                    matches.entry(id).and_modify(|v| *v = (*v).max(length)).or_insert(length);
+            let rules = owner.reads.lock().unwrap().rules(&mut tx)?;
+            for (id, pattern) in rules.iter() {
+                if let Some(length) = pattern.match_length(&description) {
+                    matches.entry(id.clone()).and_modify(|v| *v = (*v).max(length)).or_insert(length);
                 }
             }
             for (id, length) in matches {
                 if !found.contains_key(&id) {
-                    let row = tx.query_one("SELECT data FROM merchants_documents WHERE id=$1", &[&id])?;
-                    add_candidate(&mut tx, &mut found, row.get(0), &query, false, Some(length), &mut scorer)?;
+                    let row = tx.query_one("SELECT id,name,aliases_json,markets_json FROM merchants WHERE id=$1", &[&id])?;
+                    add_candidate(&mut found, &row, false, Some(length), &mut scorer)?;
                 }
                 if let Some(candidate) = found.get_mut(&id) { candidate.regex_match_length = Some(length); }
             }
             let tokens: Vec<_> = query.split_whitespace().filter(|t| t.chars().count()>=3).take(16).collect();
-            let expression = tokens.iter().map(|t| format!("'{t}':*")).collect::<Vec<_>>().join(" | ");
-            if !expression.is_empty() {
-                for row in tx.query("SELECT m.data FROM merchant_search s JOIN merchants_documents m ON m.id=s.merchant_id WHERE s.tokens @@ to_tsquery('simple',$1) ORDER BY ts_rank(s.tokens,to_tsquery('simple',$1)) DESC,m.id LIMIT 100", &[&expression])? {
-                    add_candidate(&mut tx,&mut found,row.get(0),&query,false,None,&mut scorer)?;
+            let terms: Vec<_> = tokens.iter().map(|t| format!("'{t}'")).collect();
+            // Bound each word independently: common words must not crowd rare
+            // ones out before Rust scores merchant names. A post-sort LIMIT alone
+            // does not bound work on a million-row catalog.
+            if !terms.is_empty() {
+                for row in tx.query(
+                    "SELECT m.id,m.name,m.aliases_json,m.markets_json FROM (
+                        SELECT DISTINCT pool.merchant_id
+                        FROM unnest($1::text[]) term(query)
+                        CROSS JOIN LATERAL (
+                            SELECT merchant_id FROM merchant_search
+                            WHERE tokens @@ to_tsquery('simple',term.query)
+                            LIMIT 100
+                        ) pool
+                    ) s JOIN merchants m ON m.id=s.merchant_id",
+                    &[&terms],
+                )? {
+                    add_candidate(&mut found,&row,false,None,&mut scorer)?;
                 }
             }
-            // Match the existing substring-trigram candidate generation. Each
-            // LIKE predicate uses pg_trgm's GIN index; Rust retains final scoring.
-            let mut grams = HashSet::new();
-            for token in tokens {
-                let chars: Vec<_> = token.chars().collect();
-                for window in chars.windows(3) {
-                    if grams.len()<64 { grams.insert(window.iter().collect::<String>()); }
+            // Fuzzy-match the much smaller word vocabulary, then retrieve IDs
+            // through the full-text index. Each word contributes a bounded pool.
+            // Store numbers and dates are not spelling evidence for a brand.
+            let fuzzy_tokens: Vec<_> = tokens.iter().copied()
+                .filter(|token| token.chars().any(char::is_alphabetic)).collect();
+            let fuzzy_words = owner.reads.lock().unwrap().fuzzy_words(&mut tx, &fuzzy_tokens)?;
+            if !fuzzy_words.is_empty() {
+                for row in tx.query(
+                    "SELECT m.id,m.name,m.aliases_json,m.markets_json FROM (
+                        SELECT DISTINCT pool.merchant_id
+                        FROM unnest($1::text[]) words(word)
+                        CROSS JOIN LATERAL (
+                            SELECT merchant_id FROM merchant_search
+                            WHERE tokens @@ plainto_tsquery('simple',words.word)
+                            LIMIT 32
+                        ) pool
+                    ) s JOIN merchants m ON m.id=s.merchant_id",
+                    &[&fuzzy_words],
+                )? {
+                    add_candidate(&mut found,&row,false,None,&mut scorer)?;
                 }
             }
-            let mut patterns: Vec<String> = grams.into_iter().map(|g| format!("%{g}%")).collect();
-            patterns.sort();
-            if !patterns.is_empty() {
-                let clauses = (0..patterns.len()).map(|i| format!("s.text LIKE ${}",i+1)).collect::<Vec<_>>().join(" OR ");
-                let sql = format!("SELECT m.data FROM merchant_search s JOIN merchants_documents m ON m.id=s.merchant_id WHERE ({clauses}) ORDER BY similarity(s.text,${}) DESC,m.id LIMIT 100",patterns.len()+1);
-                let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
-                for pattern in &patterns { params.push(pattern); }
-                params.push(&query);
-                for row in tx.query(&sql,&params)? {
-                    add_candidate(&mut tx,&mut found,row.get(0),&query,false,None,&mut scorer)?;
+            // Trust and negative aliases affect eligibility/ranking. Read only
+            // those fields for the retrieval pool, then hydrate the shortlist.
+            let ids: Vec<_> = found.keys().cloned().collect();
+            for row in tx.query("SELECT data FROM manual_merchants_documents WHERE id=ANY($1)", &[&ids])? {
+                let manual: Merchant = serde_json::from_str(row.get(0))?;
+                if let Some(candidate) = found.get_mut(&manual.id) {
+                    candidate.trusted = std::iter::once(&manual.name).chain(&manual.aliases)
+                        .any(|name| normalize(name) == query);
                 }
+            }
+            for row in tx.query("SELECT merchant_id,negative_aliases FROM source_records WHERE merchant_id=ANY($1) AND cardinality(negative_aliases)>0", &[&ids])? {
+                let id: String = row.get(0);
+                let aliases: Vec<String> = row.get(1);
+                if found.get(&id).is_some_and(|c| !c.trusted)
+                    && excluded_aliases(&query, aliases.iter().map(String::as_str)) {
+                    found.remove(&id);
+                }
+            }
+            let mut shortlisted = rank_candidates(found, limit, country.as_deref());
+            let ids: Vec<_> = shortlisted.iter().map(|c| c.merchant.id.clone()).collect();
+            let mut merchants: HashMap<String, Merchant> = tx
+                .query("SELECT id,data FROM merchants_documents WHERE id=ANY($1)", &[&ids])?
+                .into_iter()
+                .map(|row| Ok((row.get(0), serde_json::from_str(row.get(1))?)))
+                .collect::<Result<_>>()?;
+            let mut sources = merchant_provenance::read(&mut tx, &ids)?;
+            for candidate in &mut shortlisted {
+                candidate.merchant = merchants.remove(&candidate.merchant.id)
+                    .context("shortlisted merchant disappeared within its snapshot")?;
+                candidate.provenance = sources.remove(&candidate.merchant.id).unwrap_or_default();
             }
             tx.commit()?;
-            Ok(rank_candidates(found, limit, country.as_deref()))
+            Ok(shortlisted)
         })
     }
 }
@@ -862,16 +917,10 @@ fn write_lock(tx: &mut Transaction<'_>) -> Result<()> {
     tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&WRITE_LOCK])?;
     Ok(())
 }
-fn source_records(c: &mut impl GenericClient, id: &str) -> Result<Vec<SourceRecord>> {
-    Ok(c.query(
-        "SELECT data FROM source_records_documents WHERE merchant_id=$1 ORDER BY source,external_id",
-        &[&id],
-    )?
-    .iter()
-    .map(|r| serde_json::from_str(r.get::<_, &str>(0)))
-    .collect::<std::result::Result<_, _>>()?)
-}
-fn postgres_markets(tx: &mut impl GenericClient, ids: Option<&[String]>) -> Result<MarketCountries> {
+fn postgres_markets(
+    tx: &mut impl GenericClient,
+    ids: Option<&[String]>,
+) -> Result<MarketCountries> {
     let mut index = MarketCountries::default();
     let filter = |column: &str| {
         if ids.is_some() {
@@ -885,10 +934,7 @@ fn postgres_markets(tx: &mut impl GenericClient, ids: Option<&[String]>) -> Resu
         filter("id")
     );
     for row in tx.query(&manual_sql, &[&ids])? {
-        index.declaration(
-            row.get(0),
-            &serde_json::from_str(row.get::<_, &str>(1))?,
-        );
+        index.declaration(row.get(0), &serde_json::from_str(row.get::<_, &str>(1))?);
     }
     for input in typed_sources::read(tx, ids)? {
         index.source_fields(
@@ -921,15 +967,23 @@ fn postgres_market_outlets(
 }
 
 fn add_candidate(
-    tx: &mut Transaction<'_>,
     found: &mut HashMap<String, Candidate>,
-    data: &str,
-    query: &str,
+    row: &postgres::Row,
     exact: bool,
     regex_match_length: Option<usize>,
     scorer: &mut crate::search_score::Scorer<'_>,
 ) -> Result<()> {
-    let merchant: Merchant = serde_json::from_str(data)?;
+    // Rank with just identity, names and markets; hydrate the final shortlist.
+    let merchant = Merchant {
+        id: row.get(0),
+        name: row.get(1),
+        aliases: serde_json::from_str(row.get(2))?,
+        markets: serde_json::from_str(row.get(3))?,
+        website: None,
+        logo_url: None,
+        logo_source: None,
+        sources: vec![],
+    };
     if found.contains_key(&merchant.id) {
         return Ok(());
     }
@@ -944,22 +998,6 @@ fn add_candidate(
     if score < 0.35 {
         return Ok(());
     }
-    let manual = tx
-        .query_opt(
-            "SELECT data FROM manual_merchants_documents WHERE id=$1",
-            &[&merchant.id],
-        )?
-        .map(|r| serde_json::from_str::<Merchant>(r.get::<_, &str>(0)))
-        .transpose()?;
-    let trusted = manual.is_some_and(|m| {
-        std::iter::once(&m.name)
-            .chain(m.aliases.iter())
-            .any(|n| normalize(n) == query)
-    });
-    let provenance = source_records(tx, &merchant.id)?;
-    if excluded(query, &provenance) && !trusted {
-        return Ok(());
-    }
     found.insert(
         merchant.id.clone(),
         Candidate {
@@ -970,8 +1008,8 @@ fn add_candidate(
             score,
             exact,
             regex_match_length,
-            trusted,
-            provenance,
+            trusted: false,
+            provenance: vec![],
         },
     );
     Ok(())
@@ -1055,12 +1093,21 @@ fn rebuild_with_market_refresh(
 
 fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> Result<()> {
     if ids.is_none() {
-        let mut after=String::new();
+        let mut after = String::new();
         loop {
-            let batch:Vec<String>=c.query("SELECT id FROM merchants WHERE id>$1 ORDER BY id LIMIT 1000",&[&after])?.into_iter().map(|r|r.get(0)).collect();
-            if batch.is_empty() {return Ok(());}
-            after=batch.last().unwrap().clone();
-            refresh_market_lookup(c,Some(&batch))?;
+            let batch: Vec<String> = c
+                .query(
+                    "SELECT id FROM merchants WHERE id>$1 ORDER BY id LIMIT 1000",
+                    &[&after],
+                )?
+                .into_iter()
+                .map(|r| r.get(0))
+                .collect();
+            if batch.is_empty() {
+                return Ok(());
+            }
+            after = batch.last().unwrap().clone();
+            refresh_market_lookup(c, Some(&batch))?;
         }
     }
     let index = postgres_markets(c, ids)?;
@@ -1073,7 +1120,9 @@ fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> 
             .collect(),
     };
     for id in ids {
-        if let Some(row) = c.query_opt("SELECT data FROM merchants_documents WHERE id=$1", &[&id])? {
+        if let Some(row) =
+            c.query_opt("SELECT data FROM merchants_documents WHERE id=$1", &[&id])?
+        {
             let merchant: Merchant = serde_json::from_str(row.get(0))?;
             let markets = serde_json::to_string(&index.hydrate(merchant).markets)?;
             c.execute("UPDATE merchants SET markets_json=$2 WHERE id=$1 AND markets_json IS DISTINCT FROM $2", &[&id,&markets])?;
@@ -1081,53 +1130,6 @@ fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> 
     }
 
     Ok(())
-}
-
-fn fingerprint(tx: &mut Transaction<'_>) -> Result<String> {
-    use postgres::fallible_iterator::FallibleIterator;
-    let mut hash=0xcbf29ce484222325u64;
-    let mut feed=|bytes:&[u8]| {
-        for byte in bytes.iter().copied().chain(std::iter::once(0)) {
-            hash^=u64::from(byte);hash=hash.wrapping_mul(0x100000001b3);
-        }
-    };
-    for sql in [
-        "SELECT data FROM merchants_documents ORDER BY id",
-        "SELECT data FROM manual_merchants_documents ORDER BY id",
-        "SELECT data,merchant_id FROM source_records_documents ORDER BY source,external_id",
-        "SELECT data FROM location_records_documents ORDER BY source,external_id",
-    ] {
-        let mut rows=tx.query_raw(sql,std::iter::empty::<&str>())?;
-        while let Some(row)=rows.next()? {
-            for column in 0..row.len() {
-                let value: String = row.get(column);
-                let value = if column == 0 {
-                    crate::columns::canonical_document(&value)?
-                } else {
-                    value
-                };
-                feed(value.as_bytes());
-            }
-        }
-    }
-    let exists: bool = tx
-        .query_one(
-            "SELECT to_regclass('public.descriptor_resolutions') IS NOT NULL",
-            &[],
-        )?
-        .get(0);
-    if exists {
-        let mut rows=tx.query_raw("SELECT data FROM descriptor_resolution_documents ORDER BY id",std::iter::empty::<&str>())?;
-        while let Some(row)=rows.next()? {
-            let data: String = row.get(0);
-            feed(crate::columns::canonical_document(&data)?.as_bytes());
-        }
-    }
-    let mut rows=tx.query_raw("SELECT retired_id,location_id FROM location_redirects ORDER BY retired_id",std::iter::empty::<&str>())?;
-    while let Some(row)=rows.next()? {
-        feed(row.get::<_,&str>(0).as_bytes());feed(row.get::<_,&str>(1).as_bytes());
-    }
-    Ok(format!("fnv1a64:{hash:016x}"))
 }
 
 fn import_transaction(client: &mut Client) -> Result<Transaction<'_>> {
@@ -1307,7 +1309,9 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
         progress.advance(completed);
     }
     progress.finish();
-    for group in groups { reconcile_locations(tx, Some(&group[0]), false)?; }
+    for group in groups {
+        reconcile_locations(tx, Some(&group[0]), false)?;
+    }
     Ok(())
 }
 
@@ -1335,7 +1339,17 @@ fn location_rows(
     c: &mut impl GenericClient,
     merchant_id: Option<&str>,
 ) -> Result<Vec<(String, LocationRecord)>> {
-    c.query("SELECT COALESCE(l.merchant_id,s.merchant_id),l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE ($1::text IS NULL OR COALESCE(l.merchant_id,s.merchant_id)=$1) ORDER BY l.id", &[&merchant_id])?.into_iter().map(|r|Ok((r.get(0),serde_json::from_str(r.get::<_,&str>(1))?))).collect()
+    // Filter each reference type before combining them so merchant-scoped
+    // lookups use the existing indexes instead of joining the entire catalog.
+    let sql = if merchant_id.is_some() {
+        "SELECT merchant_id,data FROM (SELECT l.id,l.merchant_id,l.data FROM location_records_documents l WHERE l.merchant_id=$1 UNION ALL SELECT l.id,s.merchant_id,l.data FROM source_records s JOIN location_records_documents l ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE s.merchant_id=$1 AND l.merchant_id IS NULL) outlets ORDER BY id"
+    } else {
+        "SELECT COALESCE(l.merchant_id,s.merchant_id),l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE $1::text IS NULL ORDER BY l.id"
+    };
+    c.query(sql, &[&merchant_id])?
+        .into_iter()
+        .map(|r| Ok((r.get(0), serde_json::from_str(r.get::<_, &str>(1))?)))
+        .collect()
 }
 fn reconcile_locations(
     tx: &mut Transaction<'_>,
@@ -1345,23 +1359,16 @@ fn reconcile_locations(
     if !dry_run {
         tx.batch_execute(crate::location_dedupe::SCHEMA).context("cannot initialize outlet identity tables; run database init with a schema-owner connection")?;
     }
-    if !dry_run {
-        tx.execute("DELETE FROM location_redirects WHERE retired_id IN (SELECT d.retired_id FROM location_redirects d JOIN location_records a ON a.id=d.retired_id JOIN location_records b ON b.id=d.location_id LEFT JOIN source_records sa ON sa.source=a.merchant_source AND sa.external_id=a.merchant_external_id LEFT JOIN source_records sb ON sb.source=b.merchant_source AND sb.external_id=b.merchant_external_id WHERE COALESCE(a.merchant_id,sa.merchant_id) IS DISTINCT FROM COALESCE(b.merchant_id,sb.merchant_id))", &[])?;
-    }
+    let removed = if !dry_run {
+        tx.execute("DELETE FROM location_redirects WHERE retired_id IN (SELECT d.retired_id FROM location_redirects d JOIN location_records a ON a.id=d.retired_id JOIN location_records b ON b.id=d.location_id LEFT JOIN source_records sa ON sa.source=a.merchant_source AND sa.external_id=a.merchant_external_id LEFT JOIN source_records sb ON sb.source=b.merchant_source AND sb.external_id=b.merchant_external_id WHERE COALESCE(a.merchant_id,sa.merchant_id) IS DISTINCT FROM COALESCE(b.merchant_id,sb.merchant_id))", &[])?
+    } else {
+        0
+    };
     let records = location_rows(tx, merchant_id)?;
     let redirects = location_redirects(tx)?;
     let mut report = crate::location_dedupe::plan(&records, &redirects, dry_run);
     if !dry_run && !report.groups.is_empty() {
         let run_id = uuid::Uuid::new_v4().to_string();
-        tx.execute(
-            "INSERT INTO location_merge_runs VALUES($1,$2)",
-            &[
-                &run_id,
-                &serde_json::to_string(
-                    &serde_json::json!({"report":report,"before":records,"redirects":redirects}),
-                )?,
-            ],
-        )?;
         for group in &report.groups {
             let target = &group[0];
             for retired in &group[1..] {
@@ -1373,6 +1380,11 @@ fn reconcile_locations(
             }
         }
         report.run_id = Some(run_id);
+    }
+    if !dry_run && (removed > 0 || !report.groups.is_empty()) {
+        // Redirect-only dedupe does not touch a table with a revision trigger.
+        // Other connections must still invalidate their cached outlet identities.
+        tx.execute("UPDATE catalog_revision SET revision=revision+1", &[])?;
     }
     Ok(report)
 }
@@ -1451,7 +1463,10 @@ fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe:
         locations: data(c, "SELECT data FROM location_records_documents ORDER BY id")?,
         redirects,
         location_redirects: location_redirects(c)?.into_iter().collect(),
-        revision: Some(c.query_one("SELECT revision FROM catalog_revision", &[])?.get(0)),
+        revision: Some(
+            c.query_one("SELECT revision FROM catalog_revision", &[])?
+                .get(0),
+        ),
     })
 }
 
@@ -1459,6 +1474,35 @@ fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe:
 mod connection_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()> {
+        let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+        let lease = PostgresStore::temporary(&base)?;
+        let url = lease.temporary_url().unwrap().to_owned();
+        lease.run(|client| {
+            assert!(client.query_one(
+                "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
+                &[],
+            )?.get::<_, bool>(0));
+            client.batch_execute("CREATE TABLE merchant_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); CREATE TABLE location_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); INSERT INTO merchant_merge_runs VALUES('merchant-audit','{}'); INSERT INTO location_merge_runs VALUES('location-audit','{}'); INSERT INTO merchant_redirects VALUES('retired','survivor'); UPDATE ultrafinance_schema SET version=9")?;
+            Ok(())
+        })?;
+        assert!(PostgresStore::connect(&url, false).is_err());
+        let upgraded = PostgresStore::connect(&url, true)?;
+        assert_eq!(upgraded.resolve_merchant_id("retired")?, "survivor");
+        // Reinitialization must not recreate either audit table.
+        let initialized = PostgresStore::connect(&url, true)?;
+        initialized.run(|client| {
+            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 11);
+            assert!(client.query_one(
+                "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
+                &[],
+            )?.get::<_, bool>(0));
+            Ok(())
+        })
+    }
 
     #[test]
     fn version_eight_legacy_views_are_migrated_before_import() -> Result<()> {
@@ -1574,7 +1618,7 @@ mod connection_tests {
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get(0);
             assert_eq!(
-                version, 9,
+                version, 11,
                 "market migration must run before application use"
             );
             let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
