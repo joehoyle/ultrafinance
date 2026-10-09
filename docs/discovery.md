@@ -117,7 +117,7 @@ are followed when a mapping is retrieved.
 
 ## Database rollout
 
-PostgreSQL requires schema version 4: run
+PostgreSQL requires schema version 6: run
 `database init` with a schema-owner connection before running this version. The
 mapping fields are columns with a merchant foreign key; variable extra context
 and provenance remain JSON. Grant the runtime role the required table and view

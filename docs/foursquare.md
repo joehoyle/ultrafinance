@@ -1,7 +1,8 @@
 # Foursquare merchant imports
 
-Import a filtered Foursquare OS Places CSV export as merchant knowledge. No
-location records, descriptor aliases, matching regexes or logos are generated.
+Import a filtered Foursquare OS Places CSV export as merchant and outlet knowledge.
+Eligible places with a usable street address and country also create linked
+location records. No merchant descriptor aliases, matching regexes or logos are generated.
 Foursquare fills business coverage gaps; it supplies no transaction ground truth.
 
 ## Export and prepare
@@ -49,13 +50,24 @@ downloaded places to a positive integer, ordered by place ID. Metadata records
 the country and whether a cap was requested. There is no fixed export size or
 time limit. The importer further excludes unsuitable rows.
 
-The current pipeline loads the CSV and prepared records into memory; large
-regional/global imports require substantial memory and disk space. This removes
-the pilot caps but does not make the pipeline streaming. Use an explicit
-`--foursquare-limit` for smaller trials. Limited exports can have incomplete brand
-membership, so heed the refresh limitations below. Manually exported CSVs remain
-supported through `--input`. Cached downloads work without a token or DuckDB using
-`--offline`. The separate `--limit` flag caps records reconciled into the database,
+Downloads retain DuckDB's CSV on disk. Default preparation without reviewed
+brand mappings reads CSV incrementally and sorts 5,000-row runs on disk, merging
+at most 64 runs at once. Applying knowledge streams chunks of 5,000 source
+records by default. `--chunk-size 10000` changes the import bound (positive values
+only); larger chunks use more memory. For example:
+
+```sh
+cargo run -- sources import foursquare --region ca --offline --chunk-size 10000
+```
+
+Each chunk is reconciled against the database identity index; it never loads the merchant catalog.
+Disk space is still required for downloads, sorting and prepared bundles.
+Reviewed brand grouping currently retains its original in-memory preparation.
+Use `--foursquare-limit` for smaller trials. Limited exports can have incomplete
+brand membership, so heed the refresh limitations below. Manually exported CSVs
+remain supported through `--input`. Cached downloads work without a token or
+DuckDB using `--offline`.
+The separate `--limit` flag caps records reconciled into the database,
 not places downloaded.
 
 Required columns are `fsq_place_id`, `name`, `country`, `fsq_category_ids`, and
@@ -65,7 +77,7 @@ Optional fields include `website`, `unresolved_flags`, `fsq_category_labels`,
 address/geography and source refresh dates. Only absolute HTTP(S) URLs without
 credentials are used as merchant websites. Invalid upstream websites are omitted
 from merchant fields, with the original value and validation marker retained in
-source evidence; they do not reject the merchant or abort the import. Explicit
+the prepared bundle; they do not reject the merchant or abort the import. Explicit
 reviewed brand websites remain strictly validated.
 See the [source schema](https://docs.foursquare.com/data-products/docs/places-os-data-schema).
 
@@ -108,7 +120,7 @@ transaction sample files do not constitute an accuracy benchmark.
 
 Replace the example IDs and evidence with reviewed facts. This creates one source
 record `foursquare/brand:starbucks`; contributing place IDs and selected source
-fields remain in its raw provenance. The brand name is the supplied reviewed
+fields remain in the prepared bundle. The brand name is the supplied reviewed
 name, not a name guessed by stripping a locality. Brand IDs must remain stable.
 One place cannot belong to multiple brands. Membership listed outside the current
 export is allowed, so the same review file can serve multiple country exports.
@@ -121,7 +133,13 @@ accents and punctuation are normalized. Shared platforms and directory domains
 are excluded. Import performs no fuzzy pair scan and makes no Jev requests;
 uncertain identities remain separate.
 Accepted matches share a local merchant ID and retain all their source records.
-A shared name or website alone does not trigger an automatic merge.
+When both websites are absent or blank, identical complete normalized names
+also merge. This rule normalizes case, accents, punctuation and whitespace,
+but does not strip legal suffixes, use aliases or infer a chain from a partial
+name. Blank websites do not match populated websites, and conflicting manual
+identities remain separate. This intentionally groups same-name businesses with
+no websites even when their addresses or countries differ; all original source
+identities are retained. A shared website alone does not trigger an automatic merge.
 
 ## Apply and refresh
 
@@ -130,48 +148,50 @@ A shared name or website alone does not trigger an automatic merge.
 cargo run -- sources import foursquare --region ca --offline
 # Reconcile at most 1,000 prepared merchant source records.
 cargo run -- sources import foursquare --region ca --offline --limit 1000
-# Inspect retained source evidence.
+# Inspect retained merchant inputs and source metadata.
 cargo run -- sources records foursquare --external-id brand:starbucks
 ```
 
 Existing source keys preserve local merchant IDs and manual corrections. Apply
 compares incoming records with the catalog and each other, including across
-sources. Merges combine aliases, markets and metadata, preserve raw place evidence,
+sources. Merges combine aliases, markets and metadata, retain source links and matching inputs,
 and redirect retired IDs and location/resolution references. Existing IDs take
 precedence over new IDs; conflicting manual identities remain separate.
 
 Import requires no provider credentials. `--dedupe-dry-run` previews deterministic
 decisions against the database without applying records or merges. Plain
 `--dry-run` still only prepares the bundle and needs neither a database nor Jev.
-Concurrent catalog changes prevent the whole import from committing.
-`merchants dedupe` is a separate operation for provider-assisted fuzzy review;
-`merchants link` remains available for reviewed links.
+Competing writers are serialized for the import transaction. Each chunk checks
+existing indexed merchant identities and groups its own incoming duplicates.
+Later chunks reuse earlier matches. A preview runs this same pipeline and rolls
+back. Duplicate source keys or malformed JSON discovered late also roll back
+every earlier chunk. Reconciliation details returned in JSON are capped at
+5,000 records/decisions with `details_truncated`; total counts remain complete,
+and database audit records retain the full bounded merge decisions.
+Import progress on stderr starts with an exact count of the prepared bundle
+and the selected total after `--limit`. Counting uses a bounded streaming pass
+before opening the database write transaction, so edited bundles are counted
+correctly. During application, one terminal line tracks progress across all
+selected source records, elapsed time, average rate, estimated time remaining,
+and cumulative locations submitted for upsert. The current stage updates this
+same line; chunk percentages and per-chunk summaries are hidden. Redirected
+stderr receives periodic overall summaries instead of terminal escape codes.
+The rebuild stage now reports source input reads, existing outlet country reads,
+canonical identity writes, alias writes, and search writes separately.
+Use `sources import ... --verbose` for detailed timings for each phase. A final
+commit message confirms persistence; processing completion alone does not mean
+the transaction has committed. Preparation uses separate phase progress before
+application starts.
 
-The shared `--limit X` flag selects the first X prepared merchant source records
-before reconciliation, including existing matches and updates. It works with
-cached or file input and leaves the full snapshot and bundle intact. Brand
-grouping happens before selection, so each selected brand retains all its
-prepared place evidence. Repeating the same limit selects the same prefix.
-`--foursquare-limit` separately caps downloaded places. `--limit` does not reduce
-download or first-time preparation work. Repeat imports reuse an existing bundle
-when the snapshot, reviewed mappings, region and adapter version match, retaining
-edits to saved knowledge. Limited imports scan that bundle but allocate only the
-selected source records. For a 10,000-record trial using an existing download:
+Source writes and merchant/search rebuilding use binary COPY and set-based SQL
+in batches of 5,000, within one atomic transaction. Merchants store their operating
+countries directly in `markets`; imports do not write or reconcile separate
+country-evidence records. Search rows and identity keys update only when their
+indexed values change. New merchants skip deletion of old alias rows.
 
-```sh
-cargo run -- sources import foursquare --region ca --offline --limit 10000
-```
-
-Each input must contain complete membership for every brand included in that
-import. A later subset for the same brand replaces its source evidence rather
-than appending to it; combine country subsets before applying a global brand.
-Imports are additive/updating: omitted and newly closed places do not delete
-previous records. Automatic delta removals and global ingestion are
-future work. Geography is retained as evidence but creates no location result.
-
-Compare retrieval and enrichment on an independently labeled transaction suite
-before and after import. Same-name places can compete for shortlist space until
-brand grouping and geography-aware retrieval are expanded.
+Evidence removal changes the fresh schema only; no upgrade migration is provided.
+Recreate an existing database to use this layout. Batches do not commit partial
+imports, and a failure rolls back the entire import.
 
 ## Attribution
 

@@ -20,6 +20,8 @@ pub struct Snapshot {
     pub redirects: Vec<(String, String)>,
     #[serde(default)]
     pub location_redirects: Vec<(String, String)>,
+    #[serde(default)]
+    pub revision: Option<i64>,
 }
 #[derive(Debug, Serialize)]
 pub struct Decision {
@@ -44,9 +46,11 @@ pub struct Report {
     pub groups: Vec<Vec<String>>,
     pub decisions: Vec<Decision>,
     pub run_id: Option<String>,
+    /// Detailed output is bounded; counts still cover the entire import.
+    pub details_truncated: bool,
 }
 
-fn host(website: &Option<String>) -> Option<String> {
+pub(crate) fn host(website: &Option<String>) -> Option<String> {
     let url = reqwest::Url::parse(website.as_deref()?).ok()?;
     Some(
         url.host_str()?
@@ -75,7 +79,17 @@ fn canonical_name(name: &str) -> String {
     }
     words.join(" ")
 }
-fn deterministic_key(merchant: &Merchant) -> Option<(String, String)> {
+pub(crate) fn deterministic_key(merchant: &Merchant) -> Option<(String, Option<String>)> {
+    if merchant
+        .website
+        .as_deref()
+        .is_none_or(|site| site.trim().is_empty())
+    {
+        // Without a website, require the complete normalized name: do not
+        // strip legal suffixes or use aliases/fuzzy matches as identity.
+        let name = crate::store::normalize(&merchant.name);
+        return (!name.is_empty()).then_some((name, None));
+    }
     let name = canonical_name(&merchant.name);
     if name.len() < 3 {
         return None;
@@ -126,13 +140,23 @@ fn deterministic_key(merchant: &Merchant) -> Option<(String, String)> {
     {
         return None;
     }
-    Some((name, host))
+    Some((name, Some(host)))
 }
 /// Markets describe coverage, so absent or different markets never veto brand identity.
-fn same_name_and_website(left: &Merchant, right: &Merchant) -> bool {
+fn same_identity_by_rule(left: &Merchant, right: &Merchant) -> bool {
     deterministic_key(left).is_some_and(|key| Some(key) == deterministic_key(right))
 }
 
+pub(crate) fn rule_answer(merchant: &Merchant) -> Value {
+    let (name, host) = deterministic_key(merchant).expect("accepted identity has a rule key");
+    json!({"rule": if host.is_some() {
+        "same_canonical_name_and_business_website_host"
+    } else {
+        "same_normalized_name_and_both_websites_blank"
+    }, "canonical_name": name, "website_host": host})
+}
+
+#[cfg(test)]
 fn names(m: &Merchant) -> BTreeSet<String> {
     std::iter::once(&m.name)
         .chain(&m.aliases)
@@ -141,9 +165,11 @@ fn names(m: &Merchant) -> BTreeSet<String> {
         .collect()
 }
 /// Blocks avoid an all-pairs provider scan; every selected pair still needs evaluation.
+#[cfg(test)]
 fn pairs(snapshot: &Snapshot) -> BTreeSet<(usize, usize)> {
     focused_pairs(snapshot, None)
 }
+#[cfg(test)]
 fn focused_pairs(
     snapshot: &Snapshot,
     focus: Option<&BTreeSet<String>>,
@@ -221,7 +247,7 @@ fn identity(merchant: &Merchant) -> Value {
     // Brand reconciliation does not need logos, raw import payloads or repeated
     // publisher metadata. Preserve identity fields and all aliases without clipping.
     json!({"name": merchant.name, "website": merchant.website,
-        "markets": merchant.markets, "market_evidence": merchant.market_evidence,
+        "markets": merchant.markets,
         "aliases": merchant.aliases})
 }
 fn evidence(snapshot: &Snapshot, index: usize) -> Value {
@@ -346,7 +372,6 @@ pub(crate) fn combine(target: &mut Merchant, other: &Merchant) {
     target.aliases.extend(other.aliases.clone());
     target.sources.extend(other.sources.clone());
     target.markets.extend(other.markets.clone());
-    target.market_evidence.extend(other.market_evidence.clone());
     if target.website.is_none() {
         target.website = other.website.clone();
     }
@@ -360,8 +385,6 @@ pub(crate) fn combine(target: &mut Merchant, other: &Merchant) {
     target.sources.dedup();
     target.markets.sort();
     target.markets.dedup();
-    target.market_evidence.sort();
-    target.market_evidence.dedup();
 }
 
 pub async fn run(
@@ -396,8 +419,7 @@ async fn run_at(
         bail!("dedupe threshold must be between 0.5 and 1");
     }
     let s = store.clone();
-    let snapshot = tokio::task::spawn_blocking(move || s.dedupe_snapshot()).await??;
-    let pairs: Vec<_> = pairs(&snapshot).into_iter().collect();
+    let (snapshot,pairs) = tokio::task::spawn_blocking(move || s.dedupe_candidates(max_pairs)).await??;
     let mut report = evaluate(
         &snapshot, pairs, key, model, threshold, dry_run, max_pairs, endpoint,
     )
@@ -453,16 +475,17 @@ async fn evaluate(
         groups: vec![],
         decisions: vec![],
         run_id: None,
+        details_truncated: false,
     };
     if pairs.is_empty() {
         return Ok(report);
     }
     let rule_count = pairs
         .iter()
-        .filter(|&&(a, b)| same_name_and_website(&snapshot.merchants[a], &snapshot.merchants[b]))
+        .filter(|&&(a, b)| same_identity_by_rule(&snapshot.merchants[a], &snapshot.merchants[b]))
         .count();
     eprintln!(
-        "Dedupe: {rule_count} pairs accepted by name/website rule; {} pairs need Jev",
+        "Dedupe: {rule_count} pairs accepted by deterministic identity rules; {} pairs need Jev",
         pairs.len() - rule_count
     );
     let mut answers = BTreeMap::new();
@@ -477,7 +500,7 @@ async fn evaluate(
         let mut chunks: Vec<BTreeMap<String, Value>> = vec![];
         let mut chunk = BTreeMap::new();
         for (index, &(a, b)) in pairs.iter().enumerate() {
-            if same_name_and_website(&snapshot.merchants[a], &snapshot.merchants[b]) {
+            if same_identity_by_rule(&snapshot.merchants[a], &snapshot.merchants[b]) {
                 continue;
             }
             let q = question(snapshot, a, b);
@@ -534,27 +557,20 @@ async fn evaluate(
         progress.finish();
     }
     for (index, (a, b)) in pairs.into_iter().enumerate() {
-        let (answer, accepted, method, error) = if same_name_and_website(
-            &snapshot.merchants[a],
-            &snapshot.merchants[b],
-        ) {
-            (
-                json!({"rule":"same_normalized_name_and_website_domain", "markets":"compatible"}),
-                true,
-                "rule",
-                None,
-            )
-        } else {
-            let answer = answers.remove(&format!("pair_{index}")).unwrap();
-            let (accept, error) = match accepted(&answer, threshold) {
-                Ok(accept) => (accept, None),
-                Err(error) => {
-                    report.errors += 1;
-                    (false, Some(error.to_string()))
-                }
+        let (answer, accepted, method, error) =
+            if same_identity_by_rule(&snapshot.merchants[a], &snapshot.merchants[b]) {
+                (rule_answer(&snapshot.merchants[a]), true, "rule", None)
+            } else {
+                let answer = answers.remove(&format!("pair_{index}")).unwrap();
+                let (accept, error) = match accepted(&answer, threshold) {
+                    Ok(accept) => (accept, None),
+                    Err(error) => {
+                        report.errors += 1;
+                        (false, Some(error.to_string()))
+                    }
+                };
+                (answer, accept, "jev", error)
             };
-            (answer, accept, "jev", error)
-        };
         let left = snapshot.merchants[a].id.clone();
         let right = snapshot.merchants[b].id.clone();
         report.decisions.push(Decision {
@@ -571,9 +587,20 @@ async fn evaluate(
 }
 
 /// Import reconciliation is deterministic and never calls a provider.
-#[derive(Default)]
+pub const DEFAULT_IMPORT_CHUNK_SIZE: usize = 5000;
+
 pub struct ImportOptions {
     pub dry_run: bool,
+    /// Maximum source records per reconciliation chunk. Must be positive.
+    pub chunk_size: usize,
+}
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: false,
+            chunk_size: DEFAULT_IMPORT_CHUNK_SIZE,
+        }
+    }
 }
 #[derive(Debug, Serialize)]
 pub struct ImportReport {
@@ -583,6 +610,7 @@ pub struct ImportReport {
 
 /// Stage source updates without database writes. Rebuild touched identities from
 /// their complete evidence, including manual corrections and other sources.
+#[cfg(test)]
 fn stage(
     expected: &Snapshot,
     records: &[SourceRecord],
@@ -679,6 +707,7 @@ fn stage(
 
 /// Equal keys certify every pair within a bucket. Retain a linear-size audit
 /// (survivor-to-member decisions), rather than materializing a quadratic clique.
+#[cfg(test)]
 fn deterministic_plan(
     expected: &Snapshot,
     staged: &Snapshot,
@@ -714,8 +743,9 @@ fn deterministic_plan(
         groups: vec![],
         decisions: vec![],
         run_id: None,
+        details_truncated: false,
     };
-    for ((name, host), mut members) in buckets {
+    for (_, mut members) in buckets {
         if members.len() < 2 || !members.iter().any(|m| touched.contains(&m.id)) {
             continue;
         }
@@ -732,7 +762,14 @@ fn deterministic_plan(
             )
         });
         for other in &members[1..] {
-            report.decisions.push(Decision {left:members[0].id.clone(),right:other.id.clone(),answer:json!({"rule":"same_canonical_name_and_business_website_host","canonical_name":name,"website_host":host}),accepted:true,method:"rule".into(),error:None});
+            report.decisions.push(Decision {
+                left: members[0].id.clone(),
+                right: other.id.clone(),
+                answer: rule_answer(members[0]),
+                accepted: true,
+                method: "rule".into(),
+                error: None,
+            });
         }
         report
             .groups
@@ -755,34 +792,22 @@ pub async fn import(
 ) -> Result<ImportReport> {
     import_at(store, records, options).await
 }
+pub async fn import_file(
+    store: MerchantStore,
+    path: std::path::PathBuf,
+    limit: Option<u32>,
+    options: ImportOptions,
+) -> Result<(ImportReport, usize, usize)> {
+    tokio::task::spawn_blocking(move || store.reconcile_file(path, limit, options.dry_run, options.chunk_size)).await?
+}
+
 async fn import_at(
     store: MerchantStore,
     records: Vec<SourceRecord>,
     options: ImportOptions,
 ) -> Result<ImportReport> {
-    eprintln!("Import: reading catalog snapshot");
-    let s = store.clone();
-    let expected = tokio::task::spawn_blocking(move || s.dedupe_snapshot()).await??;
-    let (staged, ids, touched) = stage(&expected, &records)?;
-    let mut report = deterministic_plan(&expected, &staged, &touched, options.dry_run);
-    if options.dry_run {
-        eprintln!("Import: identity preview complete; no database changes");
-        return Ok(ImportReport {
-            delta: Default::default(),
-            dedupe: report,
-        });
-    }
-    let groups = report.groups.clone();
-    let audit = json!({"kind":"source-import", "report":report,"before":expected});
-    let (delta, run_id) = tokio::task::spawn_blocking(move || {
-        store.apply_reconciled_import(&expected, &staged, &records, &ids, &groups, &audit)
-    })
-    .await??;
-    report.run_id = run_id;
-    Ok(ImportReport {
-        delta,
-        dedupe: report,
-    })
+    tokio::task::spawn_blocking(move || store.reconcile_import(records, options.dry_run, options.chunk_size)).await?
+
 }
 
 pub(crate) fn validate_plan(
@@ -802,6 +827,9 @@ pub(crate) fn validate_plan(
             }
         }
         Ok(true)
+    }
+    if expected.revision != current.revision {
+        bail!("catalog changed during dedupe evaluation; rerun the command");
     }
     if !std::ptr::eq(expected, current)
         && !(same(&expected.merchants, &current.merchants)?
@@ -852,6 +880,176 @@ mod tests {
             raw: json!({}),
         }
     }
+    #[tokio::test]
+    #[ignore = "fresh-write performance benchmark; uses an isolated PostgreSQL database"]
+    async fn benchmark_fresh_merchant_import() -> Result<()> {
+        let count: usize = std::env::var("ULTRAFINANCE_IMPORT_BENCH_RECORDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10000);
+        let db = MerchantStore::temporary()?;
+        let records: Vec<SourceRecord> = if let Ok(path) =
+            std::env::var("ULTRAFINANCE_IMPORT_BENCH_INPUT")
+        {
+            crate::datasets::read_selected_records(std::path::Path::new(&path), Some(count as u32))?
+                .0
+        } else {
+            (0..count).map(|i| {
+            let mut r = record(&format!("place-{i:08}"), &format!("Merchant {i}"), "https://benchmark.example");
+            r.merchant.markets = vec!["CA".into()];
+            r.merchant.aliases = vec![format!("BANK MERCHANT {i}")];
+            r.raw = json!({"places":[{"country":"CA","address":format!("{i} Main Street"),"locality":"Montreal"}]});
+            r
+        }).collect()
+        };
+        let count = records.len();
+        let sample = records[0].clone();
+        let start = std::time::Instant::now();
+        let result = import(db.clone(), records, ImportOptions::default()).await?;
+        let elapsed = start.elapsed();
+        assert_eq!(result.delta.added, count);
+        assert_eq!(db.stats()?.total, count - result.dedupe.candidates);
+        let sample_id = db
+            .resolve_source(&sample.source, &sample.external_id)?
+            .unwrap();
+        let m = db.get(&sample_id)?.unwrap();
+        for alias in sample.merchant.aliases {
+            assert!(m.aliases.contains(&alias));
+        }
+        for market in sample.merchant.markets {
+            assert!(m.markets.contains(&market));
+        }
+        eprintln!(
+            "FRESH_IMPORT_BENCH records={count} elapsed_seconds={:.3} records_per_second={:.1}",
+            elapsed.as_secs_f64(),
+            count as f64 / elapsed.as_secs_f64()
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    #[ignore = "comparative throughput benchmark; isolated PostgreSQL databases"]
+    async fn benchmark_streaming_against_snapshot_import() -> Result<()> {
+        let count = std::env::var("ULTRAFINANCE_IMPORT_BENCH_RECORDS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10000);
+        let repeats = std::env::var("ULTRAFINANCE_IMPORT_BENCH_REPEATS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
+        let root = std::env::temp_dir().join(format!("ultra-throughput-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let mut cases: Vec<(&str, Vec<SourceRecord>)> = vec![
+            (
+                "unique",
+                (0..count)
+                    .map(|i| {
+                        record(
+                            &i.to_string(),
+                            &format!("Merchant {i}"),
+                            "https://benchmark.example",
+                        )
+                    })
+                    .collect(),
+            ),
+            (
+                "chains",
+                (0..count)
+                    .map(|i| {
+                        let mut r = record(
+                            &i.to_string(),
+                            &format!("Chain {}", i % 200),
+                            "https://benchmark.example",
+                        );
+                        r.merchant.website = None;
+                        r
+                    })
+                    .collect(),
+            ),
+        ];
+        if let Ok(path) = std::env::var("ULTRAFINANCE_IMPORT_BENCH_INPUT") {
+            let path = std::path::Path::new(&path);
+            let mut records = if path.extension().is_some_and(|s| s == "csv") {
+                crate::datasets::prepare(
+                    crate::datasets::Source::Foursquare,
+                    &std::fs::read_to_string(path)?,
+                    None,
+                    "ca",
+                )?
+                .records
+            } else {
+                crate::datasets::read_selected_records(path, Some(count as u32))?.0
+            };
+            records.truncate(count);
+            cases.push(("foursquare", records));
+        }
+        if let Ok(case) = std::env::var("ULTRAFINANCE_IMPORT_BENCH_CASE") {
+            cases.retain(|(label, _)| *label == case);
+        }
+        for (label, records) in cases {
+            let path = root.join(format!("{label}.json"));
+            std::fs::write(&path, serde_json::to_vec(&records)?)?;
+            let count = records.len();
+            let mut expected = std::collections::HashSet::new();
+            for (i, r) in records.iter().enumerate() {
+                expected.insert(
+                    deterministic_key(&r.merchant)
+                        .map(|k| format!("{k:?}"))
+                        .unwrap_or_else(|| format!("unmatched-{i}")),
+                );
+            }
+            for repeat in 0..repeats {
+                // Alternate order so caches do not consistently favour one strategy.
+                for streaming in if repeat % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let db = MerchantStore::temporary()?;
+                    for phase in ["fresh", "refresh"] {
+                        let start = std::time::Instant::now();
+                        let delta = if streaming {
+                            import_file(db.clone(), path.clone(), None, ImportOptions {
+                                chunk_size: std::env::var("ULTRAFINANCE_IMPORT_BENCH_CHUNK_SIZE")
+                                    .ok().and_then(|v| v.parse().ok())
+                                    .unwrap_or(DEFAULT_IMPORT_CHUNK_SIZE),
+                                ..Default::default()
+                            })
+                                .await?
+                                .0
+                                .delta
+                        } else {
+                            let records = crate::datasets::read_selected_records(&path, None)?.0;
+                            let snapshot = db.dedupe_snapshot()?;
+                            let (staged, ids, touched) = stage(&snapshot, &records)?;
+                            let report = deterministic_plan(&snapshot, &staged, &touched, false);
+                            let groups = report.groups.clone();
+                            let audit =
+                                json!({"kind":"source-import","report":report,"before":snapshot});
+                            db.apply_reconciled_import(
+                                &snapshot, &staged, &records, &ids, &groups, &audit,
+                            )?
+                            .0
+                        };
+                        let elapsed = start.elapsed().as_secs_f64();
+                        if phase == "fresh" {
+                            assert_eq!(delta.added, count);
+                        } else {
+                            assert_eq!(delta.unchanged, count);
+                        }
+                        assert_eq!(db.stats()?.total, expected.len());
+                        eprintln!(
+                            "THROUGHPUT_BENCH case={label} phase={phase} strategy={} repeat={repeat} records={count} seconds={elapsed:.6} records_per_second={:.1}",
+                            if streaming { "streaming" } else { "snapshot" },
+                            count as f64 / elapsed
+                        );
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     fn answer(choice: &str, probability: f64, confidence: f64) -> Value {
         json!({"type":"choice","choice":choice,"confidence":confidence,"probabilities":{"same":probability,"related":1.-probability,"different":0.,"insufficient":0.}})
     }
@@ -876,6 +1074,7 @@ mod tests {
             locations: vec![],
             redirects: vec![],
             location_redirects: vec![],
+            revision: None,
         };
         let q = question(&snapshot, 0, 1);
         let left = &q["instructions"]["left"];
@@ -898,23 +1097,131 @@ mod tests {
     }
 
     #[test]
-    fn website_rule_requires_same_brand_and_a_real_website() {
+    fn website_rule_requires_same_brand_and_a_real_website_when_present() {
         let a = merchant("a", "Uber", "https://uber.com");
-        assert!(same_name_and_website(
+        assert!(same_identity_by_rule(
             &a,
             &merchant("b", "UBER", "http://www.uber.com/ca/")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &a,
             &merchant("b", "Uber Eats", "https://uber.com")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &a,
             &merchant("b", "Uber", "https://other.com")
         ));
         let mut missing = a.clone();
         missing.website = None;
-        assert!(!same_name_and_website(&missing, &missing));
+        assert!(same_identity_by_rule(&missing, &missing));
+        assert!(!same_identity_by_rule(&a, &missing));
+    }
+
+    #[test]
+    fn blank_websites_merge_only_complete_normalized_names() {
+        let blank = |name: &str, website: Option<&str>| {
+            let mut m = merchant("test", name, "https://unused.test");
+            m.website = website.map(String::from);
+            m
+        };
+        let a = blank("Café Starbucks", None);
+        let b = blank(" CAFE  STARBUCKS ", Some("  "));
+        assert!(same_identity_by_rule(&a, &b));
+        for other in [
+            blank("Cafe Starbucks LLC", None),
+            blank("Cafe Starbucks Toronto", None),
+            blank("Cafe Starbucks", Some("https://starbucks.com")),
+            blank("Cafe Starbucks", Some("https://facebook.com/starbucks")),
+            blank("Cafe Starbucks", Some("invalid")),
+        ] {
+            assert!(!same_identity_by_rule(&a, &other));
+        }
+        assert!(!same_identity_by_rule(
+            &blank("!!!", None),
+            &blank("", None)
+        ));
+        assert_eq!(
+            rule_answer(&a)["rule"],
+            "same_normalized_name_and_both_websites_blank"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_website_import_merges_existing_places_and_survives_refresh() -> Result<()> {
+        let db = MerchantStore::temporary()?;
+        let mut records: Vec<_> = (0..200).map(|i| {
+            let mut r = record(&format!("place:{i}"), "Starbucks", "https://unused.test");
+            r.source = "foursquare".into();
+            r.merchant.website = None;
+            r.merchant.markets = vec![if i % 2 == 0 { "CA" } else { "US" }.into()];
+            r.raw = json!({"places":[{"fsq_place_id":i.to_string(),"address":format!("{i} Main St")}]});
+            r
+        }).collect();
+        // Simulate a legacy import that created separate merchant identities.
+        db.import(&records[..2])?;
+        let old_ids: Vec<_> = records[..2]
+            .iter()
+            .map(|r| {
+                db.resolve_source(&r.source, &r.external_id)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        let preview = import(db.clone(), records.clone(), ImportOptions { dry_run: true, ..Default::default() }).await?;
+        assert_eq!(preview.dedupe.groups.len(), 1);
+        assert_eq!(preview.dedupe.groups[0].len(), 200);
+        assert_eq!(preview.dedupe.decisions.len(), 199);
+        assert_eq!(db.stats()?.total, 2);
+        let result = import(db.clone(), records.clone(), ImportOptions::default()).await?;
+        let survivor = &result.dedupe.groups[0][0];
+        assert!(old_ids.contains(survivor));
+        assert_eq!(db.stats()?.total, 1);
+        assert_eq!(db.get(survivor)?.unwrap().markets, ["CA", "US"]);
+        let snapshot = db.dedupe_snapshot()?;
+        assert_eq!(snapshot.sources.len(), 200);
+        for r in &records {
+            assert_eq!(
+                db.resolve_source(&r.source, &r.external_id)?.as_ref(),
+                Some(survivor)
+            );
+            assert!(
+                snapshot
+                    .sources
+                    .iter()
+                    .any(|(_, saved)| saved.external_id == r.external_id
+                        && saved.raw == r.matching_raw())
+            );
+        }
+        records[0].merchant.aliases.push("STARBUCKS COFFEE".into());
+        let refresh = import(db.clone(), records, ImportOptions::default()).await?;
+        assert_eq!(refresh.delta.updated, 1);
+        assert!(refresh.dedupe.groups.is_empty());
+        assert_eq!(db.stats()?.total, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blank_website_dedupe_uses_rules_and_preserves_manual_conflicts() -> Result<()> {
+        let db = MerchantStore::temporary()?;
+        let mut a = record("a", "Starbucks", "https://unused.test");
+        a.merchant.website = None;
+        let mut b = a.clone();
+        b.external_id = "b".into();
+        db.import(&[a.clone(), b])?;
+        let report = run_at(db.clone(), None, "test".into(), 0.98, false, 10, "unused").await?;
+        assert_eq!(report.groups.len(), 1);
+        assert!(report.decisions.iter().all(|d| d.method == "rule"));
+        assert_eq!(db.stats()?.total, 1);
+        for id in ["manual-a", "manual-b"] {
+            let mut m = a.merchant.clone();
+            m.id = id.into();
+            db.put(&m)?;
+        }
+        a.external_id = "c".into();
+        let report = import(db.clone(), vec![a], ImportOptions::default()).await?;
+        assert!(report.dedupe.groups.is_empty());
+        assert_eq!(db.stats()?.total, 4);
+        Ok(())
     }
 
     #[tokio::test]
@@ -968,7 +1275,7 @@ mod tests {
         b.merchant.logo_url = Some("https://uber.com/logo.png".into());
         b.merchant.logo_source = Some("test".into());
         let input = vec![a.clone(), b.clone()];
-        let preview = import_at(db.clone(), input.clone(), ImportOptions { dry_run: true }).await?;
+        let preview = import_at(db.clone(), input.clone(), ImportOptions { dry_run: true, ..Default::default() }).await?;
         assert_eq!(preview.dedupe.groups.len(), 1);
         assert_eq!(db.stats()?.total, 1);
         assert!(db.resolve_source("test", "a")?.is_none());
@@ -993,7 +1300,8 @@ mod tests {
         assert!(refresh.dedupe.groups.is_empty());
         a.raw = json!({"outlet":"Toronto", "refreshed":true});
         let refresh = import_at(db.clone(), vec![a], ImportOptions::default()).await?;
-        assert_eq!(refresh.delta.updated, 1);
+        assert_eq!(refresh.delta.unchanged, 1);
+        assert_eq!(refresh.delta.updated, 0);
         assert_eq!(db.resolve_source("test", "a")?, Some(existing));
         assert_eq!(db.stats()?.total, 1);
         Ok(())
@@ -1004,27 +1312,27 @@ mod tests {
         let brand = merchant("a", "Café Brand, Inc.", "https://www.brand.test/ca/");
         assert_eq!(canonical_name("The Limited"), "the limited");
         assert_eq!(canonical_name("7-Eleven LLC"), "7 eleven");
-        assert!(same_name_and_website(
+        assert!(same_identity_by_rule(
             &brand,
             &merchant("b", "CAFE BRAND LLC", "http://brand.test/us")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &brand,
             &merchant("b", "Cafe Brand Plus", "https://brand.test")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &brand,
             &merchant("b", "Cafe Brand", "https://brand-other.test")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &merchant("a", "Cafe", "https://facebook.com/cafe"),
             &merchant("b", "Cafe", "https://facebook.com/other-cafe")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &merchant("a", "Cafe", "https://shop.wordpress.com"),
             &merchant("b", "Cafe", "https://shop.wordpress.com")
         ));
-        assert!(!same_name_and_website(
+        assert!(!same_identity_by_rule(
             &merchant("a", "Cafe", "https://user:pass@brand.test"),
             &merchant("b", "Cafe", "https://brand.test")
         ));
@@ -1038,6 +1346,7 @@ mod tests {
             locations: vec![],
             redirects: vec![],
             location_redirects: vec![],
+            revision: None,
         };
         let mut staged = expected.clone();
         for i in 0..20000 {
@@ -1054,6 +1363,12 @@ mod tests {
         assert_eq!(report.decisions.len(), 19999);
         assert_eq!(report.model, "deterministic");
         assert!(report.decisions.iter().all(|d| d.method == "rule"));
+        for m in &mut staged.merchants {
+            m.website = None;
+        }
+        let report = deterministic_plan(&expected, &staged, &touched, true);
+        assert_eq!(report.groups[0].len(), 20000);
+        assert_eq!(report.decisions.len(), 19999);
     }
 
     #[tokio::test]
@@ -1202,6 +1517,7 @@ mod tests {
             locations: vec![],
             redirects: vec![],
             location_redirects: vec![],
+            revision: None,
         };
         let candidates = pairs(&snapshot);
         assert!(candidates.contains(&(0, 1)));

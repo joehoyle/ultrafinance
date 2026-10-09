@@ -239,7 +239,7 @@ than one manual merchant remain separate to preserve corrections.
 
 The surviving ID prefers a manual merchant, then the merchant with the most
 source records, then the lexicographically first ID. Merges preserve source keys,
-provenance, aliases, market evidence, available website/logo metadata, and outlet
+provenance, aliases, known markets, available website/logo metadata, and outlet
 references. Source refreshes keep the merged identity. Conflicting nonblank scalar
 metadata uses the survivor's record, with other source facts retained in provenance.
 Imported aliases remain unverified; merging never makes them trusted exact matches.
@@ -247,11 +247,11 @@ Imported aliases remain unverified; merging never makes them trusted exact match
 All provider evaluations must complete successfully before any merge. Requests
 are bounded to 32 questions, 24 KiB per question, and 48 KiB per request. Oversized
 evidence, malformed answers, provider failures, or a scan exceeding `--max-pairs`
-fail without merging. The command rechecks the entire catalog and commits every
-group in one transaction; concurrent catalog changes abort the run for a retry.
+fail without merging. The command rechecks the catalog revision and involved records, then commits
+every group in one transaction; concurrent catalog changes abort the run for a retry.
 `--dry-run` calls Jev but performs no merges.
 
-Each applied run saves its report and complete pre-merge catalog snapshot in
+Each applied run saves its report, involved merchant snapshot and catalog revision in
 `merchant_merge_runs`; the report includes its `run_id`. Retired IDs are recorded
 in `merchant_redirects`, and local outlet imports/listing follow those redirects.
 Manual writes to retired IDs are rejected. The saved snapshot supports recovery, but there is no
@@ -428,11 +428,11 @@ commands remain available for explicit offline preparation and application.
 
 ## Repeatable dataset imports
 
-Foursquare OS Places also supports merchant-only preparation from a filtered CSV
+Foursquare OS Places also supports merchant and outlet imports from a filtered CSV
 export, with optional reviewed brand grouping and source place IDs retained as
 evidence. See [Foursquare merchant imports](docs/foursquare.md) for export format,
-dry-run/apply commands, attribution, and refresh limitations. Location records are
-not imported.
+dry-run/apply commands, attribution, and refresh limitations. Addressed places are
+imported as locations linked to their matched merchant, with stable IDs on refresh.
 
 Authenticated Foursquare downloads require the DuckDB CLI. On macOS, install
 it with `brew install duckdb` ([Homebrew package](https://formulae.brew.sh/formula/duckdb)).
@@ -727,14 +727,14 @@ cargo run -- enrich 'JULIUS CAFE BROMONT' --country CA
 `merchants list` (alias `ls`) displays an alphabetic table of IDs, names,
 known markets, websites, and alias counts. Use `--json` for complete merchant records
 with `total`, `limit`, and `offset` for pagination. The default limit is 50 (maximum
-1000). `--market CA` filters known market evidence. The HTTP catalog uses
+1000). `--market CA` filters known markets. The HTTP catalog uses
 `/v1/merchants?market=CA`; request `country` belongs to enrichment and search. Listing never calls Jev.
 
 Generated merchant IDs remain stable. To replace a record and its aliases, use
 `merchants add --id EXISTING_ID ...`. Import an existing JSON catalog with
 `merchants import FILE`. Imports update source/external ID pairs; repeat imports preserve local IDs.
 Imported aliases remain unverified and cannot bypass Jev. Manual names, websites and verified aliases take precedence over imported records.
-Manual markets supplement imported market evidence. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects the PostgreSQL database for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
+Manual markets supplement imported known markets. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects the PostgreSQL database for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
 
 Search removes accents, folds case, and normalizes punctuation and whitespace.
 Exact aliases are indexed separately; PostgreSQL full-text and trigram
@@ -743,7 +743,7 @@ and token overlap. Search scores are retrieval scores, not match probabilities.
 Short descriptors such as `LS` don't generate fuzzy candidates from letters alone.
 A unique exact match of at least three normalized characters resolves locally;
 ambiguous exact aliases and fuzzy results go to Jev. Transaction country breaks ranking ties in favor of known markets; all other
-markets and merchants without market evidence remain eligible. Exact alias
+markets and merchants without known markets remain eligible. Exact alias
 collisions still require evaluation, even if only one candidate has that market.
 
 View catalog totals and breakdowns by imported source, known market, and source dataset region:
@@ -758,13 +758,12 @@ linked to multiple sources counts once in each source, so source totals can
 exceed the catalog total. Manual entries include corrections to imported
 merchants; “without imported source” counts merchants with no source records.
 Market counts include each merchant once per country; merchants can appear in
-several markets. `without_market_evidence` counts those with no known coverage.
+several markets. `without_markets` counts those with no known coverage.
 
 Markets combine explicit declarations (`--market CA --market US`), Merchant
 Studio's `countryHints`, country-specific Open Enrichment dataset regions, and
-linked outlet countries. Each `market_evidence` entry retains its source,
-external ID, kind, and qualitative confidence: declarations/outlets are high;
-country hints/dataset regions are medium. Supplied evidence retains its confidence.
+linked outlet countries. Countries are stored directly in each merchant's
+`markets` list; there are no separate country-evidence records or confidence levels.
 Publisher geography and global dataset scope do not establish operating markets.
 Manual and source markets combine across links; refreshes recalculate them from
 current authoritative records. Dataset-region statistics remain separate from
@@ -772,12 +771,12 @@ market coverage.
 
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
-`ultrafinance database init` with a schema-administration login to migrate to
-schema version 4 before running this application. See
-[database schema](docs/database-schema.md) for column storage and migration details. The migration preserves IDs,
-source links, outlets, and manual corrections. Older application versions cannot
-run against version 4, so application-only rollback across this migration is
-unsupported.
+`ultrafinance database init` with a schema-administration login to initialize
+schema version 8 before running this application. See
+[database schema](docs/database-schema.md) for column storage and migration details.
+Removing country-evidence storage changes the fresh schema only; existing
+development databases must be recreated. Older application versions cannot run
+against version 8, so application-only rollback across this schema change is unsupported.
 
 ## Merchant logos
 
@@ -1095,8 +1094,9 @@ scores are local retrieval scores; merchant search does not call Jev.
 
 Dedupe first accepts records with the same canonical merchant name and business
 website host (normalizing legal suffixes, `www.`, scheme and URL path, while
-excluding shared platforms). Missing or different markets are
-compatible; merges retain the union of markets and their evidence. Other pairs
+excluding shared platforms). Identical complete normalized names also match
+when both websites are absent or blank. Missing or different markets are
+compatible; merges retain the union of markets. Other pairs
 are assessed by Jev using the configured probability/confidence threshold.
 Decisions identify their `method` as `rule` or `jev`; rule decisions include the
 rule name rather than fabricated model probabilities. Existing safeguards for
@@ -1124,16 +1124,19 @@ grouped by a conservative canonical name plus business website host: case,
 accents, punctuation, `www.`, HTTP/HTTPS, URL paths and trailing legal suffixes
 (`Inc`, `LLC`, `Ltd`, `Corp`, etc.) are normalized. Shared social platforms,
 directories, delivery/booking sites, shorteners and shared hosting domains are
-excluded from these automatic matches. A common name or domain alone does not
-establish brand identity. Product names, locality suffixes and store numbers are
+excluded from these automatic matches. When both websites are absent or blank,
+identical complete normalized names merge without stripping legal suffixes.
+This deliberately groups same-name businesses with no websites; blank websites
+never match populated websites. A shared domain alone does not establish brand
+identity. Product names, locality suffixes and store numbers are
 not stripped. Uncertain matches remain separate for explicit review.
 
-Indexed identity buckets replace import-time fuzzy/all-pairs scans. Every member
+Indexed PostgreSQL identity buckets replace import-time fuzzy/all-pairs scans. Every member
 of an accepted bucket shares the same key, so the audit needs only one edge per
 retired identity instead of every possible pair. Multiple manual identities in a
 bucket prevent its automatic consolidation. Established IDs and manual
 corrections are preserved; new duplicate source records link directly to the
-survivor, retaining raw evidence, aliases, markets and other metadata. Existing
+survivor, retaining source links, aliases, markets and matching inputs. Existing
 merchants can be merged with redirects and references updated atomically.
 
 Use `--dedupe-dry-run` to preview deterministic reconciliation without database
@@ -1159,21 +1162,103 @@ cargo run -- datasets apply <BUNDLE>/knowledge.json --limit 1000
 This caps reconciliation, not downloading. Source imports reuse a prepared
 bundle when input, review mappings, region and adapter version match. With a
 limit, they scan the complete knowledge JSON for syntax and counts but allocate
-only the selected source records. First-time preparation still processes the
-full input. Foursquare's separate `--foursquare-limit` controls how many places
+at most 5,000 selected source records at a time. First-time preparation still
+processes the full input. Foursquare's separate `--foursquare-limit` controls how many places
 are downloaded.
 
-This removes provider cost and quadratic candidate expansion from imports. The
-pipeline still loads a full catalog snapshot and writes source records through
-individual SQL operations; country/batch streaming and database-side bulk writes
-remain necessary before claiming end-to-end ingestion of millions is tuned.
-The guarded import transaction exempts itself from request statement and idle
-transaction timeouts, preserving the lock timeout and restoring normal settings
-after commit/rollback. Import writes reuse the validated snapshot for existing
-source identities and refresh market evidence in batches of 1,000 merchants.
+This removes provider cost and quadratic candidate expansion from imports.
+Guarded imports send source and merchant columns through binary PostgreSQL COPY
+into transaction-local staging tables, then perform set-based upserts. Canonical
+merchants, aliases, full-text/trigram search and known markets are rebuilt in
+batches of 5,000 identities, preserving manual overrides and complete source
+evidence. A later batch failure rolls back the entire import, including indexes.
+Fresh duplicate source records link directly to their survivor; when no existing
+identity is retired, imports skip the unrelated outlet reconciliation scan.
+Prepared source bundles and `datasets apply` stream JSON in chunks of 5,000
+records by default. Pass `--chunk-size 10000` to tune this bound; it must be positive
+and larger values use more memory. Each chunk looks up distinct identity keys in PostgreSQL, links to
+existing merchants, and groups new duplicates before creating merchants. No
+full-catalog snapshot is loaded. Later chunks see earlier writes in the same
+transaction. Source inputs for rebuilding existing chains are read through a
+streaming database cursor. Retired identities and their references are reconciled
+in bounded groups, restricted to touched brands.
+
+Foursquare downloads are copied from DuckDB's output file without loading the
+CSV into memory. Default preparation (without reviewed brand mappings) sorts
+5,000-row runs on disk and merges them with at most 64 open runs, preserving
+place ordering and duplicate/conflict validation. Reviewed brand grouping and
+other source adapters retain their existing preparation behavior.
+
+The transaction exempts itself from request statement and idle transaction
+timeouts, preserving the lock timeout and restoring normal settings after
+commit/rollback. Competing writers are serialized. Preview imports run the same
+chunk pipeline and roll back; late malformed JSON or duplicate source keys also
+roll back the entire import. Returned reconciliation details are capped at
+5,000 records/decisions with `details_truncated`; counts cover the whole import,
+and full chunk merge decisions are retained in database audit records.
+
+`merchants dedupe` selects candidate pairs using database indexes before loading
+only involved merchant records. Its pair budget bounds the candidate catalog;
+a catalog revision detects concurrent changes before applying decisions.
+Catalog fingerprints stream rows into the hash instead of allocating a catalog.
+
+Compare the streaming importer with the former snapshot strategy on identical
+inputs using disposable databases (three alternating-order trials by default):
+
+```sh
+ULTRAFINANCE_IMPORT_BENCH_RECORDS=10000 cargo test --locked -p ultrafinance-core \
+  benchmark_streaming_against_snapshot_import -- --ignored --nocapture
+```
+
+This measures fresh imports and unchanged refreshes, including file parsing.
+Set `ULTRAFINANCE_IMPORT_BENCH_INPUT` to an absolute Foursquare CSV or prepared
+knowledge JSON path to add a real-data case. Both strategies use the current
+bulk-write backend to isolate reconciliation overhead. To compare cold
+Foursquare preparation separately, use the same CSV environment variable and
+run `benchmark_streaming_preparation -- --ignored --nocapture` instead. Set
+`ULTRAFINANCE_IMPORT_BENCH_CHUNK_SIZE` to compare import chunk sizes, and
+`ULTRAFINANCE_IMPORT_BENCH_CASE=foursquare` to isolate that fixture.
+
+A repeatable fresh-write benchmark uses a disposable PostgreSQL database:
+
+```sh
+ULTRAFINANCE_IMPORT_BENCH_RECORDS=100000 cargo test --locked -p ultrafinance-core \
+  benchmark_fresh_merchant_import -- --ignored --nocapture
+```
+
+Set `ULTRAFINANCE_IMPORT_BENCH_INPUT` to an absolute prepared knowledge.json path
+to benchmark actual data instead of generated merchants. Timing covers catalog
+reading, reconciliation, bulk writes, indexes and commit, excluding fixture
+loading. On the local test database, the same fresh 10,000-record synthetic
+fixture took 72.5 seconds before bulk writes and 1.54 seconds afterwards; 100,000
+fresh records took 18.2 seconds. These measurements do not establish a full
+multi-million-record runtime.
+
+Use `cargo run --release -- sources import ...` for large imports; ordinary
+`cargo run` uses an unoptimized development build. Search and market rebuilding
+read typed source fields and country lists per batch. Full upstream source
+payloads are not stored in PostgreSQL; re-download or re-import them when needed.
+New merchants combine all incoming source records before their first insert,
+including records in later batches. Rebuilding skips unchanged merchant rows,
+so fresh imports avoid an initial insert followed by a redundant update.
+
+For sampling on macOS, `cargo test --locked -p ultrafinance-core --lib --no-run`
+prints the test executable path. With Samply installed, profile that executable
+against an isolated fresh database:
+
+```sh
+ULTRAFINANCE_IMPORT_BENCH_RECORDS=100000 samply record --save-only \
+  --unstable-presymbolicate --output /tmp/import-profile.json.gz \
+  <TEST_BINARY> benchmark_fresh_merchant_import --ignored --nocapture
+samply load /tmp/import-profile.json.gz
+```
+
+Profiles include database waits as well as Rust computation. Compare equivalent
+fresh fixtures with no competing large imports and enough free disk for both
+data and PostgreSQL WAL; low disk space invalidates timings and can abort imports.
 
 Jev dedupe questions use a compact identity view: merchant and source names,
-websites, aliases, markets and market evidence, plus source IDs and URLs. Raw
+websites, aliases, markets and known markets, plus source IDs and URLs. Raw
 import payloads and media fields remain stored locally but are not sent in these
 questions. Oversized identity evidence reports the affected pair and byte count.
 

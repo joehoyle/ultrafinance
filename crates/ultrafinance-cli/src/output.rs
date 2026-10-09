@@ -682,8 +682,8 @@ pub fn merchant_stats(stats: &MerchantStats, json: bool) -> Result<()> {
         ]);
     }
     write_output(&format!(
-        "Total merchants: {}\nManual entries / corrections: {}\nWithout imported source: {}\nNo market evidence: {}\n\nBy source\n{sources}\n\nCounts are distinct per source; a merchant linked to multiple sources appears in each.\n\nBy known market\n{markets}\n\nMarkets are known coverage, not exhaustive. A merchant can count in multiple markets.\n\nBy source dataset region\n{regions}",
-        stats.total, stats.manual, stats.without_source, stats.without_market_evidence
+        "Total merchants: {}\nManual entries / corrections: {}\nWithout imported source: {}\nNo known markets: {}\n\nBy source\n{sources}\n\nCounts are distinct per source; a merchant linked to multiple sources appears in each.\n\nBy known market\n{markets}\n\nMarkets are known coverage, not exhaustive. A merchant can count in multiple markets.\n\nBy source dataset region\n{regions}",
+        stats.total, stats.manual, stats.without_source, stats.without_markets
     ))
 }
 
@@ -732,6 +732,7 @@ mod dedupe_tests {
             groups: vec![],
             decisions,
             run_id: None,
+            details_truncated: false,
         };
         let table = render_dedupe(&report);
         let positions: Vec<_> = ["Pair A left", "Pair A right", "Pair B left", "Pair B right"]

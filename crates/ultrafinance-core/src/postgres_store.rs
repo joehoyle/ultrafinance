@@ -5,7 +5,7 @@ use super::{
 };
 use super::{MerchantSourceStats, MerchantStats, STATS_SOURCES, STATS_TOTALS, location_reference};
 use crate::location::LocationRecord;
-use crate::markets::{MarketIndex, market_counts};
+use crate::markets::MarketCountries;
 use anyhow::{Context, Result, bail};
 use postgres::{Client, GenericClient, IsolationLevel, Transaction};
 use postgres_native_tls::MakeTlsConnector;
@@ -14,6 +14,15 @@ use std::{
     sync::{Arc, mpsc},
     time::Duration,
 };
+
+#[path = "postgres_store/import_bulk.rs"]
+mod import_bulk;
+#[path = "postgres_store/indexed_import.rs"]
+mod indexed_import;
+#[path = "postgres_store/foursquare_locations.rs"]
+mod foursquare_locations;
+#[path = "postgres_store/typed_sources.rs"]
+mod typed_sources;
 
 type Job = Box<dyn FnOnce(Result<&mut Client>) + Send>;
 #[derive(Clone)]
@@ -86,8 +95,7 @@ impl PostgresStore {
         self.run(move |c| {
             let mut tx = c.transaction()?;
             let row = tx.query_opt("SELECT data FROM merchants_documents WHERE id=$1", &[&id])?;
-            let index = postgres_markets(&mut tx, Some(&[id]))?;
-            row.map(|r| Ok(index.hydrate(serde_json::from_str(r.get(0))?)))
+            row.map(|r| serde_json::from_str(r.get(0)).map_err(Into::into))
                 .transpose()
         })
     }
@@ -174,18 +182,35 @@ impl PostgresStore {
                     if version <= 2 { migrate_markets(&mut tx)?; }
                     tx.batch_execute(crate::dedupe::SCHEMA)?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)?;
-                    if version > 4 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 8 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
                         crate::resolution::migrate_postgres(&mut tx)?;
-                        refresh_market_lookup(&mut tx, None)?;
                     }
+                    if version < 5 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/006_typed_source_inputs.sql"))?;
+                    }
+                    if version < 6 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/007_source_inputs_only.sql"))?;
+                    }
+                    if version < 7 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/008_merchant_identity_index.sql"))?;
+                        indexed_import::backfill(&mut tx)?;
+                    }
+                    if version < 8 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute("UPDATE ultrafinance_schema SET version=8")?;
+                    }
+                    if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 4 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 8 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -402,6 +427,7 @@ impl PostgresStore {
             let mut tx = client.transaction()?;
             write_lock(&mut tx)?;
             let delta = import_records(&mut tx, &records, None, None)?;
+            foursquare_locations::import(&mut tx, &records)?;
             tx.commit()?;
             Ok(delta)
         })
@@ -446,6 +472,49 @@ impl PostgresStore {
             .map(|r| r.get(0)))
         })
     }
+    pub fn dedupe_candidates(
+        &self,
+        max_pairs: usize,
+    ) -> Result<(crate::dedupe::Snapshot, Vec<(usize, usize)>)> {
+        self.run(move |client| {
+            use postgres::fallible_iterator::FallibleIterator;
+            let mut tx=client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
+            // Trigrams supply candidates only; Rust applies the same edit-distance
+            // threshold as before. Exact names/aliases and hosts have B-tree indexes.
+            tx.batch_execute("SET LOCAL pg_trgm.similarity_threshold='0.000001'; SET LOCAL statement_timeout='0'")?;
+            let mut pairs=Vec::new();
+            let mut seen=HashSet::new();
+            {
+                let mut rows=tx.query_raw(r#"WITH candidates AS (
+SELECT a.merchant_id AS left_id,b.merchant_id AS right_id,TRUE AS exact FROM merchant_identity_keys a JOIN merchant_identity_keys b ON a.rule_name=b.rule_name AND a.rule_host=b.rule_host AND a.merchant_id<b.merchant_id WHERE a.rule_name IS NOT NULL
+UNION ALL
+SELECT a.merchant_id,b.merchant_id,TRUE FROM aliases a JOIN aliases b ON a.normalized=b.normalized AND a.merchant_id<b.merchant_id WHERE length(a.normalized)>=3
+UNION ALL
+SELECT a.merchant_id,b.merchant_id,TRUE FROM merchant_identity_keys a JOIN merchant_identity_keys b ON a.website_host=b.website_host AND a.merchant_id<b.merchant_id WHERE a.website_host IS NOT NULL
+UNION ALL
+SELECT a.merchant_id,b.merchant_id,FALSE FROM merchant_identity_keys a JOIN merchant_identity_keys b ON b.normalized_name % a.normalized_name AND a.merchant_id<b.merchant_id WHERE length(a.normalized_name)>=3 AND length(b.normalized_name)>=3)
+SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM candidates c JOIN merchant_identity_keys a ON a.merchant_id=c.left_id JOIN merchant_identity_keys b ON b.merchant_id=c.right_id"#,std::iter::empty::<&str>())?;
+                while let Some(row)=rows.next()? {
+                    let pair=(row.get::<_,String>(0),row.get::<_,String>(1));
+                    if seen.contains(&pair) {continue;}
+                    let a:String=row.get(3);let b:String=row.get(4);
+                    if row.get::<_,bool>(2) || rapidfuzz::distance::levenshtein::normalized_similarity(a.chars(),b.chars())>=0.85 {
+                        seen.insert(pair.clone());
+                        pairs.push(pair);
+                        if pairs.len()>max_pairs {bail!("candidate pairs exceed --max-pairs {max_pairs}; increase the limit to evaluate the complete scan");}
+                    }
+                }
+            }
+            pairs.sort();
+            let ids:Vec<_>=pairs.iter().flat_map(|(a,b)|[a.clone(),b.clone()]).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            let snapshot=postgres_snapshot_for_ids(&mut tx,&ids)?;
+            let index:HashMap<_,_>=snapshot.merchants.iter().enumerate().map(|(i,m)|(m.id.clone(),i)).collect();
+            let pairs=pairs.into_iter().map(|(a,b)|(index[&a],index[&b])).collect();
+            tx.commit()?;
+            Ok((snapshot,pairs))
+        })
+    }
+    #[cfg(test)]
     pub fn dedupe_snapshot(&self) -> Result<crate::dedupe::Snapshot> {
         self.run(|client| {
             let mut tx = client
@@ -497,7 +566,8 @@ impl PostgresStore {
             tx.batch_execute(crate::dedupe::SCHEMA).context("cannot initialize dedupe tables; run database init with a schema-owner connection")?;
             // Also exclude writers that do not participate in the application's advisory lock.
             tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
-            let current = postgres_dedupe_snapshot(&mut tx)?;
+            let ids:Vec<_>=expected.merchants.iter().map(|m|m.id.clone()).collect();
+            let current = postgres_snapshot_for_ids(&mut tx, &ids)?;
             crate::dedupe::validate_plan(&expected, &current, &groups)?;
             let run_id = uuid::Uuid::new_v4().to_string();
             tx.execute("INSERT INTO merchant_merge_runs VALUES($1,$2)", &[&run_id,&serde_json::to_string(&audit)?])?;
@@ -506,6 +576,62 @@ impl PostgresStore {
             Ok(run_id)
         })
     }
+    pub fn reconcile_import(
+        &self,
+        records: Vec<SourceRecord>,
+        dry_run: bool,
+        chunk_size: usize,
+    ) -> Result<crate::dedupe::ImportReport> {
+        if chunk_size == 0 { bail!("import chunk size must be greater than zero"); }
+        self.run(move |client| {
+            let mut tx = import_transaction(client)?;
+            write_lock(&mut tx)?;
+            tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
+            let mut importer = indexed_import::Import::new(&mut tx, dry_run, records.len(), chunk_size)?;
+            let mut records = records.into_iter();
+            loop {
+                let chunk: Vec<_> = records.by_ref().take(chunk_size).collect();
+                if chunk.is_empty() { break; }
+                importer.chunk(chunk)?;
+            }
+            let result = importer.finish()?;
+            if dry_run {
+                tx.rollback()?;
+                eprintln!("Import: identity preview complete; no database changes");
+            } else {
+                eprintln!("Import: committing merchant and location changes");
+                tx.commit()?;
+                eprintln!("Import: committed — {} added, {} updated, {} unchanged",result.delta.added,result.delta.updated,result.delta.unchanged);
+            }
+            Ok(result)
+        })
+    }
+    pub fn reconcile_file(
+        &self,
+        path: std::path::PathBuf,
+        limit: Option<u32>,
+        dry_run: bool,
+        chunk_size: usize,
+    ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
+        if chunk_size == 0 { bail!("import chunk size must be greater than zero"); }
+        self.run(move |client| {
+            let total = crate::datasets::count_records(&path)?;
+            let selected_total = limit.map_or(total, |n| total.min(n as usize));
+            eprintln!("Import: {total} available source records; {selected_total} selected");
+            eprintln!("Import: waiting for database write lock");
+            let mut tx=import_transaction(client)?;
+            write_lock(&mut tx)?;
+            tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
+            let mut importer=indexed_import::Import::new(&mut tx,dry_run,selected_total,chunk_size)?;
+            let (available,selected)=crate::datasets::stream_records(&path,limit,chunk_size,|chunk|importer.chunk(chunk))?;
+            if (available, selected) != (total, selected_total) { bail!("prepared record counts changed while importing; retry with a stable bundle"); }
+            let result=importer.finish()?;
+            if dry_run {tx.rollback()?;eprintln!("Import: identity preview complete; no database changes");}
+            else {eprintln!("Import: committing merchant and location changes");tx.commit()?;eprintln!("Import: committed — {} added, {} updated, {} unchanged",result.delta.added,result.delta.updated,result.delta.unchanged);}
+            Ok((result,available,selected))
+        })
+    }
+    #[cfg(test)]
     pub fn apply_reconciled_import(
         &self,
         expected: &crate::dedupe::Snapshot,
@@ -587,17 +713,31 @@ impl PostgresStore {
                     records: usize::try_from(row.get::<_, i64>(2))?,
                 });
             }
-            let index = postgres_markets(&mut tx, None)?;
-            let merchants = postgres_catalog(&mut tx, &index)?;
-            let (without_market_evidence, by_market) = market_counts(&merchants);
-            let by_source_region = index.region_stats();
+            // Coverage is maintained transactionally by catalog writes. Stats
+            // needs only aggregate rows, never a hydrated catalog or source payloads.
+            let without_markets = usize::try_from(tx.query_one(
+                "SELECT count(*) FROM merchants m WHERE COALESCE(m.markets_json,'[]')::jsonb='[]'::jsonb",
+                &[],
+            )?.get::<_, i64>(0))?;
+            let by_market = tx.query(
+                "SELECT country,count(DISTINCT m.id) FROM merchants m CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(m.markets_json,'[]')::jsonb) country GROUP BY country ORDER BY count(DISTINCT m.id) DESC,country",
+                &[],
+            )?.into_iter().map(|r| Ok(super::MerchantMarketStats {
+                market:r.get(0), merchants:usize::try_from(r.get::<_,i64>(1))?,
+            })).collect::<Result<Vec<_>>>()?;
+            let by_source_region = tx.query(
+                "SELECT source,dataset_region,count(DISTINCT merchant_id),count(*) FROM source_records WHERE dataset_region IS NOT NULL GROUP BY source,dataset_region ORDER BY source,dataset_region",
+                &[],
+            )?.into_iter().map(|r| Ok(super::MerchantRegionStats {
+                source:r.get(0),region:r.get(1),merchants:usize::try_from(r.get::<_,i64>(2))?,records:usize::try_from(r.get::<_,i64>(3))?,
+            })).collect::<Result<Vec<_>>>()?;
             tx.commit()?;
             Ok(MerchantStats {
                 total: usize::try_from(totals.get::<_, i64>(0))?,
                 manual: usize::try_from(totals.get::<_, i64>(1))?,
                 without_source: usize::try_from(totals.get::<_, i64>(2))?,
                 by_source,
-                without_market_evidence,
+                without_markets,
                 by_market,
                 by_source_region,
             })
@@ -614,14 +754,11 @@ impl PostgresStore {
         let sql_offset = i64::try_from(offset)?;
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
-            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR EXISTS(SELECT 1 FROM merchant_market_evidence e WHERE e.merchant_id=m.id AND e.country=$1))", &[&market])?.get(0);
+            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets_json::jsonb ? $1)", &[&market])?.get(0);
             let mut merchants = Vec::new();
-            for row in tx.query("SELECT data FROM merchants_documents m WHERE ($1::text IS NULL OR EXISTS(SELECT 1 FROM merchant_market_evidence e WHERE e.merchant_id=m.id AND e.country=$1)) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset])? {
+            for row in tx.query("SELECT data FROM merchants_documents m WHERE ($1::text IS NULL OR m.markets_json::jsonb ? $1) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset])? {
                 merchants.push(serde_json::from_str::<Merchant>(row.get(0))?);
             }
-            let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();
-            let index = postgres_markets(&mut tx, Some(&ids))?;
-            let merchants = merchants.into_iter().map(|m| index.hydrate(m)).collect();
             let page = MerchantPage {merchants,total:usize::try_from(total)?,limit,offset};
             tx.commit()?;
             Ok(page)
@@ -689,11 +826,6 @@ impl PostgresStore {
                     add_candidate(&mut tx,&mut found,row.get(0),&query,false,None,&mut scorer)?;
                 }
             }
-            let ids: Vec<_> = found.keys().cloned().collect();
-            let index = postgres_markets(&mut tx, Some(&ids))?;
-            for candidate in found.values_mut() {
-                candidate.merchant = index.hydrate(candidate.merchant.clone());
-            }
             tx.commit()?;
             Ok(rank_candidates(found, limit, country.as_deref()))
         })
@@ -736,8 +868,8 @@ fn source_records(c: &mut impl GenericClient, id: &str) -> Result<Vec<SourceReco
     .map(|r| serde_json::from_str(r.get::<_, &str>(0)))
     .collect::<std::result::Result<_, _>>()?)
 }
-fn postgres_markets(tx: &mut impl GenericClient, ids: Option<&[String]>) -> Result<MarketIndex> {
-    let mut index = MarketIndex::default();
+fn postgres_markets(tx: &mut impl GenericClient, ids: Option<&[String]>) -> Result<MarketCountries> {
+    let mut index = MarketCountries::default();
     let filter = |column: &str| {
         if ids.is_some() {
             format!("{column} = ANY($1::text[])")
@@ -753,37 +885,38 @@ fn postgres_markets(tx: &mut impl GenericClient, ids: Option<&[String]>) -> Resu
         index.declaration(
             row.get(0),
             &serde_json::from_str(row.get::<_, &str>(1))?,
-            "manual",
-            None,
         );
     }
-    let sources_sql = format!(
-        "SELECT merchant_id,data FROM source_records_documents WHERE {} ORDER BY source,external_id",
-        filter("merchant_id")
-    );
-    for row in tx.query(&sources_sql, &[&ids])? {
-        index.source(row.get(0), &serde_json::from_str(row.get::<_, &str>(1))?);
+    for input in typed_sources::read(tx, ids)? {
+        index.source_fields(
+            &input.merchant_id,
+            &input.merchant,
+            &input.hints,
+            input.region.as_deref(),
+        );
     }
-    let outlets_sql = if ids.is_some() {
-        format!(
-            "SELECT merchant_id,data FROM location_records_documents WHERE {} UNION ALL SELECT s.merchant_id,l.data FROM source_records_documents s JOIN location_records_documents l ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE l.merchant_id IS NULL AND {}",
-            filter("merchant_id"),
-            filter("s.merchant_id")
-        )
-    } else {
-        "SELECT COALESCE(l.merchant_id,s.merchant_id),l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE $1::text[] IS NULL".into()
-    };
-    for row in tx.query(&outlets_sql, &[&ids])? {
-        index.outlet(row.get(0), &serde_json::from_str(row.get::<_, &str>(1))?);
-    }
+    postgres_market_outlets(tx, &mut index, ids)?;
     Ok(index)
 }
-fn postgres_catalog(tx: &mut impl GenericClient, index: &MarketIndex) -> Result<Vec<Merchant>> {
-    tx.query("SELECT data FROM merchants_documents", &[])?
-        .iter()
-        .map(|r| Ok(index.hydrate(serde_json::from_str(r.get::<_, &str>(0))?)))
-        .collect()
+fn postgres_market_outlets(
+    tx: &mut impl GenericClient,
+    index: &mut MarketCountries,
+    ids: Option<&[String]>,
+) -> Result<()> {
+    use postgres::fallible_iterator::FallibleIterator;
+    // Coverage needs only country and provenance, not full address documents.
+    let sql = if ids.is_some() {
+        "SELECT DISTINCT merchant_id,country FROM location_records WHERE merchant_id=ANY($1::text[]) AND country IS NOT NULL UNION SELECT s.merchant_id,l.country FROM source_records s JOIN location_records l ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE l.merchant_id IS NULL AND s.merchant_id=ANY($1::text[]) AND l.country IS NOT NULL"
+    } else {
+        "SELECT DISTINCT COALESCE(l.merchant_id,s.merchant_id),l.country FROM location_records l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE $1::text[] IS NULL AND l.country IS NOT NULL"
+    };
+    let mut rows = tx.query_raw(sql, [&ids as &(dyn postgres::types::ToSql + Sync)])?;
+    while let Some(row) = rows.next()? {
+        index.outlet_country(row.get(0), row.get(1));
+    }
+    Ok(())
 }
+
 fn add_candidate(
     tx: &mut Transaction<'_>,
     found: &mut HashMap<String, Candidate>,
@@ -855,7 +988,7 @@ fn rebuild_with_market_refresh(
         )?
         .map(|r| serde_json::from_str::<Merchant>(r.get::<_, &str>(0)))
         .transpose()?;
-    for record in source_records(tx, id)? {
+    typed_sources::for_each(tx, &[id.to_owned()], |record| {
         if merchant.is_none() {
             merchant = Some(record.merchant.clone());
         }
@@ -866,7 +999,8 @@ fn rebuild_with_market_refresh(
         if !record.url.is_empty() {
             m.sources.push(record.url);
         }
-    }
+        Ok(())
+    })?;
     tx.execute("DELETE FROM aliases WHERE merchant_id=$1", &[&id])?;
     tx.execute("DELETE FROM merchant_search WHERE merchant_id=$1", &[&id])?;
     let Some(mut merchant) = merchant else {
@@ -917,6 +1051,15 @@ fn rebuild_with_market_refresh(
 }
 
 fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> Result<()> {
+    if ids.is_none() {
+        let mut after=String::new();
+        loop {
+            let batch:Vec<String>=c.query("SELECT id FROM merchants WHERE id>$1 ORDER BY id LIMIT 1000",&[&after])?.into_iter().map(|r|r.get(0)).collect();
+            if batch.is_empty() {return Ok(());}
+            after=batch.last().unwrap().clone();
+            refresh_market_lookup(c,Some(&batch))?;
+        }
+    }
     let index = postgres_markets(c, ids)?;
     let ids = match ids {
         Some(ids) => ids.to_vec(),
@@ -927,33 +1070,32 @@ fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> 
             .collect(),
     };
     for id in ids {
-        c.execute(
-            "DELETE FROM merchant_market_evidence WHERE merchant_id=$1",
-            &[&id],
-        )?;
-        if let Some(row) =
-            c.query_opt("SELECT data FROM merchants_documents WHERE id=$1", &[&id])?
-        {
-            for e in index
-                .hydrate(serde_json::from_str(row.get(0))?)
-                .market_evidence
-            {
-                c.execute("INSERT INTO merchant_market_evidence VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&id,&e.country,&e.source,&e.external_id.unwrap_or_default(),&serde_json::to_value(e.kind)?.as_str(),&serde_json::to_value(e.confidence)?.as_str()])?;
-            }
+        if let Some(row) = c.query_opt("SELECT data FROM merchants_documents WHERE id=$1", &[&id])? {
+            let merchant: Merchant = serde_json::from_str(row.get(0))?;
+            let markets = serde_json::to_string(&index.hydrate(merchant).markets)?;
+            c.execute("UPDATE merchants SET markets_json=$2 WHERE id=$1 AND markets_json IS DISTINCT FROM $2", &[&id,&markets])?;
         }
     }
+
     Ok(())
 }
 
 fn fingerprint(tx: &mut Transaction<'_>) -> Result<String> {
-    let mut contents = Vec::new();
+    use postgres::fallible_iterator::FallibleIterator;
+    let mut hash=0xcbf29ce484222325u64;
+    let mut feed=|bytes:&[u8]| {
+        for byte in bytes.iter().copied().chain(std::iter::once(0)) {
+            hash^=u64::from(byte);hash=hash.wrapping_mul(0x100000001b3);
+        }
+    };
     for sql in [
         "SELECT data FROM merchants_documents ORDER BY id",
         "SELECT data FROM manual_merchants_documents ORDER BY id",
         "SELECT data,merchant_id FROM source_records_documents ORDER BY source,external_id",
         "SELECT data FROM location_records_documents ORDER BY source,external_id",
     ] {
-        for row in tx.query(sql, &[])? {
+        let mut rows=tx.query_raw(sql,std::iter::empty::<&str>())?;
+        while let Some(row)=rows.next()? {
             for column in 0..row.len() {
                 let value: String = row.get(column);
                 let value = if column == 0 {
@@ -961,8 +1103,7 @@ fn fingerprint(tx: &mut Transaction<'_>) -> Result<String> {
                 } else {
                     value
                 };
-                contents.extend(value.bytes());
-                contents.push(0);
+                feed(value.as_bytes());
             }
         }
     }
@@ -973,22 +1114,17 @@ fn fingerprint(tx: &mut Transaction<'_>) -> Result<String> {
         )?
         .get(0);
     if exists {
-        for row in tx.query(
-            "SELECT data FROM descriptor_resolution_documents ORDER BY id",
-            &[],
-        )? {
+        let mut rows=tx.query_raw("SELECT data FROM descriptor_resolution_documents ORDER BY id",std::iter::empty::<&str>())?;
+        while let Some(row)=rows.next()? {
             let data: String = row.get(0);
-            contents.extend(crate::columns::canonical_document(&data)?.bytes());
-            contents.push(0);
+            feed(crate::columns::canonical_document(&data)?.as_bytes());
         }
     }
-    for (retired, canonical) in location_redirects(tx)? {
-        contents.extend(retired.bytes());
-        contents.push(0);
-        contents.extend(canonical.bytes());
-        contents.push(0);
+    let mut rows=tx.query_raw("SELECT retired_id,location_id FROM location_redirects ORDER BY retired_id",std::iter::empty::<&str>())?;
+    while let Some(row)=rows.next()? {
+        feed(row.get::<_,&str>(0).as_bytes());feed(row.get::<_,&str>(1).as_bytes());
     }
-    Ok(crate::eval::fingerprint(&contents))
+    Ok(format!("fnv1a64:{hash:016x}"))
 }
 
 fn import_transaction(client: &mut Client) -> Result<Transaction<'_>> {
@@ -1007,6 +1143,9 @@ fn import_records(
     identities: Option<&[String]>,
     baseline: Option<&crate::dedupe::Snapshot>,
 ) -> Result<super::ImportDelta> {
+    if let (Some(identities), Some(baseline)) = (identities, baseline) {
+        return import_bulk::import(tx, records, identities, baseline);
+    }
     let mut changed = HashSet::new();
     let mut delta = super::ImportDelta::default();
     let mut progress = identities.map(|_| {
@@ -1050,6 +1189,7 @@ fn import_records(
             let same_region = crate::markets::dataset_region(old_record)
                 == crate::markets::dataset_region(record);
             let mut incoming = serde_json::to_value(record)?;
+            incoming["raw"] = record.matching_raw();
             // A new whole-file version does not make unchanged rows a delta.
             // Keep their original import version as provenance.
             old.as_object_mut().unwrap().remove("version");
@@ -1124,6 +1264,11 @@ fn import_records(
     Ok(delta)
 }
 fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> {
+    // New source duplicates are written directly to their survivor. There is
+    // no persisted identity or outlet reference to update in that case.
+    if groups.is_empty() {
+        return Ok(());
+    }
     let total = groups.iter().map(|g| g.len() - 1).sum();
     let mut progress =
         crate::import_progress::Progress::dedupe("merging duplicate identities", total);
@@ -1159,7 +1304,7 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
         progress.advance(completed);
     }
     progress.finish();
-    reconcile_locations(tx, None, false)?;
+    for group in groups { reconcile_locations(tx, Some(&group[0]), false)?; }
     Ok(())
 }
 
@@ -1229,6 +1374,38 @@ fn reconcile_locations(
     Ok(report)
 }
 
+fn postgres_snapshot_for_ids(
+    c: &mut impl GenericClient,
+    ids: &[String],
+) -> Result<crate::dedupe::Snapshot> {
+    fn data<T: serde::de::DeserializeOwned>(
+        c: &mut impl GenericClient,
+        sql: &str,
+        ids: &[String],
+    ) -> Result<Vec<T>> {
+        c.query(sql, &[&ids])?
+            .into_iter()
+            .map(|r| Ok(serde_json::from_str(r.get(0))?))
+            .collect()
+    }
+    let source_bytes:i64=c.query_one("SELECT COALESCE(sum(octet_length(data)),0)::bigint FROM source_records_documents WHERE merchant_id=ANY($1)",&[&ids])?.get(0);
+    if source_bytes > 64 * 1024 * 1024 {
+        bail!(
+            "dedupe source evidence exceeds the bounded 64 MiB scan budget; reconcile deterministic identities through source import"
+        );
+    }
+    Ok(crate::dedupe::Snapshot {
+        merchants:data(c,"SELECT data FROM merchants_documents WHERE id=ANY($1) ORDER BY id",ids)?,
+        manual:data(c,"SELECT data FROM manual_merchants_documents WHERE id=ANY($1) ORDER BY id",ids)?,
+        sources:c.query("SELECT merchant_id,data FROM source_records_documents WHERE merchant_id=ANY($1) ORDER BY source,external_id",&[&ids])?.into_iter().map(|r|Ok((r.get(0),serde_json::from_str(r.get(1))?))).collect::<Result<_>>()?,
+        locations:data(c,"SELECT l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=ANY($1) ORDER BY l.id",ids)?,
+        redirects:c.query("SELECT retired_id,merchant_id FROM merchant_redirects WHERE merchant_id=ANY($1) ORDER BY retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect(),
+        location_redirects:c.query("SELECT d.retired_id,d.location_id FROM location_redirects d JOIN location_records l ON l.id=d.location_id LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=ANY($1) ORDER BY d.retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect(),
+        revision:Some(c.query_one("SELECT revision FROM catalog_revision",&[])?.get(0)),
+    })
+}
+
+#[cfg(test)]
 fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe::Snapshot> {
     fn data<T: serde::de::DeserializeOwned>(
         c: &mut impl GenericClient,
@@ -1271,6 +1448,7 @@ fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe:
         locations: data(c, "SELECT data FROM location_records_documents ORDER BY id")?,
         redirects,
         location_redirects: location_redirects(c)?.into_iter().collect(),
+        revision: Some(c.query_one("SELECT revision FROM catalog_revision", &[])?.get(0)),
     })
 }
 
@@ -1324,7 +1502,7 @@ mod connection_tests {
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get(0);
             assert_eq!(
-                version, 4,
+                version, 8,
                 "market migration must run before application use"
             );
             let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);

@@ -9,6 +9,7 @@ pub mod foursquare;
 pub mod gazetteer;
 pub mod import;
 mod import_progress;
+pub use import_progress::set_import_verbose;
 pub mod interpretation;
 pub mod location;
 pub mod location_dedupe;
@@ -83,12 +84,9 @@ pub struct Merchant {
     /// Stable ID in this service's merchant catalog.
     pub id: String,
     pub name: String,
-    /// Countries with evidence of operation. Coverage is not exhaustive.
+    /// Known countries of operation. Coverage is not exhaustive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markets: Vec<String>,
-    /// Source and qualitative confidence for each known market.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub market_evidence: Vec<markets::MarketEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -402,7 +400,7 @@ mod tests {
                 id: format!("mer_{index}"),
                 name: format!("Merchant {index}"),
                 markets: vec!["CA".into()],
-                market_evidence: vec![],
+
                 website: None,
                 logo_url: None,
                 logo_source: None,

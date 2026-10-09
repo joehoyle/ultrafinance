@@ -132,7 +132,7 @@ fn candidate(place: Place) -> Result<Candidate> {
         id: format!("discovery_{}", uuid::Uuid::new_v4().simple()),
         name: place.name.clone(),
         markets: place.country.iter().cloned().collect(),
-        market_evidence: vec![],
+
         website: place.website.clone(),
         logo_url: None,
         logo_source: None,

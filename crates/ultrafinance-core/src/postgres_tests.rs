@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn postgres_source_columns_preserve_raw_payloads_and_pattern_types() -> Result<()> {
+fn postgres_source_columns_retain_matching_fields_without_raw_payloads() -> Result<()> {
     let lease = MerchantStore::temporary()?;
     let mut client = postgres::Client::connect(
         lease.temporary_url(),
@@ -24,13 +24,13 @@ fn postgres_source_columns_preserve_raw_payloads_and_pattern_types() -> Result<(
             "attribution": "Fixture", "license": "Test", "url": "https://example.com",
             "version": null, "raw": raw
         }))?;
-        lease.import(&[record])?;
+        lease.import(std::slice::from_ref(&record))?;
         let row = client.query_one(
             "SELECT data,transaction_pattern,parent_id FROM source_records_documents WHERE source='column-fixture' AND external_id=$1",
             &[&n.to_string()],
         )?;
         let restored: SourceRecord = serde_json::from_str(row.get(0))?;
-        assert_eq!(restored.raw, raw);
+        assert_eq!(restored.raw, record.matching_raw());
         assert_eq!(
             row.get::<_, Option<String>>(1).as_deref(),
             raw.get("transaction_text_regexp").and_then(|v| v.as_str())
@@ -197,7 +197,7 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        4
+        8
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);

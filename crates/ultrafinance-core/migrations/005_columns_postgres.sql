@@ -4,23 +4,21 @@ ALTER TABLE merchants ADD COLUMN website TEXT;
 ALTER TABLE merchants ADD COLUMN logo_url TEXT;
 ALTER TABLE merchants ADD COLUMN logo_source TEXT;
 ALTER TABLE merchants ADD COLUMN markets_json TEXT;
-ALTER TABLE merchants ADD COLUMN market_evidence_json TEXT;
 ALTER TABLE merchants ADD COLUMN aliases_json TEXT;
 ALTER TABLE merchants ADD COLUMN sources_json TEXT;
-UPDATE merchants SET name=(data::jsonb #>> '{name}'),website=(data::jsonb #>> '{website}'),logo_url=(data::jsonb #>> '{logo_url}'),logo_source=(data::jsonb #>> '{logo_source}'),markets_json=COALESCE(((data::jsonb #> '{markets}'))::text,'[]'),market_evidence_json=COALESCE(((data::jsonb #> '{market_evidence}'))::text,'[]'),aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),sources_json=COALESCE(((data::jsonb #> '{sources}'))::text,'[]');
+UPDATE merchants SET name=(data::jsonb #>> '{name}'),website=(data::jsonb #>> '{website}'),logo_url=(data::jsonb #>> '{logo_url}'),logo_source=(data::jsonb #>> '{logo_source}'),markets_json=COALESCE(((data::jsonb #> '{markets}'))::text,'[]'),aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),sources_json=COALESCE(((data::jsonb #> '{sources}'))::text,'[]');
 ALTER TABLE merchants DROP COLUMN data;
-CREATE VIEW merchants_documents AS SELECT *, (jsonb_build_object('id',id,'name',name,'website',website,'logo_url',logo_url,'logo_source',logo_source,'markets',markets_json::jsonb,'market_evidence',market_evidence_json::jsonb,'aliases',aliases_json::jsonb,'sources',sources_json::jsonb))::text AS data FROM merchants;
+CREATE VIEW merchants_documents AS SELECT *, (jsonb_build_object('id',id,'name',name,'website',website,'logo_url',logo_url,'logo_source',logo_source,'markets',markets_json::jsonb,'aliases',aliases_json::jsonb,'sources',sources_json::jsonb))::text AS data FROM merchants;
 ALTER TABLE manual_merchants ADD COLUMN name TEXT NOT NULL DEFAULT 'unknown' CHECK(length(trim(name)) > 0);
 ALTER TABLE manual_merchants ADD COLUMN website TEXT;
 ALTER TABLE manual_merchants ADD COLUMN logo_url TEXT;
 ALTER TABLE manual_merchants ADD COLUMN logo_source TEXT;
 ALTER TABLE manual_merchants ADD COLUMN markets_json TEXT;
-ALTER TABLE manual_merchants ADD COLUMN market_evidence_json TEXT;
 ALTER TABLE manual_merchants ADD COLUMN aliases_json TEXT;
 ALTER TABLE manual_merchants ADD COLUMN sources_json TEXT;
-UPDATE manual_merchants SET name=(data::jsonb #>> '{name}'),website=(data::jsonb #>> '{website}'),logo_url=(data::jsonb #>> '{logo_url}'),logo_source=(data::jsonb #>> '{logo_source}'),markets_json=COALESCE(((data::jsonb #> '{markets}'))::text,'[]'),market_evidence_json=COALESCE(((data::jsonb #> '{market_evidence}'))::text,'[]'),aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),sources_json=COALESCE(((data::jsonb #> '{sources}'))::text,'[]');
+UPDATE manual_merchants SET name=(data::jsonb #>> '{name}'),website=(data::jsonb #>> '{website}'),logo_url=(data::jsonb #>> '{logo_url}'),logo_source=(data::jsonb #>> '{logo_source}'),markets_json=COALESCE(((data::jsonb #> '{markets}'))::text,'[]'),aliases_json=COALESCE(((data::jsonb #> '{aliases}'))::text,'[]'),sources_json=COALESCE(((data::jsonb #> '{sources}'))::text,'[]');
 ALTER TABLE manual_merchants DROP COLUMN data;
-CREATE VIEW manual_merchants_documents AS SELECT *, (jsonb_build_object('id',id,'name',name,'website',website,'logo_url',logo_url,'logo_source',logo_source,'markets',markets_json::jsonb,'market_evidence',market_evidence_json::jsonb,'aliases',aliases_json::jsonb,'sources',sources_json::jsonb))::text AS data FROM manual_merchants;
+CREATE VIEW manual_merchants_documents AS SELECT *, (jsonb_build_object('id',id,'name',name,'website',website,'logo_url',logo_url,'logo_source',logo_source,'markets',markets_json::jsonb,'aliases',aliases_json::jsonb,'sources',sources_json::jsonb))::text AS data FROM manual_merchants;
 ALTER TABLE source_records ADD COLUMN merchant_json TEXT;
 ALTER TABLE source_records ADD COLUMN raw_json TEXT;
 ALTER TABLE source_records ADD COLUMN version TEXT;
@@ -56,14 +54,5 @@ CREATE INDEX merchants_name ON merchants(lower(name) COLLATE "C",id);
 CREATE INDEX source_records_patterns ON source_records(source,parent_id) WHERE transaction_pattern IS NOT NULL;
 CREATE INDEX location_records_geography ON location_records(country,city,merchant_id);
 CREATE INDEX location_records_store_number ON location_records(merchant_id,store_number) WHERE store_number IS NOT NULL;
-CREATE TABLE merchant_market_evidence (
- merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
- country TEXT NOT NULL CHECK(length(country)=2 AND country=upper(country)),
- source TEXT NOT NULL,
- external_id TEXT NOT NULL,
- kind TEXT NOT NULL,
- confidence TEXT NOT NULL,
- PRIMARY KEY(merchant_id,country,source,external_id,kind,confidence)
-);
-CREATE INDEX merchant_market_evidence_country ON merchant_market_evidence(country,merchant_id);
+CREATE INDEX merchants_markets ON merchants USING GIN ((markets_json::jsonb));
 UPDATE ultrafinance_schema SET version=4;

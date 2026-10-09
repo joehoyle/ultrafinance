@@ -15,6 +15,9 @@ use ultrafinance_core::{
 
 #[derive(ClapArgs)]
 pub struct Args {
+    /// Show detailed per-batch import diagnostics.
+    #[arg(long, global = true)]
+    verbose: bool,
     /// Directory holding original downloads and snapshot metadata.
     #[arg(long, global = true, default_value = "data/sources")]
     cache_dir: PathBuf,
@@ -153,7 +156,7 @@ fn registry(source: DatasetSource) -> Registration {
     let (source, purpose, url, license) = match source {
         DatasetSource::Foursquare => (
             Source::Foursquare,
-            "Merchant knowledge; optional reviewed brand grouping; no locations",
+            "Merchant and outlet knowledge; optional reviewed brand grouping",
             "https://docs.foursquare.com/data-products/docs/access-fsq-os-places",
             "Apache-2.0",
         ),
@@ -293,14 +296,14 @@ async fn download(
             .map(|n| n.to_string())
             .unwrap_or_else(|| "all".into());
         eprintln!("Downloading Foursquare: region={region}, maximum rows={limit_label}");
-        let bytes = tokio::task::spawn_blocking(move || {
+        let export = tokio::task::spawn_blocking(move || {
             super::foursquare_download::export(&executable, &token, &country, foursquare_limit)
         })
         .await??;
         let url = format!(
             "https://catalog.h3-hub.foursquare.com/iceberg?warehouse=places&table=datasets.places_os&region={region}&limit={limit_label}"
         );
-        return save_snapshot(root, r, region, vec![("input.csv", url, bytes)]);
+        return save_foursquare_snapshot(root,r,region,&export.path().join("places.csv"),url);
     }
     let files = urls(r.source, region)?;
     if matches!(r.source, Source::LunchMoney) {
@@ -437,6 +440,53 @@ fn save_snapshot(
     atomic_write(&parent.join("latest"), snapshot.as_bytes())?;
     Ok(path)
 }
+fn save_foursquare_snapshot(
+    root: &Path,
+    r: &Registration,
+    region: &str,
+    input: &Path,
+    url: String,
+) -> Result<PathBuf> {
+    let parent = cache_path(root, r.source, region)?;
+    std::fs::create_dir_all(&parent)?;
+    let staging = tempfile::tempdir_in(&parent)?;
+    let copied = staging.path().join("input.csv");
+    std::fs::copy(input, &copied)?;
+    let mut reader = csv::Reader::from_path(&copied)?;
+    if !reader.headers()?.iter().any(|h| h == "fsq_place_id") {
+        bail!("download is missing CSV column fsq_place_id");
+    }
+    for row in reader.records() {
+        row?;
+    }
+    let fingerprint = ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&copied)?)?;
+    let entries = json!([{"file":"input.csv","url":url,"bytes":std::fs::metadata(&copied)?.len(),"fingerprint":fingerprint}]);
+    let snapshot = format!(
+        "snapshot-{}",
+        ultrafinance_core::eval::fingerprint(&serde_json::to_vec(&entries)?)
+            .replace("fnv1a64:", "")
+    );
+    let path = parent.join(&snapshot);
+    if path.exists() {
+        if ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(
+            path.join("input.csv"),
+        )?)? != fingerprint
+        {
+            bail!("cached snapshot differs from downloaded contents: input.csv");
+        }
+    } else {
+        std::fs::write(
+            staging.path().join("download.json"),
+            serde_json::to_vec_pretty(
+                &json!({"source":metadata(r),"region":region,"files":entries}),
+            )?,
+        )?;
+        std::fs::rename(staging.path(), &path)?;
+    }
+    atomic_write(&parent.join("latest"), snapshot.as_bytes())?;
+    Ok(path)
+}
+
 fn validate_file(source: Source, name: &str, bytes: &[u8]) -> Result<()> {
     if matches!(source, Source::Foursquare) && name == "examples.json" {
         let data: Value = serde_json::from_slice(bytes)?;
@@ -495,8 +545,8 @@ fn snapshot_files(path: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
             bail!("invalid download filename");
         }
         let file = path.join(name);
-        let bytes = std::fs::read(&file)?;
-        if json!(ultrafinance_core::eval::fingerprint(&bytes)) != entry["fingerprint"] {
+        let fingerprint=ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&file)?)?;
+        if json!(fingerprint) != entry["fingerprint"] {
             bail!("downloaded file changed: {name}");
         }
         if name == "examples.json" {
@@ -547,6 +597,7 @@ fn raw_rows(path: &Path, examples: bool, limit: usize, offset: usize) -> Result<
 }
 
 pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
+    ultrafinance_core::set_import_verbose(args.verbose);
     let root = &args.cache_dir;
     let result = match args.command {
         Command::Eval {
@@ -728,7 +779,9 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
             if examples.is_some() && input.is_none() && !matches!(r.source, Source::Foursquare) {
                 bail!("--examples without --input is supported only for Foursquare");
             }
-            let (input, examples) = if let Some(input) = input {
+            let (input, examples) = if let (Source::Foursquare,Some(input),None)=(r.source,input.as_ref(),examples.as_ref()) {
+                snapshot_files(&save_foursquare_snapshot(root,&r,&region,input,format!("local:{}",input.display()))?)?
+            } else if let Some(input) = input {
                 let name = if matches!(r.source, Source::MerchantStudio | Source::LunchMoney) {
                     "input.json"
                 } else {
@@ -786,7 +839,10 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     snapshot_files(&path)?
                 }
             };
-            let contents = std::fs::read_to_string(input)?;
+            let (path,manifest)=if matches!(r.source,Source::Foursquare) && examples.is_none() {
+                datasets::prepare_foursquare_file(&input,&output,&region)?
+            } else {
+                let contents = std::fs::read_to_string(input)?;
             let examples = examples.map(std::fs::read_to_string).transpose()?;
             let (path, manifest) = if let Some(cached) =
                 datasets::cached_bundle(&output, r.source, &contents, examples.as_deref(), &region)?
@@ -806,22 +862,20 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 let path = bundle.save(&output)?;
                 (path, bundle.manifest)
             };
-            drop(contents);
-            drop(examples);
+                (path,manifest)
+            };
             let mut report = json!({"bundle": path, "manifest": manifest, "dry_run": dry_run});
             // Limit the selected records, leaving the complete cached snapshot
             // and prepared bundle intact for later uncapped imports.
             eprintln!("Import: reading prepared source records");
-            let (records, available) =
-                datasets::read_selected_records(&path.join("knowledge.json"), dedupe.limit)?;
-            report["selection"] = dedupe.selection(available, records.len());
-            if !dry_run {
-                let result = ultrafinance_core::dedupe::import(
-                    MerchantStore::configured(database_url)?,
-                    records,
-                    dedupe.options(),
-                )
-                .await?;
+            if dry_run {
+                let (available, selected) = datasets::stream_records(&path.join("knowledge.json"), dedupe.limit, dedupe.chunk_size as usize, |_| Ok(()))?;
+                report["selection"] = dedupe.selection(available, selected);
+            } else {
+                let (result, available, selected) = ultrafinance_core::dedupe::import_file(
+                    MerchantStore::configured(database_url)?, path.join("knowledge.json"), dedupe.limit, dedupe.options(),
+                ).await?;
+                report["selection"] = dedupe.selection(available, selected);
                 report["dry_run"] = json!(result.dedupe.dry_run);
                 report["delta"] = json!(result.delta);
                 report["dedupe"] = json!(result.dedupe);

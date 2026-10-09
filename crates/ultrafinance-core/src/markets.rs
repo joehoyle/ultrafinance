@@ -1,38 +1,6 @@
 //! Known operating coverage is positive evidence, never an exhaustive restriction.
-use crate::{Merchant, location::LocationRecord, store::SourceRecord};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum MarketKind {
-    Declaration,
-    CountryHint,
-    DatasetRegion,
-    Outlet,
-}
-
-/// Qualitative strength of the supplied evidence, not a match probability.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum MarketConfidence {
-    High,
-    Medium,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MarketEvidence {
-    pub country: String,
-    pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_id: Option<String>,
-    pub kind: MarketKind,
-    pub confidence: MarketConfidence,
-}
+use crate::{Merchant, store::SourceRecord};
+use std::collections::{BTreeSet, HashMap};
 
 pub(crate) fn valid_country(country: &str) -> bool {
     country.len() == 2 && country.bytes().all(|b| b.is_ascii_uppercase())
@@ -52,167 +20,59 @@ pub(crate) fn dataset_region(record: &SourceRecord) -> Option<String> {
     };
     (!region.is_empty()).then(|| region.to_owned())
 }
+#[cfg(test)]
 pub(crate) fn source_region(record: &SourceRecord) -> Option<String> {
     let region = dataset_region(record)?.to_ascii_uppercase();
     valid_country(&region).then_some(region)
 }
 
+/// Compact country sets assembled from merchant and source inputs.
 #[derive(Default)]
-pub(crate) struct MarketIndex {
-    evidence: HashMap<String, BTreeSet<MarketEvidence>>,
-    regions: BTreeMap<(String, String), (BTreeSet<String>, usize)>,
+pub(crate) struct MarketCountries {
+    countries: HashMap<String, BTreeSet<String>>,
 }
-impl MarketIndex {
-    fn add(
-        &mut self,
-        id: &str,
-        country: &str,
-        source: &str,
-        external_id: Option<&str>,
-        kind: MarketKind,
-        confidence: MarketConfidence,
-    ) {
+impl MarketCountries {
+    fn add(&mut self, id: &str, country: &str) {
         if valid_country(country) {
-            self.evidence
+            self.countries
                 .entry(id.into())
                 .or_default()
-                .insert(MarketEvidence {
-                    country: country.into(),
-                    source: source.into(),
-                    external_id: external_id.map(str::to_owned),
-                    kind,
-                    confidence,
-                });
+                .insert(country.into());
         }
     }
-    pub fn declaration(
+    pub fn declaration(&mut self, id: &str, merchant: &Merchant) {
+        for country in &merchant.markets {
+            self.add(id, country);
+        }
+    }
+    pub(crate) fn source_fields(
         &mut self,
         id: &str,
         merchant: &Merchant,
-        source: &str,
-        external_id: Option<&str>,
+        hints: &[String],
+        region: Option<&str>,
     ) {
-        // Preserve supplied provenance and confidence rather than upgrading it.
-        for evidence in &merchant.market_evidence {
-            if valid_country(&evidence.country) {
-                self.evidence
-                    .entry(id.into())
-                    .or_default()
-                    .insert(evidence.clone());
-            }
+        self.declaration(id, merchant);
+        for country in hints {
+            self.add(id, country);
         }
-        for country in merchant.markets.iter() {
-            if !merchant
-                .market_evidence
-                .iter()
-                .any(|e| &e.country == country)
-            {
-                self.add(
-                    id,
-                    country,
-                    source,
-                    external_id,
-                    MarketKind::Declaration,
-                    MarketConfidence::High,
-                );
-            }
+        if let Some(region) = region {
+            self.add(id, &region.to_ascii_uppercase());
         }
     }
-    pub fn source(&mut self, id: &str, record: &SourceRecord) {
-        self.declaration(
-            id,
-            &record.merchant,
-            &record.source,
-            Some(&record.external_id),
-        );
-        if let Some(hints) = record.raw["countryHints"].as_array() {
-            for country in hints.iter().filter_map(|v| v.as_str()) {
-                self.add(
-                    id,
-                    country,
-                    &record.source,
-                    Some(&record.external_id),
-                    MarketKind::CountryHint,
-                    MarketConfidence::Medium,
-                );
-            }
-        }
-        if let Some(region) = dataset_region(record) {
-            let entry = self
-                .regions
-                .entry((record.source.clone(), region.clone()))
-                .or_default();
-            entry.0.insert(id.into());
-            entry.1 += 1;
-        }
-        if let Some(region) = source_region(record) {
-            self.add(
-                id,
-                &region,
-                &record.source,
-                Some(&record.external_id),
-                MarketKind::DatasetRegion,
-                MarketConfidence::Medium,
-            );
-        }
-    }
-    pub fn outlet(&mut self, id: &str, record: &LocationRecord) {
-        if let Some(country) = &record.location.country {
-            self.add(
-                id,
-                country,
-                &record.source,
-                Some(&record.external_id),
-                MarketKind::Outlet,
-                MarketConfidence::High,
-            );
-        }
-    }
-    pub fn region_stats(&self) -> Vec<crate::store::MerchantRegionStats> {
-        self.regions
-            .iter()
-            .map(
-                |((source, region), (merchants, records))| crate::store::MerchantRegionStats {
-                    source: source.clone(),
-                    region: region.clone(),
-                    merchants: merchants.len(),
-                    records: *records,
-                },
-            )
-            .collect()
+    pub(crate) fn outlet_country(&mut self, id: &str, country: &str) {
+        self.add(id, country);
     }
     pub fn hydrate(&self, mut merchant: Merchant) -> Merchant {
-        let evidence = self.evidence.get(&merchant.id).cloned().unwrap_or_default();
-        merchant.markets = evidence
-            .iter()
-            .map(|e| e.country.clone())
-            .collect::<BTreeSet<_>>()
+        merchant.markets = self
+            .countries
+            .get(&merchant.id)
             .into_iter()
+            .flatten()
+            .cloned()
             .collect();
-        merchant.market_evidence = evidence.into_iter().collect();
         merchant
     }
-}
-
-pub(crate) fn market_counts(
-    merchants: &[Merchant],
-) -> (usize, Vec<crate::store::MerchantMarketStats>) {
-    let mut counts = BTreeMap::<String, usize>::new();
-    let mut unknown = 0;
-    for merchant in merchants {
-        if merchant.markets.is_empty() {
-            unknown += 1;
-        }
-        for market in &merchant.markets {
-            *counts.entry(market.clone()).or_default() += 1;
-        }
-    }
-    let mut rows: Vec<_> = counts
-        .into_iter()
-        .map(|(market, merchants)| crate::store::MerchantMarketStats { market, merchants })
-        .collect();
-    rows.sort_by(|a, b| b.merchants.cmp(&a.merchants).then(a.market.cmp(&b.market)));
-    (unknown, rows)
 }
 
 /// One-time storage migration, not an accepted merchant input format.
@@ -251,6 +111,7 @@ pub(crate) fn migrate_country(data: &str, source_record: bool) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::location::LocationRecord;
     use crate::{import, store::MerchantStore};
     use serde_json::json;
 
@@ -270,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn market_evidence_combines_sources_outlets_and_manual_declarations() -> anyhow::Result<()> {
+    fn markets_combine_sources_outlets_and_manual_declarations() -> anyhow::Result<()> {
         let store = MerchantStore::temporary()?;
         let studio = r#"{"schemaVersion":"1.1.0","merchants":[{"id":"brand","canonicalName":"Brand","countryHints":["US","CA","CA"]}]}"#;
         let mut records = import::merchant_studio(studio)?;
@@ -297,29 +158,22 @@ mod tests {
         store.import_locations(&outlets)?;
         let merchant = store.list(None, 10, 0)?.merchants.remove(0);
         assert_eq!(merchant.markets, ["AU", "CA", "GB", "NZ", "US"]);
-        assert_eq!(merchant.market_evidence.len(), 5);
-        let au = merchant
-            .market_evidence
-            .iter()
-            .find(|e| e.country == "AU")
-            .unwrap();
-        assert_eq!(au.kind, MarketKind::DatasetRegion);
-        assert_eq!(au.confidence, MarketConfidence::Medium);
-        assert_eq!(au.external_id.as_deref(), Some("brand"));
-        let nz = merchant
-            .market_evidence
-            .iter()
-            .find(|e| e.country == "NZ")
-            .unwrap();
-        assert_eq!(nz.kind, MarketKind::Outlet);
-        assert_eq!(nz.confidence, MarketConfidence::High);
+        let mut client = postgres::Client::connect(store.temporary_url(), postgres::NoTls)?;
+        let stored: String = client
+            .query_one("SELECT markets_json FROM merchants WHERE id=$1", &[&id])?
+            .get(0);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&stored)?,
+            merchant.markets
+        );
+        assert!(client.query_one("SELECT to_regclass('source_market_inputs') IS NULL AND to_regclass('merchant_market_evidence') IS NULL AND NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND column_name='market_evidence_json')", &[])?.get::<_,bool>(0));
         assert_eq!(store.list(Some("CA"), 10, 0)?.total, 1);
         assert_eq!(store.list(Some("DE"), 10, 0)?.total, 0);
         let stats = store.stats()?;
         assert_eq!(stats.total, 1);
         assert_eq!(stats.by_market.len(), 5);
         assert_eq!(stats.by_source_region[0].region, "au");
-        assert_eq!(stats.without_market_evidence, 0);
+        assert_eq!(stats.without_markets, 0);
         // Refresh removes obsolete source hints, while manual and outlet evidence survive.
         records[0].raw = json!({"countryHints":["CA"]});
         regional.version = Some("global:snapshot".into());
@@ -353,15 +207,14 @@ mod tests {
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0].merchant.id, "b");
         assert_eq!(store.search("Same Brand", Some("DE"), 1)?.len(), 3);
-        assert_eq!(store.stats()?.without_market_evidence, 1);
+        assert_eq!(store.stats()?.without_markets, 1);
         Ok(())
     }
 
     #[test]
-    fn publisher_geography_is_not_coverage_and_supplied_confidence_survives() -> anyhow::Result<()>
-    {
+    fn publisher_geography_is_not_coverage() -> anyhow::Result<()> {
         let mut records = import::catalog(
-            r#"[{"id":"brand","name":"Brand","markets":["CA"],"market_evidence":[{"country":"CA","source":"reviewed-dataset","external_id":"x","kind":"country_hint","confidence":"medium"}]}]"#,
+            r#"[{"id":"brand","name":"Brand","markets":["CA"]}]"#,
             "custom",
         )?;
         records[0].version = Some("us:snapshot".into());
@@ -370,13 +223,6 @@ mod tests {
         store.import(&records)?;
         let merchant = store.list(None, 10, 0)?.merchants.remove(0);
         assert_eq!(merchant.markets, ["CA", "NZ"]);
-        let evidence = merchant
-            .market_evidence
-            .iter()
-            .find(|e| e.country == "CA")
-            .unwrap();
-        assert_eq!(evidence.confidence, MarketConfidence::Medium);
-        assert_eq!(evidence.source, "reviewed-dataset");
         assert!(store.stats()?.by_source_region.is_empty());
         assert!(
             serde_json::from_value::<Merchant>(json!({"id":"old","name":"Old","country":"CA"}))

@@ -11,7 +11,7 @@ fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-pub fn export(executable: &Path, token: &str, region: &str, limit: Option<u32>) -> Result<Vec<u8>> {
+pub fn export(executable: &Path, token: &str, region: &str, limit: Option<u32>) -> Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
     let output = dir.path().join("places.csv");
     let init = dir.path().join("empty-init");
@@ -63,5 +63,6 @@ pub fn export(executable: &Path, token: &str, region: &str, limit: Option<u32>) 
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    std::fs::read(output).context("Cannot read Foursquare export")
+    if !output.is_file() {bail!("Cannot read Foursquare export");}
+    Ok(dir)
 }

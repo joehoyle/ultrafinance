@@ -976,7 +976,7 @@ fn locations_import_list_eval_and_structured_flags_work() {
 }
 
 #[test]
-fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
+fn merchant_stats_counts_linked_sources_and_missing_markets() {
     use ultrafinance_core::{import, store::MerchantStore};
     let path = ultrafinance_core::store::MerchantStore::temporary().unwrap();
     let db = path.temporary_url();
@@ -996,7 +996,7 @@ fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
     let empty: Value = serde_json::from_slice(&invoke(true)).unwrap();
     assert_eq!(
         empty,
-        json!({"total":0,"manual":0,"without_source":0,"by_source":[],"without_market_evidence":0,"by_market":[],"by_source_region":[]})
+        json!({"total":0,"manual":0,"without_source":0,"by_source":[],"without_markets":0,"by_market":[],"by_source_region":[]})
     );
     let store = MerchantStore::postgres(db).unwrap();
     let catalog = r#"[{"id":"one","name":"One","markets":["CA"]},{"id":"two","name":"Two","markets":["CA"]}]"#;
@@ -1027,7 +1027,7 @@ fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
         json!({
             "total":2,"manual":2,"without_source":1,
             "by_source":[{"source":"alpha","merchants":1,"records":2},{"source":"beta","merchants":1,"records":1}],
-            "without_market_evidence":1,"by_market":[{"market":"CA","merchants":1}],"by_source_region":[]
+            "without_markets":1,"by_market":[{"market":"CA","merchants":1}],"by_source_region":[]
         })
     );
     let text = String::from_utf8(invoke(false)).unwrap();
@@ -1037,7 +1037,7 @@ fn merchant_stats_counts_linked_sources_and_missing_market_evidence() {
         "Without imported source: 1",
         "alpha",
         "beta",
-        "No market evidence: 1",
+        "No known markets: 1",
         "CA",
     ] {
         assert!(text.contains(expected), "{text}");
@@ -1088,10 +1088,8 @@ fn merchant_markets_flags_replace_country_and_exact_matches_remain_eligible() {
     assert!(listed.status.success());
     let page: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(page["total"], 1);
-    assert_eq!(
-        page["merchants"][0]["market_evidence"][0]["source"],
-        "manual"
-    );
+    assert_eq!(page["merchants"][0]["markets"], json!(["CA", "US"]));
+    assert!(page["merchants"][0].get("market_evidence").is_none());
     let enriched = run(
         &[
             "--database-url",
@@ -1588,21 +1586,25 @@ fn file_import_limits_apply_to_native_and_prepared_datasets_before_reconciliatio
             );
             serde_json::from_slice::<Value>(&output.stdout).unwrap()
         };
-        let preview = execute(&["--limit", "2", "--dedupe-dry-run"]);
+        let preview = execute(&["--limit", "2", "--dedupe-dry-run", "--chunk-size", "1"]);
         assert_eq!(preview["selection"]["selected_records"], 2);
+        assert_eq!(preview["selection"]["chunk_size"], 1);
         assert_eq!(preview["imported"], 0);
         assert_eq!(store.stats().unwrap().total, 0);
         assert_eq!(execute(&["--limit", "2"])["imported"], 2);
         assert_eq!(store.stats().unwrap().total, 2);
         assert!(store.resolve_source(source, "c").unwrap().is_none());
         assert_eq!(
-            execute(&["--limit", "99"])["selection"]["selected_records"],
+            execute(&["--limit", "99", "--chunk-size", "10000"])["selection"]["selected_records"],
             3
         );
         assert_eq!(store.stats().unwrap().total, 3);
         let mut invalid = vec!["--database-url", store.temporary_url()];
         invalid.extend_from_slice(&command);
         invalid.extend([file.to_str().unwrap(), "--limit", "0"]);
+        assert!(!run(&invalid, None).status.success());
+        invalid.truncate(invalid.len() - 2);
+        invalid.extend(["--chunk-size", "0"]);
         assert!(!run(&invalid, None).status.success());
     }
 }

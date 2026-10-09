@@ -99,9 +99,9 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
 }
 
 #[test]
-fn foursquare_import_refresh_keeps_brand_identity_without_creating_locations() {
+fn foursquare_import_refresh_keeps_brand_and_location_identities() {
     let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
-    let input = "fsq_place_id,name,country,date_closed,fsq_category_ids\na,Starbucks Bromont,CA,,\"[\"\"restaurant\"\"]\"\nb,Starbucks Toronto,CA,,\"[\"\"restaurant\"\"]\"\n";
+    let input = "fsq_place_id,name,country,address,date_closed,fsq_category_ids\na,Starbucks Bromont,CA,1 Main St,,\"[\"\"restaurant\"\"]\"\nb,Starbucks Toronto,CA,2 Main St,,\"[\"\"restaurant\"\"]\"\n";
     let review = r#"{"brands":[{"id":"starbucks","name":"Starbucks","evidence":"Reviewed directory","place_ids":["a","b"]}]}"#;
     let bundle = ultrafinance_core::datasets::prepare(
         ultrafinance_core::datasets::Source::Foursquare,
@@ -116,9 +116,12 @@ fn foursquare_import_refresh_keeps_brand_identity_without_creating_locations() {
         .unwrap()
         .unwrap();
     assert_eq!(store.stats().unwrap().total, 1);
-    assert!(store.locations(&id).unwrap().is_empty());
+    let locations = store.locations(&id).unwrap();
+    assert_eq!(locations.len(), 2);
     assert_eq!(store.get(&id).unwrap().unwrap().markets, ["CA"]);
     assert_eq!(store.import_delta(&bundle.records).unwrap().unchanged, 1);
+    let refreshed = store.locations(&id).unwrap();
+    assert_eq!(locations.iter().map(|r| &r.location.id).collect::<Vec<_>>(), refreshed.iter().map(|r| &r.location.id).collect::<Vec<_>>());
     let updated = review.replace("\"name\":\"Starbucks\"", "\"name\":\"Starbucks Coffee\"");
     let bundle = ultrafinance_core::datasets::prepare(
         ultrafinance_core::datasets::Source::Foursquare,
@@ -274,7 +277,7 @@ fn source_import_reports_real_deltas_and_records_keep_stable_mappings() {
             .unwrap(),
     );
     assert_eq!(rows[0]["merchant_id"], id);
-    assert_eq!(rows[0]["record"]["raw"]["canonicalName"], "Alpha Updated");
+    assert_eq!(rows[0]["record"]["merchant"]["name"], "Alpha Updated");
 }
 
 #[test]
@@ -348,7 +351,7 @@ fn source_eval_prepares_cached_moneyvis_and_runs_unlabeled_holdout_without_impor
             id: "sample-shop".into(),
             name: description.into(),
             markets: vec![],
-            market_evidence: vec![],
+
             website: None,
             logo_url: None,
             logo_source: None,
@@ -608,7 +611,7 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
         command
             .args(["sources", "--cache-dir"])
             .arg(root.path().join("cache"))
-            .args(["import", "foursquare", "--input"])
+            .args(["import", "foursquare", "--verbose", "--input"])
             .arg(&input)
             .args(["--region", "ca", "--output"])
             .arg(root.path().join("bundles"))
@@ -619,6 +622,10 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
         }
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("2 available source records; 2 selected"));
+        assert!(stderr.contains("100.0% · 2/2"));
+        assert!(stderr.contains("matching new merchant identities"));
+        assert!(stderr.contains("processing places for linked locations 2/2 (100%)"));
         if preview {
             assert!(stderr.contains("identity preview complete"));
             assert!(!stderr.contains("Import: committed"));
@@ -676,7 +683,20 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
             .arg(root.path().join("bundles"))
             .args(extra)
             .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url());
-        json(command.output().unwrap())
+        let output = command.output().unwrap();
+        if !extra.contains(&"--dry-run") {
+            let expected = extra.windows(2).find(|pair| pair[0] == "--limit")
+                .map_or("3", |pair| pair[1]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(&format!("3 available source records; {expected} selected")));
+            assert!(stderr.contains(&format!("100.0% · {expected}/{expected}")));
+            assert!(stderr.contains("committing merchant and location changes"));
+            assert!(!stderr.contains("looking up existing source identities"));
+            assert!(!stderr.contains("matching new merchant identities"));
+            assert!(!stderr.contains("reconciling merchant groups"));
+            assert!(!stderr.contains("checking/writing source records"));
+        }
+        json(output)
     };
     let preview = execute(&[
         "--input",

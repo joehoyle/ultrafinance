@@ -302,7 +302,7 @@
         "tags": [
           "Merchants"
         ],
-        "summary": "Explore the merchant catalog without calling the AI provider.\nBrowsing is alphabetical; search ranks a bounded candidate pool rather than\nmatching every catalog row. Search totals refer to that pool (at most 255 for\nexact alias collisions, otherwise 100), not the full catalog. Results include\nmerchant records with market evidence, without aliases or internal matching scores.",
+        "summary": "Explore the merchant catalog without calling the AI provider.\nBrowsing is alphabetical; search ranks a bounded candidate pool rather than\nmatching every catalog row. Search totals refer to that pool (at most 255 for\nexact alias collisions, otherwise 100), not the full catalog. Results include\nmerchant records with known markets, without aliases or internal matching scores.",
         "operationId": "merchants",
         "parameters": [
           {
@@ -786,53 +786,6 @@
           }
         ]
       },
-      "MarketConfidence": {
-        "type": "string",
-        "description": "Qualitative strength of the supplied evidence, not a match probability.",
-        "enum": [
-          "high",
-          "medium"
-        ]
-      },
-      "MarketEvidence": {
-        "type": "object",
-        "required": [
-          "country",
-          "source",
-          "kind",
-          "confidence"
-        ],
-        "properties": {
-          "confidence": {
-            "$ref": "#/components/schemas/MarketConfidence"
-          },
-          "country": {
-            "type": "string"
-          },
-          "external_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "kind": {
-            "$ref": "#/components/schemas/MarketKind"
-          },
-          "source": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": false
-      },
-      "MarketKind": {
-        "type": "string",
-        "enum": [
-          "declaration",
-          "country_hint",
-          "dataset_region",
-          "outlet"
-        ]
-      },
       "Merchant": {
         "type": "object",
         "required": [
@@ -856,19 +809,12 @@
               "null"
             ]
           },
-          "market_evidence": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MarketEvidence"
-            },
-            "description": "Source and qualitative confidence for each known market."
-          },
           "markets": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Countries with evidence of operation. Coverage is not exhaustive."
+            "description": "Known countries of operation. Coverage is not exhaustive."
           },
           "name": {
             "type": "string"

@@ -308,7 +308,7 @@ enum MerchantCommand {
     /// List stored merchants alphabetically, without calling Jev.
     #[command(alias = "ls")]
     List {
-        /// Filter by known market evidence; merchants without that evidence are excluded.
+        /// Filter by known operating country; merchants without that country are excluded.
         #[arg(long = "market")]
         market: Option<String>,
         #[arg(long, default_value = "50")]
@@ -356,6 +356,9 @@ enum MerchantCommand {
 
 #[derive(Args)]
 pub(crate) struct ImportDedupeArgs {
+    /// Maximum source records reconciled at a time; larger chunks use more memory.
+    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..))]
+    chunk_size: u32,
     /// Import at most this many source records, in prepared/file order, before reconciliation.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     limit: Option<u32>,
@@ -373,11 +376,12 @@ impl ImportDedupeArgs {
     }
     pub(crate) fn selection(&self, available: usize, selected: usize) -> serde_json::Value {
         eprintln!("Import: selected {selected} of {available} source records");
-        serde_json::json!({"available_records":available,"selected_records":selected,"limit":self.limit})
+        serde_json::json!({"available_records":available,"selected_records":selected,"limit":self.limit,"chunk_size":self.chunk_size})
     }
     pub(crate) fn options(&self) -> ultrafinance_core::dedupe::ImportOptions {
         ultrafinance_core::dedupe::ImportOptions {
             dry_run: self.dedupe_dry_run,
+            chunk_size: self.chunk_size as usize,
         }
     }
 }
@@ -785,16 +789,10 @@ async fn main() -> Result<()> {
                 );
             }
             DatasetCommand::Apply { file, dedupe } => {
-                let mut records: Vec<ultrafinance_core::store::SourceRecord> =
-                    serde_json::from_str(&std::fs::read_to_string(file)?)?;
-                let selection = dedupe.select(&mut records);
-                let count = records.len();
-                let result = ultrafinance_core::dedupe::import(
-                    MerchantStore::configured(cli.database_url.as_deref())?,
-                    records,
-                    dedupe.options(),
-                )
-                .await?;
+                let (result, available, count) = ultrafinance_core::dedupe::import_file(
+                    MerchantStore::configured(cli.database_url.as_deref())?, file, dedupe.limit, dedupe.options(),
+                ).await?;
+                let selection = dedupe.selection(available, count);
                 println!(
                     "{}",
                     serde_json::json!({"imported":if result.dedupe.dry_run {0} else {count},"reconciliation":result,"selection":selection})
@@ -1009,7 +1007,7 @@ async fn main() -> Result<()> {
                         id: id.unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple())),
                         name,
                         markets,
-                        market_evidence: vec![],
+
                         website,
                         logo_source: logo_source
                             .or_else(|| logo_url.as_ref().map(|_| "manual".into())),

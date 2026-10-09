@@ -1,8 +1,7 @@
-//! Merchant-only import of a bounded, filtered FSQ OS Places CSV export.
+//! Merchant and outlet import of a bounded, filtered FSQ OS Places CSV export.
 //! Brand membership is explicitly reviewed, never inferred from name/domain equality.
 use crate::{
     Merchant,
-    markets::{MarketConfidence, MarketEvidence, MarketKind},
     store::SourceRecord,
 };
 use anyhow::{Context, Result, bail};
@@ -242,16 +241,6 @@ pub fn prepare(
             .iter()
             .map(|p| p["country"].as_str().unwrap().to_owned())
             .collect();
-        let evidence = countries
-            .iter()
-            .map(|country| MarketEvidence {
-                country: country.clone(),
-                source: "foursquare".into(),
-                external_id: Some(key.clone()),
-                kind: MarketKind::CountryHint,
-                confidence: MarketConfidence::Medium,
-            })
-            .collect();
         records.push(SourceRecord {
             source: "foursquare".into(),
             external_id: key.clone(),
@@ -259,7 +248,6 @@ pub fn prepare(
                 id: key.clone(),
                 name: name.into(),
                 markets: countries.into_iter().collect(),
-                market_evidence: evidence,
                 website: site,
                 logo_url: None,
                 logo_source: None,
@@ -275,6 +263,77 @@ pub fn prepare(
         });
     }
     Ok((records, skipped))
+}
+
+/// Derive independently identified outlets from prepared place evidence. Older
+/// cached bundles already contain these fields; catalog source rows do not.
+pub(crate) fn locations(record: &SourceRecord) -> Result<Vec<crate::location::LocationRecord>> {
+    use crate::location::{LocationData, LocationPrecision, LocationRecord, MerchantReference};
+    if record.source != "foursquare" {
+        return Ok(vec![]);
+    }
+    let mut records = Vec::new();
+    for place in record.raw["places"].as_array().into_iter().flatten() {
+        let text = |field: &str| {
+            place[field]
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 512)
+                .map(str::to_owned)
+        };
+        let Some(address) = text("address") else {
+            continue;
+        };
+        let Some(country) = text("country").filter(|c| crate::markets::valid_country(c)) else {
+            continue;
+        };
+        let Some(id) = text("fsq_place_id") else {
+            bail!("Foursquare outlet requires a place ID")
+        };
+        let name = text("name").unwrap_or_else(|| record.merchant.name.clone());
+        // A bare brand name is insufficient evidence of this physical outlet.
+        let alias = format!("{name} {address}");
+        // Malformed optional geometry must not discard usable address evidence.
+        let coordinate = |field: &str, max: f64| {
+            place[field]
+                .as_f64()
+                .or_else(|| place[field].as_str()?.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite() && (-max..=max).contains(v))
+        };
+        let pair = coordinate("latitude", 90.0).zip(coordinate("longitude", 180.0));
+        let outlet = LocationRecord {
+            provenance: vec![],
+            source: record.source.clone(),
+            external_id: format!("place:{id}"),
+            merchant: MerchantReference::Source {
+                source: record.source.clone(),
+                external_id: record.external_id.clone(),
+            },
+            location: LocationData {
+                id: None,
+                name: Some(name.clone()),
+                precision: Some(LocationPrecision::Outlet),
+                address: Some(address),
+                city: text("locality"),
+                region: text("region"),
+                postal_code: text("postcode"),
+                country: Some(country),
+                store_number: None,
+                latitude: pair.map(|p| p.0),
+                longitude: pair.map(|p| p.1),
+            },
+            aliases: vec![alias],
+            transaction_pattern: None,
+            place_ids: BTreeMap::from([("foursquare".into(), id)]),
+            manual_override: false,
+            attribution: record.attribution.clone(),
+            license: record.license.clone(),
+            url: record.url.clone(),
+        };
+        outlet.validate()?;
+        records.push(outlet);
+    }
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -296,6 +355,22 @@ mod tests {
                 .unwrap();
         }
         String::from_utf8(w.into_inner().unwrap()).unwrap()
+    }
+    #[test]
+    fn outlet_fields_require_addresses_and_optional_coordinates_are_paired() -> Result<()> {
+        let input = "fsq_place_id,name,country,address,latitude,longitude,fsq_category_ids,date_closed\na,H&M,CA,1 Main St,43.6,-79.3,\"[\"\"restaurant\"\"]\",\nb,Cafe,CA,,43.6,-79.3,\"[\"\"restaurant\"\"]\",\nc,Cafe,CA,3 Main St,NaN,-79.3,\"[\"\"restaurant\"\"]\",\nd,Cafe,CA,4 Main St,43.6,181,\"[\"\"restaurant\"\"]\",\n";
+        let (records, _) = prepare(input, None, "ca")?;
+        let outlet = locations(&records[0])?.remove(0);
+        assert_eq!(outlet.location.name.as_deref(), Some("H&M"));
+        assert_eq!(outlet.location.latitude, Some(43.6));
+        assert_eq!(outlet.aliases, vec!["H&M 1 Main St"]);
+        assert!(locations(&records[1])?.is_empty());
+        for record in &records[2..] {
+            let outlet = locations(record)?.remove(0);
+            assert!(outlet.location.latitude.is_none());
+            assert!(outlet.location.longitude.is_none());
+        }
+        Ok(())
     }
     #[test]
     fn reviewed_brands_group_places_but_name_and_domain_do_not() {

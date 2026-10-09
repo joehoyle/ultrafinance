@@ -41,7 +41,7 @@ pub fn merchant_studio(contents: &str) -> Result<Vec<SourceRecord>> {
                 id: entry.id.clone(),
                 name: entry.canonical_name,
                 markets: vec![],
-                market_evidence: vec![],
+
                 website: entry.website.map(|s| {
                     if s.starts_with("https://") || s.starts_with("http://") {
                         s

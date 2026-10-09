@@ -272,6 +272,24 @@ impl MerchantStore {
     pub fn import_delta(&self, r: &[SourceRecord]) -> Result<ImportDelta> {
         self.0.import(r)
     }
+    pub(crate) fn reconcile_import(
+        &self,
+        records: Vec<SourceRecord>,
+        dry_run: bool,
+        chunk_size: usize,
+    ) -> Result<crate::dedupe::ImportReport> {
+        self.0.reconcile_import(records, dry_run, chunk_size)
+    }
+    pub(crate) fn reconcile_file(
+        &self,
+        path: std::path::PathBuf,
+        limit: Option<u32>,
+        dry_run: bool,
+        chunk_size: usize,
+    ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
+        self.0.reconcile_file(path, limit, dry_run, chunk_size)
+    }
+    #[cfg(test)]
     pub(crate) fn apply_reconciled_import(
         &self,
         expected: &crate::dedupe::Snapshot,
@@ -304,6 +322,13 @@ impl MerchantStore {
     pub fn resolve_source(&self, s: &str, id: &str) -> Result<Option<String>> {
         self.0.resolve_source(s, id)
     }
+    pub(crate) fn dedupe_candidates(
+        &self,
+        max_pairs: usize,
+    ) -> Result<(crate::dedupe::Snapshot, Vec<(usize, usize)>)> {
+        self.0.dedupe_candidates(max_pairs)
+    }
+    #[cfg(test)]
     pub fn dedupe_snapshot(&self) -> Result<crate::dedupe::Snapshot> {
         self.0.dedupe_snapshot()
     }
@@ -370,7 +395,7 @@ pub struct MerchantStats {
     pub manual: usize,
     pub without_source: usize,
     pub by_source: Vec<MerchantSourceStats>,
-    pub without_market_evidence: usize,
+    pub without_markets: usize,
     pub by_market: Vec<MerchantMarketStats>,
     pub by_source_region: Vec<MerchantRegionStats>,
 }
@@ -410,7 +435,32 @@ pub struct SourceRecord {
     pub license: String,
     pub url: String,
     pub version: Option<String>,
+    /// Upstream input payload. Persisted records expose only matching fields.
     pub raw: Value,
+}
+
+impl SourceRecord {
+    /// Only raw fields that affect matching are retained in the catalog.
+    pub(crate) fn matching_raw(&self) -> Value {
+        let mut raw = serde_json::Map::new();
+        for key in ["countryHints", "negativeAliases"] {
+            let values: Vec<Value> = self.raw[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(|v| Value::String(v.into())))
+                .collect();
+            if !values.is_empty() {
+                raw.insert(key.into(), Value::Array(values));
+            }
+        }
+        for key in ["transaction_text_regexp", "parent_id"] {
+            if let Some(value) = self.raw[key].as_str() {
+                raw.insert(key.into(), Value::String(value.into()));
+            }
+        }
+        Value::Object(raw)
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -464,11 +514,6 @@ pub(crate) fn validate(merchant: &Merchant) -> Result<()> {
         .any(|c| !crate::markets::valid_country(c))
     {
         bail!("markets must contain two-letter uppercase country codes");
-    }
-    for evidence in &merchant.market_evidence {
-        if !crate::markets::valid_country(&evidence.country) || evidence.source.trim().is_empty() {
-            bail!("market evidence must have a valid country and nonblank source");
-        }
     }
     if let Some(logo) = &merchant.logo_url {
         let url = reqwest::Url::parse(logo)
@@ -604,7 +649,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             markets: vec![country.into()],
-            market_evidence: vec![],
+
             website: None,
             logo_url: None,
             logo_source: None,
@@ -799,7 +844,7 @@ mod tests {
         let id = db.resolve_source(&a.source, "a").unwrap().unwrap();
         let mut a = a;
         a.version = Some("new-whole-file-version".into());
-        b.raw = serde_json::json!({"changed":true});
+        b.raw = serde_json::json!({"countryHints":["CA"],"discarded":true});
         let second = db.import_delta(&[a.clone(), b]).unwrap();
         assert_eq!((second.added, second.updated, second.unchanged), (0, 1, 1));
         assert_eq!(db.resolve_source(&a.source, "a").unwrap().unwrap(), id);
@@ -807,7 +852,10 @@ mod tests {
         assert_eq!(third.unchanged, 1);
         let rows = db.source_records(&a.source, None, 10, 0).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1]["record"]["raw"]["changed"], true);
+        assert_eq!(
+            rows[1]["record"]["raw"],
+            serde_json::json!({"countryHints":["CA"]})
+        );
         assert_eq!(
             db.source_records(&a.source, Some("b"), 1, 0).unwrap().len(),
             1

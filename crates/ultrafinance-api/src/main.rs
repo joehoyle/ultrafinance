@@ -178,7 +178,7 @@ struct MerchantQuery {
 /// Browsing is alphabetical; search ranks a bounded candidate pool rather than
 /// matching every catalog row. Search totals refer to that pool (at most 255 for
 /// exact alias collisions, otherwise 100), not the full catalog. Results include
-/// merchant records with market evidence, without aliases or internal matching scores.
+/// merchant records with known markets, without aliases or internal matching scores.
 #[utoipa::path(get, path = "/v1/merchants", tag = "Merchants",
     params(MerchantQuery),
     responses(

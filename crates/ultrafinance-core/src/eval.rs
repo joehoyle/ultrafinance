@@ -122,6 +122,23 @@ pub fn fingerprint(bytes: &[u8]) -> String {
     format!("fnv1a64:{value:016x}")
 }
 
+/// Fingerprint a file/stream without retaining its contents.
+pub fn fingerprint_reader(mut reader: impl std::io::Read) -> Result<String> {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut buffer = [0; 65536];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        for byte in &buffer[..n] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(format!("fnv1a64:{hash:016x}"))
+}
+
 /// Validate a suite before starting retrieval or provider calls.
 pub fn parse_suite(contents: &str) -> Result<Suite> {
     let suite: Suite = serde_json::from_str(contents)?;
@@ -410,7 +427,7 @@ mod tests {
             id: "mer_a".into(),
             name: "Julius Café".into(),
             markets: vec!["CA".into()],
-            market_evidence: vec![],
+
             website: None,
             logo_url: None,
             logo_source: None,
@@ -447,7 +464,7 @@ mod tests {
             id: "mer_a".into(),
             name: "Julius Café".into(),
             markets: vec![],
-            market_evidence: vec![],
+
             website: None,
             logo_url: None,
             logo_source: None,
@@ -480,7 +497,7 @@ mod tests {
             id: "a".into(),
             name: "Julius Cafe".into(),
             markets: vec![],
-            market_evidence: vec![],
+
             website: None,
             logo_url: None,
             logo_source: None,

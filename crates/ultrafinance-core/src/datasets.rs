@@ -10,6 +10,12 @@ use std::{
     path::Path,
 };
 
+#[path="datasets/foursquare_file.rs"]
+mod foursquare_file;
+pub fn prepare_foursquare_file(input:&Path,output:&Path,region:&str)->Result<(std::path::PathBuf,Manifest)> {
+    foursquare_file::prepare_file(input,output,region)
+}
+
 #[derive(Clone, Copy)]
 pub enum Source {
     MerchantStudio,
@@ -164,12 +170,11 @@ fn examples(value: &str) -> Result<Vec<String>> {
 }
 
 fn adapter_version(source: Source) -> u32 {
-    if matches!(source, Source::LunchMoney | Source::Foursquare) {
-        2
-    } else {
-        1
-    }
+    // The source-input schema removed Merchant.market_evidence. Rebuild older
+    // prepared bundles from raw snapshots instead of deserializing that field.
+    if matches!(source, Source::LunchMoney | Source::Foursquare) { 4 } else { 3 }
 }
+
 fn bundle_path(
     directory: &Path,
     source: &str,
@@ -223,6 +228,108 @@ pub fn cached_bundle(
         }
     }
     Ok(Some((path, manifest)))
+}
+
+/// Count the actual prepared array without materializing source records. Saved
+/// knowledge may be edited, so manifest counts are not authoritative at apply.
+pub(crate) fn count_records(path: &Path) -> Result<usize> {
+    use serde::Deserializer as _;
+    struct Count;
+    impl<'de> serde::de::Visitor<'de> for Count {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an array of source records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<usize, A::Error> {
+            let mut count = 0;
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() { count += 1; }
+            Ok(count)
+        }
+    }
+    let file = std::fs::File::open(path)?;
+    let bytes = usize::try_from(file.metadata()?.len())?;
+    let reader = crate::import_progress::Reader::new(file, "counting prepared records (bytes)", bytes);
+    let mut decoder = serde_json::Deserializer::from_reader(std::io::BufReader::with_capacity(1024 * 1024, reader));
+    let count = decoder.deserialize_seq(Count)?;
+    decoder.end()?;
+    Ok(count)
+}
+
+/// Parse a source-record array with bounded allocation. The callback runs for
+/// each selected chunk; unselected entries and the file tail remain validated.
+pub fn stream_records(
+    path: &Path,
+    limit: Option<u32>,
+    chunk_size: usize,
+    mut consume: impl FnMut(Vec<SourceRecord>) -> Result<()>,
+) -> Result<(usize, usize)> {
+    use serde::Deserializer as _;
+    if chunk_size == 0 {
+        bail!("source record chunk size must be positive");
+    }
+    struct Stream<'a, F> {
+        limit: usize,
+        size: usize,
+        consume: &'a mut F,
+        failure: &'a mut Option<anyhow::Error>,
+    }
+    impl<'de, F: FnMut(Vec<SourceRecord>) -> Result<()>> serde::de::Visitor<'de> for Stream<'_, F> {
+        type Value = (usize, usize);
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an array of source records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut chunk = Vec::with_capacity(self.size);
+            let mut available = 0;
+            let mut selected = 0;
+            while selected < self.limit {
+                let Some(r) = seq.next_element::<SourceRecord>()? else {
+                    break;
+                };
+                chunk.push(r);
+                selected += 1;
+                available += 1;
+                if chunk.len() == self.size
+                    && let Err(error) =
+                        (self.consume)(std::mem::replace(&mut chunk, Vec::with_capacity(self.size)))
+                {
+                    *self.failure = Some(error);
+                    return Err(serde::de::Error::custom("source import chunk failed"));
+                }
+            }
+            if !chunk.is_empty()
+                && let Err(error) = (self.consume)(chunk)
+            {
+                *self.failure = Some(error);
+                return Err(serde::de::Error::custom("source import chunk failed"));
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                available += 1;
+            }
+            Ok((available, selected))
+        }
+    }
+    let file = std::fs::File::open(path)?;
+    let bytes = usize::try_from(file.metadata()?.len())?;
+    let reader = std::io::BufReader::with_capacity(1024 * 1024,
+        crate::import_progress::Reader::new(file, "reading prepared records (bytes)", bytes));
+    let mut decoder = serde_json::Deserializer::from_reader(reader);
+    let mut failure = None;
+    let result = decoder.deserialize_seq(Stream {
+        limit: limit.map_or(usize::MAX, |n| n as usize),
+        size: chunk_size,
+        consume: &mut consume,
+        failure: &mut failure,
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    let result = result?;
+    decoder.end()?;
+    Ok(result)
 }
 
 // Parse the complete JSON array, but allocate source records only for the
@@ -363,7 +470,7 @@ pub fn prepare(
                     id: id.into(),
                     name: brand.into(),
                     markets: vec![],
-                    market_evidence: vec![],
+
                     website: (!field(&row, "website_url")?.is_empty())
                         .then(|| row["website_url"].clone()),
                     logo_url: None,
@@ -524,7 +631,7 @@ pub fn prepare(
                         id,
                         name: merchant_name.clone(),
                         markets: vec![],
-                        market_evidence: vec![],
+
                         website: None,
                         logo_url: None,
                         logo_source: None,
@@ -718,6 +825,44 @@ impl Bundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_market_evidence_bundles_are_rebuilt_without_overwriting() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("ultra-dataset-schema-{}", uuid::Uuid::new_v4()));
+        let input = r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha","countryHints":["CA"]}]}"#;
+        let examples = r#"{"schemaVersion":"1.0","descriptors":[]}"#;
+        let mut legacy = prepare(Source::MerchantStudio, input, Some(examples), "global")?;
+        legacy.manifest.adapter_version = 2;
+        let legacy_path = legacy.save(&root)?;
+        let mut records = serde_json::to_value(&legacy.records)?;
+        records[0]["merchant"]["market_evidence"] = json!([]);
+        let legacy_bytes = serde_json::to_vec(&records)?;
+        std::fs::write(legacy_path.join("knowledge.json"), &legacy_bytes)?;
+        assert!(read_selected_records(&legacy_path.join("knowledge.json"), None).is_err());
+        assert!(cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?.is_none());
+
+        let rebuilt = prepare(Source::MerchantStudio, input, Some(examples), "global")?;
+        let path = rebuilt.save(&root)?;
+        assert_ne!(path, legacy_path);
+        let (records, available) = read_selected_records(&path.join("knowledge.json"), None)?;
+        assert_eq!(available, 1);
+        assert_eq!(records[0].merchant.name, "Alpha");
+        assert_eq!(records[0].raw["countryHints"], json!(["CA"]));
+        assert!(records[0].merchant.markets.is_empty());
+        assert_eq!(std::fs::read(legacy_path.join("knowledge.json"))?, legacy_bytes);
+        assert_eq!(cached_bundle(&root, Source::MerchantStudio, input, Some(examples), "global")?.unwrap().0, path);
+        // All adapters share the changed Merchant schema, including the file
+        // preparation path used by Foursquare.
+        for source in [Source::MerchantStudio, Source::OpenEnrichment, Source::DoDataThings,
+            Source::MoneyVis, Source::BusinessTransactions] {
+            assert_eq!(adapter_version(source), 3);
+        }
+        for source in [Source::LunchMoney, Source::Foursquare] {
+            assert_eq!(adapter_version(source), 4);
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[test]
     fn cached_preparation_preserves_reviewed_records_and_limited_reads() -> Result<()> {
         let root =
