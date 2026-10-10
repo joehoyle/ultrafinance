@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
     path::Path,
@@ -176,7 +176,9 @@ fn examples(value: &str) -> Result<Vec<String>> {
 fn adapter_version(source: Source) -> u32 {
     // The source-input schema removed Merchant.market_evidence. Rebuild older
     // prepared bundles from raw snapshots instead of deserializing that field.
-    if matches!(source, Source::LunchMoney | Source::Foursquare) {
+    if matches!(source, Source::LunchMoney) {
+        5
+    } else if matches!(source, Source::Foursquare) {
         4
     } else {
         3
@@ -560,13 +562,72 @@ pub fn prepare(
                     skipped_transactions += 1;
                     continue;
                 }
-                samples.push(sample(
+                let mut case = sample(
                     name,
                     description.unwrap().into(),
                     None,
                     None,
                     "real-unlabeled-merchant",
-                ));
+                );
+                let bank = &row["plaid_metadata"];
+                let text = |value: &Value| {
+                    value
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().to_owned())
+                };
+                case.request.amount = text(&row["amount"])
+                    .or_else(|| bank["amount"].as_number().map(ToString::to_string));
+                case.request.currency = text(&row["currency"])
+                    .or_else(|| text(&bank["iso_currency_code"]))
+                    .map(|currency| currency.to_ascii_uppercase());
+                case.request.date = text(&bank["date"]).or_else(|| text(&row["date"]));
+                let location = &bank["location"];
+                let country = text(&location["country"])
+                    .map(|country| country.to_ascii_uppercase())
+                    .filter(|country| crate::markets::valid_country(country));
+                let hint = crate::LocationHint {
+                    address: text(&location["address"]),
+                    city: text(&location["city"]),
+                    region: text(&location["region"]),
+                    postal_code: text(&location["postal_code"]),
+                    country: country.clone(),
+                    store_number: text(&location["store_number"]),
+                };
+                if [
+                    &hint.address,
+                    &hint.city,
+                    &hint.region,
+                    &hint.postal_code,
+                    &hint.country,
+                    &hint.store_number,
+                ]
+                .iter()
+                .any(|v| v.is_some())
+                {
+                    hint.validate()?;
+                    case.request.location = Some(hint);
+                }
+                case.request.country = country;
+                // Bank-supplied identity clues are input evidence, not labels.
+                // Never copy edited payees, notes, account IDs or arbitrary metadata.
+                let mut evidence = Map::new();
+                for field in [
+                    "merchant_name",
+                    "website",
+                    "payment_channel",
+                    "merchant_category_code",
+                ] {
+                    if let Some(value) = text(&bank[field]) {
+                        evidence.insert(field.into(), Value::String(value));
+                    }
+                }
+                if !evidence.is_empty() {
+                    case.request
+                        .extra
+                        .insert("bank".into(), Value::Object(evidence));
+                }
+                samples.push(case);
             }
             (
                 "private",
@@ -904,9 +965,8 @@ mod tests {
         ] {
             assert_eq!(adapter_version(source), 3);
         }
-        for source in [Source::LunchMoney, Source::Foursquare] {
-            assert_eq!(adapter_version(source), 4);
-        }
+        assert_eq!(adapter_version(Source::LunchMoney), 5);
+        assert_eq!(adapter_version(Source::Foursquare), 4);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1063,6 +1123,46 @@ mod tests {
                 .all(|c| c.expected.is_none() && c.request.extra.is_empty())
         );
         assert!(prepare(Source::LunchMoney, "{}", None, "global").is_err());
+    }
+    #[test]
+    fn lunchmoney_preserves_bank_context_without_edited_labels_or_account_data() {
+        let input = json!({"transactions":[{
+            "plaid_account_id":1,"original_name":"NORTHSTAR BOOKS 2232","payee":"Edited Target",
+            "amount":"12.34","currency":"cad","date":"2026-01-03","notes":"secret",
+            "custom_metadata":{"private":"secret"},
+            "plaid_metadata":{"account_id":"secret","merchant_name":"Northstar Books",
+                "website":"northstar.test","payment_channel":"in store","date":"2026-01-02",
+                "location":{"city":"Granby","region":"QC","store_number":"02232","country":"ca"}}
+        }]});
+        let bundle = prepare(Source::LunchMoney, &input.to_string(), None, "global").unwrap();
+        let case = bundle
+            .development
+            .iter()
+            .chain(&bundle.holdout)
+            .next()
+            .unwrap();
+        assert_eq!(case.request.amount.as_deref(), Some("12.34"));
+        assert_eq!(case.request.currency.as_deref(), Some("CAD"));
+        assert_eq!(case.request.date.as_deref(), Some("2026-01-02"));
+        assert_eq!(case.request.country.as_deref(), Some("CA"));
+        assert_eq!(
+            case.request
+                .location
+                .as_ref()
+                .unwrap()
+                .store_number
+                .as_deref(),
+            Some("02232")
+        );
+        assert_eq!(
+            case.request.extra["bank"]["merchant_name"],
+            "Northstar Books"
+        );
+        assert!(case.expected.is_none());
+        let saved = serde_json::to_string(case).unwrap();
+        assert!(!saved.contains("secret"));
+        assert!(!saved.contains("Edited Target"));
+        assert_eq!(bundle.manifest.adapter_version, 5);
     }
     #[test]
     fn moneyvis_discards_account_details() {

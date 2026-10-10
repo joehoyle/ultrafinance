@@ -65,7 +65,10 @@ fn write(tx: &mut Transaction<'_>, records: &[LocationRecord]) -> Result<()> {
         FROM (SELECT id,data::jsonb AS data FROM fsq_location_stage) incoming
         ON CONFLICT(source,external_id) DO UPDATE SET
             merchant_id=NULL,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,name=excluded.name,precision=excluded.precision,address=excluded.address,city=excluded.city,region=excluded.region,postal_code=excluded.postal_code,country=excluded.country,store_number=excluded.store_number,latitude=excluded.latitude,longitude=excluded.longitude,aliases_json=excluded.aliases_json,place_ids_json=excluded.place_ids_json,transaction_pattern=excluded.transaction_pattern,manual_override=excluded.manual_override,attribution=excluded.attribution,license=excluded.license,url=excluded.url
-        WHERE NOT location_records.manual_override
+        WHERE NOT location_records.manual_override AND
+            (location_records.merchant_id,location_records.merchant_source,location_records.merchant_external_id,location_records.name,location_records.precision,location_records.address,location_records.city,location_records.region,location_records.postal_code,location_records.country,location_records.store_number,location_records.latitude,location_records.longitude,location_records.aliases_json,location_records.place_ids_json,location_records.transaction_pattern,location_records.manual_override,location_records.attribution,location_records.license,location_records.url)
+            IS DISTINCT FROM
+            (NULL::text,excluded.merchant_source,excluded.merchant_external_id,excluded.name,excluded.precision,excluded.address,excluded.city,excluded.region,excluded.postal_code,excluded.country,excluded.store_number,excluded.latitude,excluded.longitude,excluded.aliases_json,excluded.place_ids_json,excluded.transaction_pattern,excluded.manual_override,excluded.attribution,excluded.license,excluded.url)
     "#)?;
     tx.batch_execute("TRUNCATE fsq_location_stage")?;
     progress.advance(records.len());
@@ -89,6 +92,31 @@ mod tests {
             .remove(0)
     }
 
+    #[test]
+    fn identical_foursquare_refresh_does_not_rewrite_outlet_rows() -> Result<()> {
+        let store = MerchantStore::temporary()?;
+        let mut input = record(0);
+        store.reconcile_import(vec![input.clone()], false, 5000)?;
+        let version = || {
+            store.0.run(|client| {
+                Ok(client
+                    .query_one("SELECT xmin::text FROM location_records", &[])?
+                    .get::<_, String>(0))
+            })
+        };
+        let before = version()?;
+        store.reconcile_import(vec![input.clone()], false, 5000)?;
+        assert_eq!(version()?, before);
+        input.raw["places"][0]["address"] = json!("2 New Street");
+        store.reconcile_import(vec![input], false, 5000)?;
+        assert_ne!(version()?, before);
+        let merchant = store.resolve_source("foursquare", "place:0")?.unwrap();
+        assert_eq!(
+            store.locations(&merchant)?[0].location.address.as_deref(),
+            Some("2 New Street")
+        );
+        Ok(())
+    }
     #[test]
     fn country_refresh_replaces_stored_markets_without_evidence_rows() -> Result<()> {
         let store = MerchantStore::temporary()?;

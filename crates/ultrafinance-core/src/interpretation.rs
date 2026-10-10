@@ -307,6 +307,46 @@ pub fn interpret(request: &EnrichRequest) -> Interpretation {
             geoname_ids: vec![],
         });
     }
+    // A bank's machine-supplied merchant name can help retrieve candidates,
+    // but remains unverified evidence alongside the original descriptor.
+    if let Some(name) = request
+        .extra
+        .get("bank")
+        .and_then(|bank| bank.get("merchant_name"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 512)
+    {
+        hypotheses.push(Hypothesis {
+            merchant_text: name.to_owned(),
+            possible_location: None,
+            location_hint: request.location.clone(),
+            geoname_ids: vec![],
+        });
+    }
+    // A store number may become terminal only after a locality is extracted.
+    // Add a cleaned hypothesis while preserving every original interpretation.
+    let cleaned: Vec<_> = hypotheses
+        .iter()
+        .filter_map(|h| {
+            let mut words: Vec<_> = h.merchant_text.split_whitespace().collect();
+            let before = words.len();
+            while words.len() > 1
+                && words.last().is_some_and(|w| {
+                    name_pattern("terminal-numbers").is_match(w) || matches!(*w, "#" | "-")
+                })
+            {
+                words.pop();
+            }
+            if before == words.len() {
+                return None;
+            }
+            let mut next = h.clone();
+            next.merchant_text = words.join(" ");
+            Some(next)
+        })
+        .collect();
+    hypotheses.extend(cleaned);
     let mut seen = std::collections::HashSet::new();
     hypotheses.retain(|h| {
         let name = normalize(&h.merchant_text);
@@ -323,6 +363,60 @@ pub fn interpret(request: &EnrichRequest) -> Interpretation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bank_merchant_hint_adds_a_query_without_replacing_the_descriptor() {
+        let request = serde_json::from_value(serde_json::json!({
+            "description":"POS 2232 NORTHSTAR GRANBY QC",
+            "extra":{"bank":{"merchant_name":"Northstar Books"}}
+        }))
+        .unwrap();
+        let parsed = interpret(&request);
+        assert_eq!(parsed.original, "POS 2232 NORTHSTAR GRANBY QC");
+        assert!(
+            parsed
+                .hypotheses
+                .iter()
+                .any(|h| h.merchant_text == "Northstar Books")
+        );
+        assert!(
+            parsed
+                .hypotheses
+                .iter()
+                .any(|h| h.merchant_text == parsed.original)
+        );
+    }
+    #[test]
+    fn terminal_store_numbers_are_hypotheses_after_locality_extraction() {
+        let request = serde_json::from_value(
+            serde_json::json!({"description":"NORTHSTAR BOOKS - 2232 GRANBY QC"}),
+        )
+        .unwrap();
+        let parsed = interpret(&request);
+        assert!(parsed.hypotheses.iter().any(|h| {
+            normalize(&h.merchant_text) == "northstar books"
+                && h.location_hint
+                    .as_ref()
+                    .and_then(|h| h.city.as_deref())
+                    .map(normalize)
+                    .as_deref()
+                    == Some("granby")
+        }));
+        assert!(
+            parsed
+                .hypotheses
+                .iter()
+                .any(|h| h.merchant_text.contains("2232"))
+        );
+        let request =
+            serde_json::from_value(serde_json::json!({"description":"STUDIO 54 GRANBY QC"}))
+                .unwrap();
+        assert!(
+            interpret(&request)
+                .hypotheses
+                .iter()
+                .any(|h| normalize(&h.merchant_text) == "studio 54")
+        );
+    }
     #[test]
     fn global_gazetteer_hypotheses_preserve_ambiguous_ids_and_region_context() {
         for description in ["CAFE / Springfield / USA", "CAFE SPRINGFIELD USA"] {

@@ -1883,6 +1883,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "strsim",
  "tokio",
  "unicode-normalization",

@@ -197,12 +197,31 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        11
+        12
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);
     store.revoke_resolution(&resolution.id)?;
     client.batch_execute("DELETE FROM source_records WHERE source='pre-market-source'; DELETE FROM manual_merchants WHERE id='pre-market'; DELETE FROM merchants WHERE id='pre-market';")?;
+    Ok(())
+}
+
+#[test]
+fn retrieval_keeps_combined_names_when_each_word_has_a_full_pool() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let mut catalog = Vec::new();
+    for index in 0..250 {
+        catalog.push(serde_json::json!({"id":format!("first-{index}"),"name":format!("Prairie Bakery {index}")}));
+        catalog.push(serde_json::json!({"id":format!("second-{index}"),"name":format!("Central Market {index}")}));
+    }
+    catalog.push(serde_json::json!({"id":"target","name":"Prairie Market"}));
+    store.import(&crate::import::catalog(
+        &serde_json::to_string(&catalog)?,
+        "fixture",
+    )?)?;
+    let hits = store.search("Prairie Market card purchase 98765", None, 10)?;
+    assert_eq!(hits[0].merchant.name, "Prairie Market");
+    assert!(!hits[0].exact && !hits[0].trusted);
     Ok(())
 }
 

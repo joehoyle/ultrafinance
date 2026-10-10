@@ -2,6 +2,7 @@ pub mod batch;
 mod columns;
 pub mod datasets;
 pub mod dedupe;
+mod dedupe_cache;
 mod descriptor_location;
 pub mod discovery;
 pub mod eval;

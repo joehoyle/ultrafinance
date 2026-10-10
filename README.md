@@ -318,6 +318,30 @@ GPT-6 Sol, Astra and Luna; other models still report tokens but show cost as
 unavailable. Missing usage and interrupted runs are marked partial. Estimates cover
 reported usage, not an authoritative billing total.
 
+Import reconciliation first merges deterministic identities. When `TYPESAFE_API_KEY`
+is set, CLI imports also compare remaining records sharing a normalized name or alias, or similar names on a merchant-owned website host
+using Jev at a 98% confidence and same-brand probability threshold. Regional websites
+and missing websites can then be reconciled without treating name equality as proof.
+Outlets of a confirmed brand retain their individual location records. Provider errors,
+invalid answers, or excessive candidate counts roll back the entire import. A dry run
+performs the same evaluation and rolls back its changes. Without a key, import remains
+offline and performs only deterministic reconciliation.
+Use `--dedupe-max-pairs` to set the comparison budget per affected import chunk
+(default 10,000). Oversized single name buckets require a larger budget; reducing
+the record chunk size cannot split a bucket's identity assessment. No comparisons
+are silently skipped when the budget is exceeded.
+
+The shared-platform website safeguard recognizes a platform's own complete brand
+name while excluding tenant businesses. Rule keys are refreshed on source reimport,
+including when the source data itself is unchanged.
+
+An import preview retains every ordered merge group and the starting catalogue
+revision, even when pair diagnostics are truncated. Save its JSON output, then
+apply those exact merges with `merchants apply-dedupe-plan FILE`. This command
+does not call Jev again. It rejects changed catalogues, missing merchant IDs,
+and conflicting manual identities; any failure rolls back all merges. Plans
+containing newly staged merchant IDs must be applied through the original import.
+
 ## Automated merchant deduplication
 
 Run the complete scan, Jev evaluation, and merge without a review step:
@@ -776,7 +800,9 @@ Imports validate the batch before writing and commit atomically. Writers use a
 transaction advisory lock to serialize imports, corrections, and links across
 processes. API reads use consistent snapshots and see committed changes on the
 next request. PostgreSQL retrieves at most 100 rows per exact search word
-(up to 16 words). Fuzzy spelling expansion searches a GIN trigram index over
+(up to 16 words), plus 32 rows per adjacent pair of distinct words. Combined-word
+queries keep businesses containing two common words from being excluded by the
+individual word limits; they do not establish a trusted match. Fuzzy spelling expansion searches a GIN trigram index over
 `merchant_search_words`, selecting at most four similar words per alphabetic
 input token at a 0.3 threshold. Each expanded word retrieves at most 32 merchant
 IDs through the existing full-text index. Dates and store numbers do not expand
@@ -905,11 +931,11 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 11 before running this application. See
+schema version 12 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
 Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
-against version 11, so application-only rollback across this schema change is unsupported.
+against version 12, so application-only rollback across this schema change is unsupported.
 
 ## Merchant logos
 
@@ -1235,7 +1261,14 @@ transactions, falling back to Plaid metadata’s `original_description` or `name
 for older records. Missing originals, manual transactions, group parents and split
 children are skipped; original split parents and grouped bank transactions are
 included. Repeated normalized descriptions become one case. Edited payee names
-are retained in the raw JSON but are neither labels nor aliases. The source
+are retained in the raw JSON but are neither labels nor aliases. Samples preserve
+amount, currency, transaction date, bank location and bank-supplied merchant name,
+website, payment channel and merchant category code as unverified input evidence.
+The bank merchant name contributes an additional retrieval hypothesis and remains
+unverified evidence; the original descriptor and provider acceptance checks remain.
+Account identifiers, notes and arbitrary metadata are excluded. Currency does not
+imply a transaction country. Existing description-based holdout membership remains
+unchanged. The source
 imports no merchant knowledge; evaluation reports matches/coverage, not accuracy.
 
 Evaluation `--details` prints each description above a candidate table with
@@ -1275,18 +1308,35 @@ number, with that pair's rule or Jev decision. A merchant can appear in multiple
 pairs, making each comparison explicit.
 
 Merchant imports (`sources import`, `datasets apply`, and `merchants import`)
-use deterministic reconciliation only, with zero Jev requests regardless of
-provider credentials. Source IDs preserve known identities. New identities are
-grouped by a conservative canonical name plus business website host: case,
+first use deterministic reconciliation. If `TYPESAFE_API_KEY` is configured,
+remaining same-name, alias, or similar-name/business-host identity candidates are evaluated by Jev
+at 98% before the import commits. Source IDs preserve known identities.
+On the same accepted business host, a complete multiword brand name within a
+longer branch name also qualifies for comparison, as do branch names sharing a
+complete prefix of at least two words and five characters. This widens candidate selection;
+Jev must still establish identity before any semantic merge.
+New identities are grouped by a conservative canonical name plus business website host: case,
 accents, punctuation, `www.`, HTTP/HTTPS, URL paths and trailing legal suffixes
 (`Inc`, `LLC`, `Ltd`, `Corp`, etc.) are normalized. Shared social platforms,
 directories, delivery/booking sites, shorteners and shared hosting domains are
-excluded from these automatic matches. When both websites are absent or blank,
+excluded from automatic tenant matches; a platform can identify its own complete
+brand name. When both websites are absent or blank,
 identical complete normalized names merge without stripping legal suffixes.
 This deliberately groups same-name businesses with no websites; blank websites
 never match populated websites. A shared domain alone does not establish brand
 identity. Product names, locality suffixes and store numbers are
-not stripped. Uncertain matches remain separate for explicit review.
+not stripped. Uncertain provider decisions remain separate and appear in the report.
+
+For long provider-backed imports, set `ULTRAFINANCE_DEDUPE_CHECKPOINT` to a local
+JSONL file. Each successful request saves validated answers before the next
+request, so a later provider or import failure can be retried without resending
+completed comparisons. The journal stores answers and SHA-256 digests of the
+exact question, endpoint and model; it omits API keys and question contents.
+Changed evidence or model settings require new answers, and the current merge
+threshold and complete-link checks still apply. Use a fresh checkpoint file when
+you want a fresh evaluation of a mutable model name such as `jev-latest`.
+An interrupted final append is discarded on reopening; malformed complete entries
+stop the import. The catalogue transaction still rolls back on any failure.
 
 Indexed PostgreSQL identity buckets replace import-time fuzzy/all-pairs scans. Every member
 of an accepted bucket shares the same key, so the report needs only one edge per
@@ -1296,10 +1346,10 @@ corrections are preserved; new duplicate source records link directly to the
 survivor, retaining source links, aliases, markets and matching inputs. Existing
 merchants can be merged with redirects and references updated atomically.
 
-Use `--dedupe-dry-run` to preview deterministic reconciliation without database
-writes or provider calls. For `sources import`, plain `--dry-run` remains bundle
-preparation only. Provider-assisted fuzzy review remains an explicit separate
-`merchants dedupe` operation, with its own model, threshold and pair budget.
+Use `--dedupe-dry-run` to preview reconciliation without committing database
+writes; with a key configured, it includes provider calls. For `sources import`,
+plain `--dry-run` remains bundle preparation only. Broader fuzzy review is available
+through `merchants dedupe`, with its own model, threshold and pair budget.
 
 All three import commands accept `--limit X` (a positive integer). This selects
 the first X prepared source records in bundle/file order before reconciliation,
@@ -1414,9 +1464,11 @@ fresh fixtures with no competing large imports and enough free disk for both
 data and PostgreSQL WAL; low disk space invalidates timings and can abort imports.
 
 Jev dedupe questions use a compact identity view: merchant and source names,
-websites, aliases, markets and known markets, plus source IDs and URLs. Raw
-import payloads and media fields remain stored locally but are not sent in these
-questions. Oversized identity evidence reports the affected pair and byte count.
+distinct aliases, markets, and business website hosts. Full website paths remain
+when a shared platform URL does not establish business identity. Repeated source
+identity facts are sent once. Internal IDs, publisher/schema URLs, raw import
+payloads and media fields remain stored locally and are not sent. Oversized
+identity evidence reports the affected pair and byte count.
 
 Imports report phase progress on stderr, keeping JSON results on stdout. Terminal
 progress updates in place with processed/total counts, percentages and elapsed

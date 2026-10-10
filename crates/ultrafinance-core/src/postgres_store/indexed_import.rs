@@ -92,6 +92,8 @@ pub(super) struct Import<'a, 'b> {
     selected: usize,
     chunk_size: usize,
     progress: crate::import_progress::Overall,
+    provider: Option<crate::dedupe::IdentityProvider>,
+    cache: Option<crate::dedupe_cache::Cache>,
 }
 impl<'a, 'b> Import<'a, 'b> {
     pub(super) fn new(
@@ -102,9 +104,13 @@ impl<'a, 'b> Import<'a, 'b> {
     ) -> Result<Self> {
         tx.batch_execute("CREATE TEMP TABLE import_seen(source TEXT,external_id TEXT,PRIMARY KEY(source,external_id)) ON COMMIT DROP; CREATE TEMP TABLE incoming_keys(id TEXT PRIMARY KEY,rule_name TEXT,rule_host TEXT) ON COMMIT DROP; CREATE TEMP TABLE touched_keys(rule_name TEXT,rule_host TEXT,PRIMARY KEY(rule_name,rule_host)) ON COMMIT DROP")?;
         let count: i64 = tx.query_one("SELECT count(*) FROM merchants", &[])?.get(0);
+        let revision: i64 = tx
+            .query_one("SELECT revision FROM catalog_revision", &[])?
+            .get(0);
         Ok(Self {
             tx,
             report: Report {
+                catalog_revision: Some(revision),
                 dry_run,
                 model: "deterministic".into(),
                 threshold: 1.0,
@@ -122,7 +128,144 @@ impl<'a, 'b> Import<'a, 'b> {
             selected: 0,
             chunk_size,
             progress: crate::import_progress::Overall::new(total),
+            provider: None,
+            cache: None,
         })
+    }
+    pub(super) fn set_provider(&mut self, provider: Option<crate::dedupe::IdentityProvider>) {
+        self.provider = provider;
+    }
+    fn reconcile_brands(&mut self, touched: &[String]) -> Result<()> {
+        let Some(provider) = &self.provider else {
+            return Ok(());
+        };
+        if self.cache.is_none()
+            && let Some(path) = &provider.checkpoint
+        {
+            self.cache = Some(crate::dedupe_cache::Cache::open(path)?);
+        }
+        // Names, aliases and merchant-owned hosts select comparisons, never establish identity. Compare the
+        // entire affected bucket so merges require every pair, not transitivity.
+        self.tx.batch_execute("SET LOCAL pg_trgm.similarity_threshold='0.3'; CREATE TEMP TABLE IF NOT EXISTS import_identity_decisions(left_id TEXT,right_id TEXT,left_digest TEXT,right_digest TEXT,PRIMARY KEY(left_id,right_id,left_digest,right_digest)) ON COMMIT DROP")?;
+        use postgres::fallible_iterator::FallibleIterator;
+        let mut rows = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        {
+            let mut candidates = self.tx.query_raw(r#"
+WITH names AS (SELECT DISTINCT normalized_name FROM merchant_identity_keys WHERE merchant_id=ANY($1)),
+hosts AS (SELECT DISTINCT rule_host FROM merchant_identity_keys WHERE merchant_id=ANY($1) AND rule_host<>''),
+labels AS (SELECT DISTINCT normalized FROM aliases WHERE merchant_id=ANY($1) AND length(normalized)>=3),
+pairs AS MATERIALIZED (
+SELECT a.merchant_id l,b.merchant_id r,TRUE exact FROM names n JOIN merchant_identity_keys a USING(normalized_name) JOIN merchant_identity_keys b USING(normalized_name) WHERE a.merchant_id<b.merchant_id
+UNION
+SELECT a.merchant_id,b.merchant_id,FALSE FROM hosts h JOIN merchant_identity_keys a USING(rule_host) JOIN merchant_identity_keys b ON b.rule_host=a.rule_host AND (b.normalized_name % a.normalized_name OR (split_part(a.normalized_name,' ',2)<>'' AND split_part(a.normalized_name,' ',1)=split_part(b.normalized_name,' ',1) AND split_part(a.normalized_name,' ',2)=split_part(b.normalized_name,' ',2)) OR strpos(' '||b.normalized_name||' ',' '||a.normalized_name||' ')>0 OR strpos(' '||a.normalized_name||' ',' '||b.normalized_name||' ')>0) WHERE a.merchant_id<b.merchant_id AND a.rule_host<>'' AND b.rule_host<>''
+UNION
+SELECT a.merchant_id,b.merchant_id,TRUE FROM labels l JOIN aliases a USING(normalized) JOIN aliases b USING(normalized) WHERE a.merchant_id<b.merchant_id),
+ids AS (SELECT l id FROM pairs UNION SELECT r FROM pairs),
+documents AS MATERIALIZED (
+SELECT m.id,k.normalized_name,md5(m.data ||
+    COALESCE((SELECT jsonb_agg(jsonb_build_array(s.source,s.external_id,s.input_name,s.input_website,s.input_markets,s.input_aliases) ORDER BY s.source,s.external_id)::text FROM source_records s WHERE s.merchant_id=m.id),'[]') ||
+    COALESCE((SELECT data FROM manual_merchants_documents WHERE id=m.id),'')) digest
+FROM ids
+JOIN LATERAL (SELECT id,data FROM merchants_documents WHERE id=ids.id OFFSET 0) m ON TRUE
+JOIN LATERAL (SELECT normalized_name FROM merchant_identity_keys WHERE merchant_id=ids.id OFFSET 0) k ON TRUE)
+
+SELECT p.l,p.r,a.digest,b.digest,p.exact,a.normalized_name,b.normalized_name FROM pairs p JOIN documents a ON a.id=p.l JOIN documents b ON b.id=p.r
+WHERE NOT EXISTS(SELECT 1 FROM import_identity_decisions d WHERE d.left_id=p.l AND d.right_id=p.r AND d.left_digest=a.digest AND d.right_digest=b.digest)
+"#, std::iter::once(&touched as &(dyn postgres::types::ToSql + Sync)))?;
+            while let Some(row) = candidates.next()? {
+                let pair = (row.get::<_, String>(0), row.get::<_, String>(1));
+                if seen.contains(&pair) {
+                    continue;
+                }
+                if !row.get::<_, bool>(4)
+                    && !crate::dedupe::same_host_name_candidates(
+                        &row.get::<_, String>(5),
+                        &row.get::<_, String>(6),
+                    )
+                {
+                    continue;
+                }
+                seen.insert(pair);
+                rows.push(row);
+                if rows.len() > provider.max_pairs {
+                    bail!(
+                        "import brand reconciliation exceeds {} distinct identity pairs; increase --dedupe-max-pairs to cover the complete affected buckets or reduce --chunk-size; no changes committed",
+                        provider.max_pairs
+                    );
+                }
+            }
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = rows
+            .iter()
+            .flat_map(|r| [r.get::<_, String>(0), r.get::<_, String>(1)])
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let snapshot = postgres_identity_snapshot_for_ids(self.tx, &ids)?;
+        let indices: HashMap<_, _> = snapshot
+            .merchants
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.id.clone(), i))
+            .collect();
+        let pairs = rows
+            .iter()
+            .map(|r| {
+                (
+                    indices[&r.get::<_, String>(0)],
+                    indices[&r.get::<_, String>(1)],
+                )
+            })
+            .collect();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let evaluated = runtime.block_on(crate::dedupe::evaluate(
+            &snapshot,
+            pairs,
+            Some(provider.api_key.clone()),
+            provider.model.clone(),
+            provider.threshold,
+            self.report.dry_run,
+            provider.max_pairs,
+            &provider.endpoint,
+            self.cache.as_mut(),
+        ))?;
+        if evaluated.errors > 0 {
+            bail!(
+                "{} invalid import identity answers; no changes committed",
+                evaluated.errors
+            );
+        }
+        for row in rows {
+            self.tx.execute(
+                "INSERT INTO import_identity_decisions VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+                &[
+                    &row.get::<_, String>(0),
+                    &row.get::<_, String>(1),
+                    &row.get::<_, String>(2),
+                    &row.get::<_, String>(3),
+                ],
+            )?;
+        }
+        merge_groups(self.tx, &evaluated.groups)?;
+        self.report.model = provider.model.clone();
+        self.report.threshold = provider.threshold;
+        self.report.candidates += evaluated.candidates;
+        self.report.groups.extend(evaluated.groups);
+        if self.report.decisions.len() + evaluated.decisions.len() <= DETAILS
+            && self.report.merchants.len() + evaluated.merchants.len() <= DETAILS
+        {
+            self.report.decisions.extend(evaluated.decisions);
+            self.report.merchants.extend(evaluated.merchants);
+        } else {
+            self.report.details_truncated = true;
+        }
+        Ok(())
     }
     fn details(&mut self, group: Vec<String>, members: Vec<Merchant>) -> Result<()> {
         if group.len() < 2 {
@@ -145,14 +288,11 @@ impl<'a, 'b> Import<'a, 'b> {
             })
             .collect();
         self.report.candidates += decisions.len();
+        // Keep every merge event in order even when diagnostic details are bounded.
+        self.report.groups.push(group);
         if self.report.decisions.len() + decisions.len() <= DETAILS
             && self.report.merchants.len() + members.len() <= DETAILS
         {
-            if let Some(previous) = self.report.groups.iter_mut().find(|g| g[0] == group[0]) {
-                previous.extend(group.into_iter().skip(1));
-            } else {
-                self.report.groups.push(group);
-            }
             self.report.decisions.extend(decisions);
             for m in members {
                 if !self.report.merchants.iter().any(|other| other.id == m.id) {
@@ -281,6 +421,10 @@ SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE
         }
         foursquare_locations::import(self.tx, &fresh)?;
         let touched: Vec<_> = existing_ids.into_iter().chain(ids).collect();
+        // Refresh rule keys even when source inputs are unchanged: identity
+        // rules can improve between imports without changing source metadata.
+        let current = merchants(self.tx, &touched)?;
+        write_keys(self.tx, &current)?;
         self.tx.execute("INSERT INTO touched_keys SELECT DISTINCT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=ANY($1) AND rule_name IS NOT NULL ON CONFLICT DO NOTHING",&[&touched])?;
         // Only touched indexed buckets are scanned. Fetch retired IDs in bounded
         // pages even if a legacy chain has millions of duplicate merchants.
@@ -306,6 +450,7 @@ SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE
             merging.advance(index + 1);
         }
         merging.finish();
+        self.reconcile_brands(&touched)?;
         self.report.merchants_scanned += fresh.len();
         self.selected += fresh.len() + existing.len();
         self.progress.report(self.selected);
@@ -502,7 +647,7 @@ mod tests {
             assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
             let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00004999'",&[])?;
             assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),11);
+            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),12);
             Ok(())
         })
     }

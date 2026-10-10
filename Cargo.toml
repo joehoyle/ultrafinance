@@ -20,6 +20,7 @@ strsim = "0.11"
 rapidfuzz = "0.5"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.11"
 csv = "1.4"
 utoipa = "6"
 

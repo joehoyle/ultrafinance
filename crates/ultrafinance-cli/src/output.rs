@@ -859,6 +859,7 @@ mod dedupe_tests {
             })
             .collect();
         let report = Report {
+            catalog_revision: None,
             dry_run: false,
             model: "test".into(),
             threshold: 0.98,

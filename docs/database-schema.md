@@ -1,6 +1,6 @@
 # Database lookup columns
 
-Schema version 11 stores fixed catalog and matching fields in columns in
+Schema version 12 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
 indexes. JSON remains for variable evidence, source payloads and arrays whose
 searchable values have relational indexes.
@@ -52,6 +52,11 @@ reviewed identity or silently change an existing mapping to another merchant.
 
 PostgreSQL requires `ultrafinance
 database init` with the schema-owner connection before running this version.
+The version-12 migration adds a partial B-tree index on accepted business website
+hosts. Import brand reconciliation uses it to find affected host buckets without
+repeated scans of the complete identity table. It also refreshes all derived
+identity keys using the current website safeguards, including untouched legacy
+records. It does not change merchant IDs, source evidence, or the catalogue revision.
 The version-11 migration backfills `merchant_search_words` from existing search
 vectors and installs statement-level insert/update triggers. Imports and manual
 corrections extend this derived vocabulary in the same transaction as search
@@ -87,7 +92,7 @@ if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 11; coordinate the database upgrade with the new application
+run against version 12; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.

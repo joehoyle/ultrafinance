@@ -295,14 +295,17 @@ impl MerchantStore {
     pub fn import_delta(&self, r: &[SourceRecord]) -> Result<ImportDelta> {
         self.0.import(r)
     }
+    #[cfg(test)]
     pub(crate) fn reconcile_import(
         &self,
         records: Vec<SourceRecord>,
         dry_run: bool,
         chunk_size: usize,
     ) -> Result<crate::dedupe::ImportReport> {
-        self.0.reconcile_import(records, dry_run, chunk_size)
+        self.0
+            .reconcile_import_with_provider(records, dry_run, chunk_size, None)
     }
+    #[cfg(test)]
     pub(crate) fn reconcile_file(
         &self,
         path: std::path::PathBuf,
@@ -311,6 +314,27 @@ impl MerchantStore {
         chunk_size: usize,
     ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
         self.0.reconcile_file(path, limit, dry_run, chunk_size)
+    }
+    pub(crate) fn reconcile_import_with_provider(
+        &self,
+        records: Vec<SourceRecord>,
+        dry_run: bool,
+        chunk_size: usize,
+        provider: Option<crate::dedupe::IdentityProvider>,
+    ) -> Result<crate::dedupe::ImportReport> {
+        self.0
+            .reconcile_import_with_provider(records, dry_run, chunk_size, provider)
+    }
+    pub(crate) fn reconcile_file_with_provider(
+        &self,
+        path: std::path::PathBuf,
+        limit: Option<u32>,
+        dry_run: bool,
+        chunk_size: usize,
+        provider: Option<crate::dedupe::IdentityProvider>,
+    ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
+        self.0
+            .reconcile_file_with_provider(path, limit, dry_run, chunk_size, provider)
     }
     #[cfg(test)]
     pub(crate) fn apply_reconciled_import(
@@ -368,6 +392,13 @@ impl MerchantStore {
     }
     pub fn resolve_merchant_id(&self, id: &str) -> Result<String> {
         self.0.resolve_merchant_id(id)
+    }
+    pub(crate) fn apply_dedupe_events(
+        &self,
+        revision: i64,
+        groups: Vec<Vec<String>>,
+    ) -> Result<String> {
+        self.0.apply_dedupe_events(revision, groups)
     }
     pub fn stats(&self) -> Result<MerchantStats> {
         self.0.stats()

@@ -191,7 +191,7 @@ impl PostgresStore {
                     if version <= 2 { migrate_markets(&mut tx)?; }
                     tx.batch_execute(crate::dedupe::SCHEMA)?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)?;
-                    if version > 11 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 12 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -224,12 +224,19 @@ impl PostgresStore {
                         tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
                         tx.batch_execute(include_str!("../migrations/011_search_words.sql"))?;
                     }
+                    if version < 12 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/012_import_host_index.sql"))?;
+                        // Website guard changes must reach untouched legacy
+                        // merchants before their buckets select provider comparisons.
+                        indexed_import::backfill(&mut tx)?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 11 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 12 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -598,11 +605,47 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             Ok(run_id)
         })
     }
+    pub fn apply_dedupe_events(&self, revision: i64, groups: Vec<Vec<String>>) -> Result<String> {
+        self.run(move |client| {
+            let mut tx = import_transaction(client)?;
+            write_lock(&mut tx)?;
+            tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
+            let current: i64 = tx.query_one("SELECT revision FROM catalog_revision", &[])?.get(0);
+            if current != revision {
+                bail!("catalog changed since preview; regenerate the merge plan");
+            }
+            for group in groups {
+                let unique: std::collections::BTreeSet<_> = group.iter().collect();
+                if group.len() < 2 || unique.len() != group.len() {
+                    bail!("merge groups must contain at least two distinct merchant IDs");
+                }
+                let existing: i64 = tx.query_one("SELECT count(*) FROM merchants WHERE id=ANY($1)", &[&group])?.get(0);
+                if existing as usize != group.len() {
+                    bail!("merge plan references a missing or already retired merchant");
+                }
+                let manuals: i64 = tx.query_one("SELECT count(*) FROM manual_merchants WHERE id=ANY($1)", &[&group])?.get(0);
+                if manuals > 1 { bail!("merge plan contains conflicting manual identities"); }
+                merge_groups(&mut tx, &[group])?;
+            }
+            tx.commit()?;
+            Ok(uuid::Uuid::new_v4().to_string())
+        })
+    }
+    #[cfg(test)]
     pub fn reconcile_import(
         &self,
         records: Vec<SourceRecord>,
         dry_run: bool,
         chunk_size: usize,
+    ) -> Result<crate::dedupe::ImportReport> {
+        self.reconcile_import_with_provider(records, dry_run, chunk_size, None)
+    }
+    pub fn reconcile_import_with_provider(
+        &self,
+        records: Vec<SourceRecord>,
+        dry_run: bool,
+        chunk_size: usize,
+        provider: Option<crate::dedupe::IdentityProvider>,
     ) -> Result<crate::dedupe::ImportReport> {
         if chunk_size == 0 {
             bail!("import chunk size must be greater than zero");
@@ -612,6 +655,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             write_lock(&mut tx)?;
             tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
             let mut importer = indexed_import::Import::new(&mut tx, dry_run, records.len(), chunk_size)?;
+            importer.set_provider(provider);
             let mut records = records.into_iter();
             loop {
                 let chunk: Vec<_> = records.by_ref().take(chunk_size).collect();
@@ -630,12 +674,23 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             Ok(result)
         })
     }
+    #[cfg(test)]
     pub fn reconcile_file(
         &self,
         path: std::path::PathBuf,
         limit: Option<u32>,
         dry_run: bool,
         chunk_size: usize,
+    ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
+        self.reconcile_file_with_provider(path, limit, dry_run, chunk_size, None)
+    }
+    pub fn reconcile_file_with_provider(
+        &self,
+        path: std::path::PathBuf,
+        limit: Option<u32>,
+        dry_run: bool,
+        chunk_size: usize,
+        provider: Option<crate::dedupe::IdentityProvider>,
     ) -> Result<(crate::dedupe::ImportReport, usize, usize)> {
         if chunk_size == 0 {
             bail!("import chunk size must be greater than zero");
@@ -649,6 +704,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             write_lock(&mut tx)?;
             tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
             let mut importer=indexed_import::Import::new(&mut tx,dry_run,selected_total,chunk_size)?;
+            importer.set_provider(provider);
             let (available,selected)=crate::datasets::stream_records(&path,limit,chunk_size,|chunk|importer.chunk(chunk))?;
             if (available, selected) != (total, selected_total) { bail!("prepared record counts changed while importing; retry with a stable bundle"); }
             let result=importer.finish()?;
@@ -812,6 +868,30 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             }
             let tokens: Vec<_> = query.split_whitespace().filter(|t| t.chars().count()>=3).take(16).collect();
             let terms: Vec<_> = tokens.iter().map(|t| format!("'{t}'")).collect();
+            // Two common words can each fill their independent pool before a
+            // business containing both appears. Intersect adjacent words in
+            // the index as an additional bounded pool, retaining the original
+            // single-word queries for abbreviations and noisy descriptors.
+            let combined_terms: Vec<_> = tokens.windows(2)
+                .filter(|pair| pair[0] != pair[1])
+                .map(|pair| format!("'{}' & '{}'", pair[0], pair[1]))
+                .collect();
+            if !combined_terms.is_empty() {
+                for row in tx.query(
+                    "SELECT m.id,m.name,m.aliases_json,m.markets_json FROM (
+                        SELECT DISTINCT pool.merchant_id
+                        FROM unnest($1::text[]) term(query)
+                        CROSS JOIN LATERAL (
+                            SELECT merchant_id FROM merchant_search
+                            WHERE tokens @@ to_tsquery('simple',term.query)
+                            LIMIT 32
+                        ) pool
+                    ) s JOIN merchants m ON m.id=s.merchant_id",
+                    &[&combined_terms],
+                )? {
+                    add_candidate(&mut found,&row,false,None,&mut scorer)?;
+                }
+            }
             // Bound each word independently: common words must not crowd rare
             // ones out before Rust scores merchant names. A post-sort LIMIT alone
             // does not bound work on a million-row catalog.
@@ -1393,6 +1473,23 @@ fn postgres_snapshot_for_ids(
     c: &mut impl GenericClient,
     ids: &[String],
 ) -> Result<crate::dedupe::Snapshot> {
+    postgres_snapshot_for_ids_inner(c, ids, true)
+}
+
+/// Brand comparison within a locked import transaction does not need to load
+/// outlet records. They remain in PostgreSQL and merge_groups preserves them.
+fn postgres_identity_snapshot_for_ids(
+    c: &mut impl GenericClient,
+    ids: &[String],
+) -> Result<crate::dedupe::Snapshot> {
+    postgres_snapshot_for_ids_inner(c, ids, false)
+}
+
+fn postgres_snapshot_for_ids_inner(
+    c: &mut impl GenericClient,
+    ids: &[String],
+    include_locations: bool,
+) -> Result<crate::dedupe::Snapshot> {
     fn data<T: serde::de::DeserializeOwned>(
         c: &mut impl GenericClient,
         sql: &str,
@@ -1413,9 +1510,9 @@ fn postgres_snapshot_for_ids(
         merchants:data(c,"SELECT data FROM merchants_documents WHERE id=ANY($1) ORDER BY id",ids)?,
         manual:data(c,"SELECT data FROM manual_merchants_documents WHERE id=ANY($1) ORDER BY id",ids)?,
         sources:c.query("SELECT merchant_id,data FROM source_records_documents WHERE merchant_id=ANY($1) ORDER BY source,external_id",&[&ids])?.into_iter().map(|r|Ok((r.get(0),serde_json::from_str(r.get(1))?))).collect::<Result<_>>()?,
-        locations:data(c,"SELECT l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=ANY($1) ORDER BY l.id",ids)?,
+        locations:if include_locations {data(c,"SELECT l.data FROM location_records_documents l LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=ANY($1) ORDER BY l.id",ids)?} else {vec![]},
         redirects:c.query("SELECT retired_id,merchant_id FROM merchant_redirects WHERE merchant_id=ANY($1) ORDER BY retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect(),
-        location_redirects:c.query("SELECT d.retired_id,d.location_id FROM location_redirects d JOIN location_records l ON l.id=d.location_id LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=ANY($1) ORDER BY d.retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect(),
+        location_redirects:if include_locations {c.query("SELECT d.retired_id,d.location_id FROM location_redirects d JOIN location_records l ON l.id=d.location_id LEFT JOIN source_records s ON s.source=l.merchant_source AND s.external_id=l.merchant_external_id WHERE COALESCE(l.merchant_id,s.merchant_id)=ANY($1) ORDER BY d.retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect()} else {vec![]},
         revision:Some(c.query_one("SELECT revision FROM catalog_revision",&[])?.get(0)),
     })
 }
@@ -1476,6 +1573,39 @@ mod connection_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn version_eleven_import_host_index_preserves_catalog_and_supports_host_lookup() -> Result<()> {
+        let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+        let lease = PostgresStore::temporary(&base)?;
+        let url = lease.temporary_url().unwrap().to_owned();
+        let records = crate::import::merchant_studio(
+            r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha","website":"https://alpha.test"},{"id":"directory","canonicalName":"Cafe","website":"https://yp.ca/cafe"}]}"#,
+        )?;
+        lease.import(&records)?;
+        let id = lease.resolve_source("merchant-studio", "alpha")?;
+        assert!(id.is_some());
+        let revision: i64 = lease.run(|client| {
+            client.batch_execute(
+                "DROP INDEX merchant_identity_rule_host; UPDATE ultrafinance_schema SET version=11; UPDATE merchant_identity_keys SET rule_name='cafe',rule_host='yp.ca' WHERE normalized_name='cafe'",
+            )?;
+            Ok(client
+                .query_one("SELECT revision FROM catalog_revision", &[])?
+                .get(0))
+        })?;
+        assert!(PostgresStore::connect(&url, false).is_err());
+        let upgraded = PostgresStore::connect(&url, true)?;
+        assert_eq!(upgraded.resolve_source("merchant-studio", "alpha")?, id);
+        upgraded.run(move |client| {
+            assert_eq!(client.query_one("SELECT revision FROM catalog_revision", &[])?.get::<_, i64>(0), revision);
+            assert_eq!(client.query_one("SELECT count(*) FROM merchants", &[])?.get::<_, i64>(0), 2);
+            assert!(client.query_one("SELECT indisvalid FROM pg_index WHERE indexrelid='merchant_identity_rule_host'::regclass", &[])?.get::<_, bool>(0));
+            assert!(client.query_one("SELECT rule_host IS NULL FROM merchant_identity_keys WHERE normalized_name='cafe'", &[])?.get::<_, bool>(0));
+            assert_eq!(client.query_one("SELECT count(*) FROM merchant_identity_keys WHERE rule_host='alpha.test'", &[])?.get::<_, i64>(0), 1);
+            Ok(())
+        })
+    }
+
+    #[test]
     fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()> {
         let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
             .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
@@ -1495,7 +1625,7 @@ mod connection_tests {
         // Reinitialization must not recreate either audit table.
         let initialized = PostgresStore::connect(&url, true)?;
         initialized.run(|client| {
-            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 11);
+            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 12);
             assert!(client.query_one(
                 "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
                 &[],
@@ -1618,7 +1748,7 @@ mod connection_tests {
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get(0);
             assert_eq!(
-                version, 11,
+                version, 12,
                 "market migration must run before application use"
             );
             let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
