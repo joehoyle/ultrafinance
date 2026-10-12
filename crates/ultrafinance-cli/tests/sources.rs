@@ -20,10 +20,9 @@ fn json(output: Output) -> Value {
 }
 
 #[test]
-fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() {
+fn foursquare_prepares_place_identities_without_manual_review_or_transaction_labels() {
     let root = tempfile::tempdir().unwrap();
     let input = root.path().join("places.csv");
-    let review = root.path().join("brands.json");
     let mut csv = csv::Writer::from_writer(vec![]);
     csv.write_record([
         "fsq_place_id",
@@ -43,7 +42,6 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
             .unwrap();
     }
     std::fs::write(&input, csv.into_inner().unwrap()).unwrap();
-    std::fs::write(&review, r#"{"brands":[{"id":"starbucks","name":"Starbucks","evidence":"Reviewed directory","place_ids":["a","b"]}]}"#).unwrap();
     let output = root.path().join("bundles");
     let report = json(run(
         root.path(),
@@ -52,8 +50,6 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
             "foursquare",
             "--input",
             input.to_str().unwrap(),
-            "--examples",
-            review.to_str().unwrap(),
             "--region",
             "ca",
             "--output",
@@ -61,7 +57,7 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
             "--dry-run",
         ],
     ));
-    assert_eq!(report["manifest"]["merchant_records"], 3);
+    assert_eq!(report["manifest"]["merchant_records"], 4);
     assert_eq!(report["manifest"]["retained_places"], 4);
     assert_eq!(report["manifest"]["holdout_samples"], 0);
     let bundle = std::path::Path::new(report["bundle"].as_str().unwrap());
@@ -69,8 +65,8 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
     assert!(bundle.join("LICENSE.txt").is_file());
     let knowledge: Value =
         serde_json::from_slice(&std::fs::read(bundle.join("knowledge.json")).unwrap()).unwrap();
-    assert_eq!(knowledge[0]["merchant"]["name"], "Starbucks");
-    assert_eq!(knowledge[0]["raw"]["places"].as_array().unwrap().len(), 2);
+    assert_eq!(knowledge[0]["merchant"]["name"], "Starbucks Bromont");
+    assert_eq!(knowledge[0]["raw"]["places"].as_array().unwrap().len(), 1);
     let offline = json(run(
         root.path(),
         &[
@@ -85,11 +81,20 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
         ],
     ));
     assert_eq!(offline["bundle"], report["bundle"]);
-    let raw = json(run(
+    let rejected = run(
         root.path(),
-        &["raw", "foursquare", "--region", "ca", "--examples"],
-    ));
-    assert_eq!(raw["rows"][0]["id"], "starbucks");
+        &[
+            "import",
+            "foursquare",
+            "--input",
+            input.to_str().unwrap(),
+            "--examples",
+            "nonexistent-brands.json",
+            "--dry-run",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("do not accept --examples"));
     let download = run(root.path(), &["download", "foursquare"]);
     assert!(!download.status.success());
     assert!(String::from_utf8_lossy(&download.stderr).contains("authenticated Places Portal"));
@@ -99,51 +104,55 @@ fn foursquare_prepares_reviewed_brands_without_database_or_transaction_labels() 
 }
 
 #[test]
-fn foursquare_import_refresh_keeps_brand_and_location_identities() {
+fn foursquare_import_refresh_keeps_place_and_location_identities() {
     let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
     let input = "fsq_place_id,name,country,address,date_closed,fsq_category_ids\na,Starbucks Bromont,CA,1 Main St,,\"[\"\"restaurant\"\"]\"\nb,Starbucks Toronto,CA,2 Main St,,\"[\"\"restaurant\"\"]\"\n";
-    let review = r#"{"brands":[{"id":"starbucks","name":"Starbucks","evidence":"Reviewed directory","place_ids":["a","b"]}]}"#;
     let bundle = ultrafinance_core::datasets::prepare(
         ultrafinance_core::datasets::Source::Foursquare,
         input,
-        Some(review),
+        None,
         "ca",
     )
     .unwrap();
-    assert_eq!(store.import_delta(&bundle.records).unwrap().added, 1);
+    assert_eq!(store.import_delta(&bundle.records).unwrap().added, 2);
     let id = store
-        .resolve_source("foursquare", "brand:starbucks")
+        .resolve_source("foursquare", "place:a")
         .unwrap()
         .unwrap();
-    assert_eq!(store.stats().unwrap().total, 1);
+    assert_eq!(store.stats().unwrap().total, 2);
     let locations = store.locations(&id).unwrap();
-    assert_eq!(locations.len(), 2);
+    assert_eq!(locations.len(), 1);
     assert_eq!(store.get(&id).unwrap().unwrap().markets, ["CA"]);
-    assert_eq!(store.import_delta(&bundle.records).unwrap().unchanged, 1);
+    assert_eq!(store.import_delta(&bundle.records).unwrap().unchanged, 2);
     let refreshed = store.locations(&id).unwrap();
     assert_eq!(
         locations.iter().map(|r| &r.location.id).collect::<Vec<_>>(),
         refreshed.iter().map(|r| &r.location.id).collect::<Vec<_>>()
     );
-    let updated = review.replace("\"name\":\"Starbucks\"", "\"name\":\"Starbucks Coffee\"");
+    let updated = input.replace("Starbucks Bromont", "Starbucks Coffee Bromont");
     let bundle = ultrafinance_core::datasets::prepare(
         ultrafinance_core::datasets::Source::Foursquare,
-        input,
-        Some(&updated),
+        &updated,
+        None,
         "ca",
     )
     .unwrap();
     assert_eq!(store.import_delta(&bundle.records).unwrap().updated, 1);
     assert_eq!(
         store
-            .resolve_source("foursquare", "brand:starbucks")
+            .resolve_source("foursquare", "place:a")
             .unwrap()
             .unwrap(),
         id
     );
-    assert_eq!(store.get(&id).unwrap().unwrap().name, "Starbucks Coffee");
+    assert_eq!(
+        store.get(&id).unwrap().unwrap().name,
+        "Starbucks Coffee Bromont"
+    );
     // Imported names do not become trusted exact aliases.
-    let candidates = store.search("Starbucks Coffee", Some("CA"), 10).unwrap();
+    let candidates = store
+        .search("Starbucks Coffee Bromont", Some("CA"), 10)
+        .unwrap();
     assert!(!candidates[0].trusted);
 }
 #[test]
@@ -538,8 +547,6 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
     )
     .unwrap();
     assert!(unlimited_metadata.contains("limit=all"));
-    let review = root.path().join("brands.json");
-    std::fs::write(&review, r#"{"brands":[{"id":"cafe-brand","name":"Cafe Brand","evidence":"Reviewed fixture","place_ids":["p1"]}]}"#).unwrap();
     let prepared = json(
         Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
             .args(["sources", "--cache-dir"])
@@ -554,9 +561,7 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
                 "--region",
                 "ca",
                 "--dry-run",
-                "--examples",
             ])
-            .arg(&review)
             .arg("--output")
             .arg(root.path().join("bundles"))
             .env("ULTRAFINANCE_FOURSQUARE_TOKEN", "secret-token")
@@ -567,7 +572,7 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
     assert!(
         std::fs::read_to_string(bundle.join("knowledge.json"))
             .unwrap()
-            .contains("brand:cafe-brand")
+            .contains("place:p1")
     );
     let offline = json(run(
         root.path(),
@@ -619,7 +624,11 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
             .args(["--region", "ca", "--output"])
             .arg(root.path().join("bundles"))
             .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url())
-            .env_remove("TYPESAFE_API_KEY");
+            .env("TYPESAFE_API_KEY", "invalid-import-must-not-use")
+            .env(
+                "ULTRAFINANCE_DEDUPE_CHECKPOINT",
+                root.path().join("missing-parent/checkpoint.jsonl"),
+            );
         if preview {
             command.arg("--dedupe-dry-run");
         }

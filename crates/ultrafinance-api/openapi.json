@@ -819,12 +819,6 @@
           "name": {
             "type": "string"
           },
-          "sources": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
           "website": {
             "type": [
               "string",

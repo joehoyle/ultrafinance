@@ -1779,3 +1779,53 @@ fn database_open_launches_postgres_url_without_connecting_or_printing_credential
     assert!(String::from_utf8_lossy(&output.stderr).contains("configure an application"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("password"));
 }
+
+#[test]
+fn imports_ignore_provider_credentials_and_checkpoint_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = r#"[
+        {"id":"a","name":"Northstar Books","website":"https://northstar.test"},
+        {"id":"b","name":"NORTHSTAR BOOKS INC","website":"https://www.northstar.test/branch"},
+        {"id":"c","name":"Northstar Books"}
+    ]"#;
+    let native = root.path().join("catalog.json");
+    std::fs::write(&native, catalog).unwrap();
+    let prepared = root.path().join("knowledge.json");
+    let records = ultrafinance_core::import::catalog(catalog, "fixture").unwrap();
+    std::fs::write(&prepared, serde_json::to_vec(&records).unwrap()).unwrap();
+    let checkpoint = root.path().join("missing-parent/checkpoint.jsonl");
+    for (command, file) in [
+        (vec!["merchants", "import"], &native),
+        (vec!["datasets", "apply"], &prepared),
+    ] {
+        let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+        for preview in [true, false] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_ultrafinance"));
+            cmd.args(["--database-url", store.temporary_url()])
+                .args(&command)
+                .arg(file)
+                .env("TYPESAFE_API_KEY", "invalid-import-must-not-use")
+                .env("ULTRAFINANCE_DEDUPE_CHECKPOINT", &checkpoint);
+            if preview {
+                cmd.arg("--dedupe-dry-run");
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["reconciliation"]["dedupe"]["model"], "deterministic");
+            assert!(
+                report["reconciliation"]["dedupe"]["decisions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|decision| decision["method"] == "rule")
+            );
+            assert_eq!(store.stats().unwrap().total, if preview { 0 } else { 2 });
+            assert!(!checkpoint.exists());
+        }
+    }
+}

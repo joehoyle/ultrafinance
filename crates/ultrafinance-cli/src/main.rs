@@ -364,16 +364,13 @@ enum MerchantCommand {
 
 #[derive(Args)]
 pub(crate) struct ImportDedupeArgs {
-    /// Fail atomically if an affected identity bucket exceeds this comparison budget.
-    #[arg(long, default_value_t = 10000, value_parser = clap::value_parser!(u32).range(1..))]
-    dedupe_max_pairs: u32,
     /// Maximum source records reconciled at a time; larger chunks use more memory.
     #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..))]
     chunk_size: u32,
     /// Import at most this many source records, in prepared/file order, before reconciliation.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     limit: Option<u32>,
-    /// Preview import reconciliation without committing database changes.
+    /// Preview deterministic import reconciliation without committing or provider calls.
     #[arg(long)]
     dedupe_dry_run: bool,
 }
@@ -393,17 +390,6 @@ impl ImportDedupeArgs {
         ultrafinance_core::dedupe::ImportOptions {
             dry_run: self.dedupe_dry_run,
             chunk_size: self.chunk_size as usize,
-            identity_provider: env::var("TYPESAFE_API_KEY")
-                .ok()
-                .filter(|key| !key.trim().is_empty())
-                .map(|api_key| ultrafinance_core::dedupe::IdentityProvider {
-                    api_key,
-                    model: "jev-latest".into(),
-                    threshold: 0.98,
-                    endpoint: "https://api.typesafe.ai/v1/systemone".into(),
-                    max_pairs: self.dedupe_max_pairs as usize,
-                    checkpoint: env::var_os("ULTRAFINANCE_DEDUPE_CHECKPOINT").map(PathBuf::from),
-                }),
         }
     }
 }

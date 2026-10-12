@@ -1,4 +1,4 @@
-//! Public response records. Matching aliases stay in the internal catalog.
+//! Public response records. Matching aliases and source URLs stay in the internal catalog.
 use serde::Serialize;
 use ultrafinance_core::LocationResult;
 use utoipa::ToSchema;
@@ -17,8 +17,6 @@ pub struct Merchant {
     logo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     logo_source: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    sources: Vec<String>,
 }
 
 impl From<ultrafinance_core::Merchant> for Merchant {
@@ -30,7 +28,6 @@ impl From<ultrafinance_core::Merchant> for Merchant {
             website: value.website,
             logo_url: value.logo_url,
             logo_source: value.logo_source,
-            sources: value.sources,
         }
     }
 }

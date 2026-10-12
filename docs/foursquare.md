@@ -9,8 +9,8 @@ After reconciliation links places to a merchant, candidate `provenance` contains
 consolidated Foursquare merchant evidence rather than one document per branch.
 Distinct attribution URLs and matching rules remain separate. The contribution's
 `raw.source_record_count` records how many upstream mappings it represents;
-its external ID is a representative existing source key, preferring a reviewed
-`brand:` key when present. Consolidation does not review or merge identities.
+its external ID is a representative existing place source key. Consolidation
+does not establish or merge identities.
 Per-place keys remain available through source browsing for refreshes, relinking
 and audit, while outlet records retain addresses, coordinates and place IDs.
 The projection also applies to existing imports and remembered matches without
@@ -42,9 +42,6 @@ local environment. Do not paste it into chat or pass it as a command argument.
 # With ULTRAFINANCE_FOURSQUARE_TOKEN set locally:
 cargo run -- sources download foursquare --region ca
 cargo run -- sources import foursquare --region ca --offline --dry-run
-# Or download and prepare with reviewed grouping in one command:
-cargo run -- sources import foursquare --region ca \
-  --examples brands.json --dry-run
 ```
 
 The engine connects read-only to Foursquare's authenticated Iceberg catalog,
@@ -61,8 +58,7 @@ downloaded places to a positive integer, ordered by place ID. Metadata records
 the country and whether a cap was requested. There is no fixed export size or
 time limit. The importer further excludes unsuitable rows.
 
-Downloads retain DuckDB's CSV on disk. Default preparation without reviewed
-brand mappings reads CSV incrementally and sorts 5,000-row runs on disk, merging
+Downloads retain DuckDB's CSV on disk. Preparation reads CSV incrementally and sorts 5,000-row runs on disk, merging
 at most 64 runs at once. Applying knowledge streams chunks of 5,000 source
 records by default. `--chunk-size 10000` changes the import bound (positive values
 only); larger chunks use more memory. For example:
@@ -73,9 +69,8 @@ cargo run -- sources import foursquare --region ca --offline --chunk-size 10000
 
 Each chunk is reconciled against the database identity index; it never loads the merchant catalog.
 Disk space is still required for downloads, sorting and prepared bundles.
-Reviewed brand grouping currently retains its original in-memory preparation.
-Use `--foursquare-limit` for smaller trials. Limited exports can have incomplete
-brand membership, so heed the refresh limitations below. Manually exported CSVs
+Use `--foursquare-limit` for smaller trials. Limited exports have incomplete
+place coverage, so heed the refresh limitations below. Manually exported CSVs
 remain supported through `--input`. Cached downloads work without a token or
 DuckDB using `--offline`.
 The separate `--limit` flag caps records reconciled into the database,
@@ -88,55 +83,31 @@ Optional fields include `website`, `unresolved_flags`, `fsq_category_labels`,
 address/geography and source refresh dates. Only absolute HTTP(S) URLs without
 credentials are used as merchant websites. Invalid upstream websites are omitted
 from merchant fields, with the original value and validation marker retained in
-the prepared bundle; they do not reject the merchant or abort the import. Explicit
-reviewed brand websites remain strictly validated.
+the prepared bundle; they do not reject the merchant or abort the import.
 See the [source schema](https://docs.foursquare.com/data-products/docs/places-os-data-schema).
 
 Rows marked closed, rows with known disqualifying quality flags, uncategorized
 places and Foursquare's published non-commercial category exclusions are skipped.
 Names that normalize to empty (for example, punctuation or symbols only) are also
-skipped unless a reviewed brand supplies a valid name. These rows contribute to
-the skipped count. Foursquare adapter version 2 rebuilds prepared bundles with
-this validation while retaining older bundles intact.
+skipped and counted. Foursquare adapter version 5 rebuilds prepared bundles
+without manual brand mappings while retaining older bundles intact.
 Country filtering is optional. Missing category data is not treated as commercial.
 Duplicate identical place rows are skipped; conflicting rows with one ID fail.
 Historical transactions at closed businesses need a separately designed policy.
 
 ```sh
 cargo run -- sources import foursquare --input places-ca.csv --region ca \
-  --examples brands.json --dry-run
+  --dry-run
 ```
 
 The report contains retained place counts, skipped place counts, merchant record
-counts and a bundle path. Inspect `knowledge.json` before applying it. Its empty
-transaction sample files do not constitute an accuracy benchmark.
+counts and a bundle path. Its empty transaction sample files do not constitute an accuracy benchmark.
 
-## Reviewed brand grouping
+## Automatic identity reconciliation
 
-`--examples brands.json` is optional and contains reviewed brand membership:
+Every retained place has a stable source identity `foursquare/place:FSQ_ID`.
+There are no manual brand mappings or review files.
 
-```json
-{
-  "brands": [
-    {
-      "id": "starbucks",
-      "name": "Starbucks",
-      "website": "https://www.starbucks.com/",
-      "evidence": "Place identities checked against the official outlet directory",
-      "place_ids": ["ACTUAL_FSQ_ID_FOR_BROMONT", "ACTUAL_FSQ_ID_FOR_TORONTO"]
-    }
-  ]
-}
-```
-
-Replace the example IDs and evidence with reviewed facts. This creates one source
-record `foursquare/brand:starbucks`; contributing place IDs and selected source
-fields remain in the prepared bundle. The brand name is the supplied reviewed
-name, not a name guessed by stripping a locality. Brand IDs must remain stable.
-One place cannot belong to multiple brands. Membership listed outside the current
-export is allowed, so the same review file can serve multiple country exports.
-
-Unmapped places retain distinct source identities `foursquare/place:FSQ_ID`.
 Preparation does not consolidate them. When applied, all merchant imports use the
 deterministic identity rules shared with `merchants dedupe`: matching canonical
 names and business website hosts are accepted by rule. Legal suffixes, case,
@@ -160,7 +131,7 @@ cargo run -- sources import foursquare --region ca --offline
 # Reconcile at most 1,000 prepared merchant source records.
 cargo run -- sources import foursquare --region ca --offline --limit 1000
 # Inspect retained merchant inputs and source metadata.
-cargo run -- sources records foursquare --external-id brand:starbucks
+cargo run -- sources records foursquare --external-id place:FSQ_ID
 ```
 
 Existing source keys preserve local merchant IDs and manual corrections. Apply

@@ -6,7 +6,7 @@ fn cached_reads_are_reused_and_follow_external_catalog_writes() -> Result<()> {
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let store = PostgresStore::temporary(&base)?;
     let csv = "fsq_place_id,name,country,address,fsq_category_ids,date_closed\n1,Cafe,CA,1 Main St,\"[\"\"restaurant\"\"]\",\n";
-    let mut place = crate::foursquare::prepare(csv, None, "ca")?.0.remove(0);
+    let mut place = crate::foursquare::prepare(csv, "ca")?.0.remove(0);
     store.import(std::slice::from_ref(&place))?;
     let id = store.resolve_source("foursquare", "place:1")?.unwrap();
     let first = store.cached_locations(&id)?;
@@ -122,6 +122,7 @@ fn search_vocabulary_backfills_and_follows_bulk_refreshes() -> Result<()> {
     // Recreate the actual previous schema: the next initialization must backfill
     // existing search rows, not just maintain future inserts.
     store.run(|client| {
+        client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute("DROP TRIGGER merchant_search_words_insert ON merchant_search; DROP TRIGGER merchant_search_words_update ON merchant_search; DROP FUNCTION remember_merchant_search_words(); DROP TABLE merchant_search_words; UPDATE ultrafinance_schema SET version=10")?;
         Ok(())
     })?;

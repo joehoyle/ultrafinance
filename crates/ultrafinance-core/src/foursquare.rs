@@ -1,10 +1,9 @@
 //! Merchant and outlet import of a bounded, filtered FSQ OS Places CSV export.
-//! Brand membership is explicitly reviewed, never inferred from name/domain equality.
+//! Source identities are per place; import reconciliation uses deterministic rules.
 use crate::{Merchant, store::SourceRecord};
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub const URL: &str = "https://docs.foursquare.com/data-products/docs/places-os-data-schema";
 pub const CREDIT: &str = "Foursquare OS Places by Foursquare Labs, Inc.";
@@ -54,21 +53,6 @@ const NON_COMMERCIAL: &[&str] = &[
     "530e33ccbcbc57f1066bbff9",
 ];
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Review {
-    brands: Vec<Brand>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Brand {
-    id: String,
-    name: String,
-    website: Option<String>,
-    evidence: String,
-    place_ids: Vec<String>,
-}
-
 fn website(value: &str) -> Result<Option<String>> {
     if value.trim().is_empty() {
         return Ok(None);
@@ -92,39 +76,9 @@ fn array(row: &BTreeMap<String, String>, field: &str) -> Result<Vec<String>> {
     serde_json::from_str(text).with_context(|| format!("{field} must be a JSON string array"))
 }
 
-pub fn prepare(
-    contents: &str,
-    review: Option<&str>,
-    region: &str,
-) -> Result<(Vec<SourceRecord>, usize)> {
+pub fn prepare(contents: &str, region: &str) -> Result<(Vec<SourceRecord>, usize)> {
     if region != "global" && !crate::markets::valid_country(&region.to_ascii_uppercase()) {
         bail!("Foursquare region must be global or a two-letter country code");
-    }
-    let review: Review = review
-        .map(serde_json::from_str)
-        .transpose()?
-        .unwrap_or(Review { brands: vec![] });
-    let mut members = BTreeMap::new();
-    let mut brands = BTreeSet::new();
-    for (index, brand) in review.brands.iter().enumerate() {
-        if brand.id.is_empty()
-            || !brand
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-            || !brands.insert(&brand.id)
-            || crate::store::normalize(&brand.name).is_empty()
-            || brand.evidence.trim().is_empty()
-            || brand.place_ids.is_empty()
-        {
-            bail!("brand mappings require unique stable IDs, names, review evidence and place IDs");
-        }
-        website(brand.website.as_deref().unwrap_or(""))?;
-        for id in &brand.place_ids {
-            if id.trim().is_empty() || members.insert(id.as_str(), index).is_some() {
-                bail!("place IDs must be nonblank and belong to only one reviewed brand");
-            }
-        }
     }
     let mut reader = csv::Reader::from_reader(contents.trim_start_matches('\u{feff}').as_bytes());
     let headers = reader.headers()?.clone();
@@ -139,7 +93,7 @@ pub fn prepare(
             bail!("missing Foursquare CSV column {field}");
         }
     }
-    let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut groups: BTreeMap<String, Value> = BTreeMap::new();
     let mut seen = BTreeMap::new();
     let mut skipped = 0;
     for record in reader.records() {
@@ -166,7 +120,7 @@ pub fn prepare(
         }
         let categories = array(&row, "fsq_category_ids")?;
         let flags = array(&row, "unresolved_flags")?;
-        if (crate::store::normalize(&row["name"]).is_empty() && !members.contains_key(id))
+        if crate::store::normalize(&row["name"]).is_empty()
             || !row["date_closed"].trim().is_empty()
             || categories.is_empty()
             || categories
@@ -214,37 +168,20 @@ pub fn prepare(
                 raw[field] = json!(value);
             }
         }
-        let key = members
-            .get(id)
-            .map(|i| format!("brand:{}", review.brands[*i].id))
-            .unwrap_or_else(|| format!("place:{id}"));
-        groups.entry(key).or_default().push(raw);
+        groups.insert(format!("place:{id}"), raw);
     }
     let mut records = Vec::new();
-    for (key, mut places) in groups {
-        places.sort_by(|a, b| a["fsq_place_id"].as_str().cmp(&b["fsq_place_id"].as_str()));
-        let brand = key
-            .strip_prefix("brand:")
-            .and_then(|id| review.brands.iter().find(|b| b.id == id));
-        let name = brand
-            .map(|b| b.name.trim())
-            .unwrap_or_else(|| places[0]["name"].as_str().unwrap());
-        let site = if let Some(brand) = brand {
-            website(brand.website.as_deref().unwrap_or(""))?
-        } else {
-            places[0]["website"].as_str().map(String::from)
-        };
-        let countries: BTreeSet<_> = places
-            .iter()
-            .map(|p| p["country"].as_str().unwrap().to_owned())
-            .collect();
+    for (key, place) in groups {
+        let name = place["name"].as_str().unwrap();
+        let site = place["website"].as_str().map(String::from);
+        let country = place["country"].as_str().unwrap().to_owned();
         records.push(SourceRecord {
             source: "foursquare".into(),
             external_id: key.clone(),
             merchant: Merchant {
                 id: key.clone(),
                 name: name.into(),
-                markets: countries.into_iter().collect(),
+                markets: vec![country],
                 website: site,
                 logo_url: None,
                 logo_source: None,
@@ -255,8 +192,7 @@ pub fn prepare(
             license: "Apache-2.0".into(),
             url: URL.into(),
             version: None,
-            raw: json!({"identity_kind":if brand.is_some(){"reviewed-brand"}else{"unlinked-place"},
-                "review_evidence":brand.map(|b| &b.evidence),"places":places}),
+            raw: json!({"identity_kind":"unlinked-place","places":[place]}),
         });
     }
     Ok((records, skipped))
@@ -334,133 +270,5 @@ pub(crate) fn locations(record: &SourceRecord) -> Result<Vec<crate::location::Lo
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn csv(rows: &[(&str, &str, &str, &str, &str)]) -> String {
-        let mut w = csv::Writer::from_writer(vec![]);
-        w.write_record([
-            "fsq_place_id",
-            "name",
-            "country",
-            "website",
-            "date_closed",
-            "fsq_category_ids",
-        ])
-        .unwrap();
-        for (id, name, country, site, closed) in rows {
-            w.write_record([*id, *name, *country, *site, *closed, "[\"restaurant\"]"])
-                .unwrap();
-        }
-        String::from_utf8(w.into_inner().unwrap()).unwrap()
-    }
-    #[test]
-    fn outlet_fields_require_addresses_and_optional_coordinates_are_paired() -> Result<()> {
-        let input = "fsq_place_id,name,country,address,latitude,longitude,fsq_category_ids,date_closed\na,H&M,CA,1 Main St,43.6,-79.3,\"[\"\"restaurant\"\"]\",\nb,Cafe,CA,,43.6,-79.3,\"[\"\"restaurant\"\"]\",\nc,Cafe,CA,3 Main St,NaN,-79.3,\"[\"\"restaurant\"\"]\",\nd,Cafe,CA,4 Main St,43.6,181,\"[\"\"restaurant\"\"]\",\n";
-        let (records, _) = prepare(input, None, "ca")?;
-        let outlet = locations(&records[0])?.remove(0);
-        assert_eq!(outlet.location.name.as_deref(), Some("H&M"));
-        assert_eq!(outlet.location.latitude, Some(43.6));
-        assert_eq!(outlet.aliases, vec!["H&M 1 Main St"]);
-        assert!(locations(&records[1])?.is_empty());
-        for record in &records[2..] {
-            let outlet = locations(record)?.remove(0);
-            assert!(outlet.location.latitude.is_none());
-            assert!(outlet.location.longitude.is_none());
-        }
-        Ok(())
-    }
-    #[test]
-    fn reviewed_brands_group_places_but_name_and_domain_do_not() {
-        let input = csv(&[
-            ("a", "Starbucks Bromont", "CA", "https://starbucks.com", ""),
-            ("b", "Starbucks Toronto", "CA", "https://starbucks.com", ""),
-            ("c", "Central Cafe", "CA", "https://example.com", ""),
-            ("d", "Central Cafe", "CA", "https://example.com", ""),
-        ]);
-        let review = r#"{"brands":[{"id":"starbucks","name":"Starbucks","website":"https://starbucks.com","evidence":"Reviewed official outlet directory","place_ids":["a","b"]}]}"#;
-        let (records, _) = prepare(&input, Some(review), "ca").unwrap();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].merchant.name, "Starbucks");
-        assert_eq!(records[0].raw["places"].as_array().unwrap().len(), 2);
-        assert!(records.iter().all(|r| r.merchant.aliases.is_empty()));
-        let reversed = csv(&[
-            ("d", "Central Cafe", "CA", "https://example.com", ""),
-            ("b", "Starbucks Toronto", "CA", "https://starbucks.com", ""),
-            ("a", "Starbucks Bromont", "CA", "https://starbucks.com", ""),
-            ("c", "Central Cafe", "CA", "https://example.com", ""),
-        ]);
-        assert_eq!(
-            serde_json::to_value(records).unwrap(),
-            serde_json::to_value(prepare(&reversed, Some(review), "ca").unwrap().0).unwrap()
-        );
-    }
-    #[test]
-    fn invalid_identity_and_duplicate_membership_fail() {
-        let input = csv(&[("a", "A", "CA", "", ""), ("a", "B", "CA", "", "")]);
-        assert!(prepare(&input, None, "global").is_err());
-        let input = csv(&[("a", "A", "CA", "", "")]);
-        let review =
-            r#"{"brands":[{"id":"a","name":"A","evidence":"checked","place_ids":["a","a"]}]}"#;
-        assert!(prepare(&input, Some(review), "global").is_err());
-        assert!(prepare(&input, None, "../").is_err());
-    }
-    #[test]
-    fn invalid_upstream_websites_preserve_merchants_and_original_evidence() {
-        let input = csv(&[
-            ("a", "A", "CA", "ftp://example.com", ""),
-            ("b", "B", "CA", "https://user:password@example.com", ""),
-            ("c", "C", "CA", "example.com", ""),
-            ("d", "D", "CA", "https://example.com", ""),
-        ]);
-        let (records, skipped) = prepare(&input, None, "ca").unwrap();
-        assert_eq!(records.len(), 4);
-        assert_eq!(skipped, 0);
-        for record in &records[..3] {
-            assert!(record.merchant.website.is_none());
-            assert_eq!(record.raw["places"][0]["website_validation"], "invalid");
-            assert!(record.raw["places"][0]["website_original"].is_string());
-        }
-        assert_eq!(
-            records[3].merchant.website.as_deref(),
-            Some("https://example.com/")
-        );
-        // Explicitly reviewed brand metadata remains strict.
-        let review = r#"{"brands":[{"id":"a","name":"A","website":"ftp://example.com","evidence":"checked","place_ids":["a"]}]}"#;
-        assert!(prepare(&input, Some(review), "ca").is_err());
-    }
-    #[test]
-    fn closure_country_and_noncommercial_filters_do_not_create_merchants() {
-        let input = csv(&[
-            ("a", "A", "CA", "", "2020-01-01"),
-            ("b", "B", "US", "", ""),
-            ("c", "C", "CA", "", ""),
-        ]);
-        let (records, skipped) = prepare(&input, None, "ca").unwrap();
-        assert_eq!(skipped, 2);
-        assert_eq!(records.len(), 1);
-        let input = input.replace("restaurant", "530e33ccbcbc57f1066bbff7");
-        assert!(prepare(&input, None, "global").unwrap().0.is_empty());
-    }
-    #[test]
-    fn unmatchable_names_are_skipped_but_reviewed_brand_names_can_supply_identity() {
-        let input = csv(&[
-            ("a", "---", "CA", "", ""),
-            ("b", "☕", "CA", "", ""),
-            ("c", "Café", "CA", "", ""),
-            ("d", "東京", "CA", "", ""),
-        ]);
-        let (records, skipped) = prepare(&input, None, "ca").unwrap();
-        assert_eq!(skipped, 2);
-        assert_eq!(records.len(), 2);
-        for record in &records {
-            crate::store::validate(&record.merchant).unwrap();
-        }
-        let review = r#"{"brands":[{"id":"coffee","name":"Coffee","evidence":"checked","place_ids":["b"]}]}"#;
-        let (records, skipped) = prepare(&input, Some(review), "ca").unwrap();
-        assert_eq!(skipped, 1);
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].merchant.name, "Coffee");
-        let invalid_review = review.replace("\"Coffee\"", "\"☕\"");
-        assert!(prepare(&input, Some(&invalid_review), "ca").is_err());
-    }
-}
+#[path = "../tests/unit/foursquare/tests.rs"]
+mod tests;

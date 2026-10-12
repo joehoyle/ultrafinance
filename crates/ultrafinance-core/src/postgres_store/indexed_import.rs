@@ -2,9 +2,6 @@
 use super::*;
 use crate::dedupe::{Decision, ImportReport, Report, Snapshot};
 use postgres::{binary_copy::BinaryCopyInWriter, types::Type};
-#[cfg(test)]
-use serde_json::json;
-
 pub(super) const BATCH: usize = crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE;
 const DETAILS: usize = 5000;
 
@@ -76,11 +73,11 @@ fn empty_snapshot() -> Snapshot {
 }
 fn merchants(tx: &mut Transaction<'_>, ids: &[String]) -> Result<Vec<Merchant>> {
     tx.query(
-        "SELECT data FROM merchants_documents WHERE id=ANY($1) ORDER BY id",
+        "SELECT * FROM merchants WHERE id=ANY($1) ORDER BY id",
         &[&ids],
     )?
     .into_iter()
-    .map(|r| Ok(serde_json::from_str(r.get(0))?))
+    .map(|r| rows::merchant(&r))
     .collect()
 }
 
@@ -92,8 +89,6 @@ pub(super) struct Import<'a, 'b> {
     selected: usize,
     chunk_size: usize,
     progress: crate::import_progress::Overall,
-    provider: Option<crate::dedupe::IdentityProvider>,
-    cache: Option<crate::dedupe_cache::Cache>,
 }
 impl<'a, 'b> Import<'a, 'b> {
     pub(super) fn new(
@@ -128,144 +123,7 @@ impl<'a, 'b> Import<'a, 'b> {
             selected: 0,
             chunk_size,
             progress: crate::import_progress::Overall::new(total),
-            provider: None,
-            cache: None,
         })
-    }
-    pub(super) fn set_provider(&mut self, provider: Option<crate::dedupe::IdentityProvider>) {
-        self.provider = provider;
-    }
-    fn reconcile_brands(&mut self, touched: &[String]) -> Result<()> {
-        let Some(provider) = &self.provider else {
-            return Ok(());
-        };
-        if self.cache.is_none()
-            && let Some(path) = &provider.checkpoint
-        {
-            self.cache = Some(crate::dedupe_cache::Cache::open(path)?);
-        }
-        // Names, aliases and merchant-owned hosts select comparisons, never establish identity. Compare the
-        // entire affected bucket so merges require every pair, not transitivity.
-        self.tx.batch_execute("SET LOCAL pg_trgm.similarity_threshold='0.3'; CREATE TEMP TABLE IF NOT EXISTS import_identity_decisions(left_id TEXT,right_id TEXT,left_digest TEXT,right_digest TEXT,PRIMARY KEY(left_id,right_id,left_digest,right_digest)) ON COMMIT DROP")?;
-        use postgres::fallible_iterator::FallibleIterator;
-        let mut rows = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        {
-            let mut candidates = self.tx.query_raw(r#"
-WITH names AS (SELECT DISTINCT normalized_name FROM merchant_identity_keys WHERE merchant_id=ANY($1)),
-hosts AS (SELECT DISTINCT rule_host FROM merchant_identity_keys WHERE merchant_id=ANY($1) AND rule_host<>''),
-labels AS (SELECT DISTINCT normalized FROM aliases WHERE merchant_id=ANY($1) AND length(normalized)>=3),
-pairs AS MATERIALIZED (
-SELECT a.merchant_id l,b.merchant_id r,TRUE exact FROM names n JOIN merchant_identity_keys a USING(normalized_name) JOIN merchant_identity_keys b USING(normalized_name) WHERE a.merchant_id<b.merchant_id
-UNION
-SELECT a.merchant_id,b.merchant_id,FALSE FROM hosts h JOIN merchant_identity_keys a USING(rule_host) JOIN merchant_identity_keys b ON b.rule_host=a.rule_host AND (b.normalized_name % a.normalized_name OR (split_part(a.normalized_name,' ',2)<>'' AND split_part(a.normalized_name,' ',1)=split_part(b.normalized_name,' ',1) AND split_part(a.normalized_name,' ',2)=split_part(b.normalized_name,' ',2)) OR strpos(' '||b.normalized_name||' ',' '||a.normalized_name||' ')>0 OR strpos(' '||a.normalized_name||' ',' '||b.normalized_name||' ')>0) WHERE a.merchant_id<b.merchant_id AND a.rule_host<>'' AND b.rule_host<>''
-UNION
-SELECT a.merchant_id,b.merchant_id,TRUE FROM labels l JOIN aliases a USING(normalized) JOIN aliases b USING(normalized) WHERE a.merchant_id<b.merchant_id),
-ids AS (SELECT l id FROM pairs UNION SELECT r FROM pairs),
-documents AS MATERIALIZED (
-SELECT m.id,k.normalized_name,md5(m.data ||
-    COALESCE((SELECT jsonb_agg(jsonb_build_array(s.source,s.external_id,s.input_name,s.input_website,s.input_markets,s.input_aliases) ORDER BY s.source,s.external_id)::text FROM source_records s WHERE s.merchant_id=m.id),'[]') ||
-    COALESCE((SELECT data FROM manual_merchants_documents WHERE id=m.id),'')) digest
-FROM ids
-JOIN LATERAL (SELECT id,data FROM merchants_documents WHERE id=ids.id OFFSET 0) m ON TRUE
-JOIN LATERAL (SELECT normalized_name FROM merchant_identity_keys WHERE merchant_id=ids.id OFFSET 0) k ON TRUE)
-
-SELECT p.l,p.r,a.digest,b.digest,p.exact,a.normalized_name,b.normalized_name FROM pairs p JOIN documents a ON a.id=p.l JOIN documents b ON b.id=p.r
-WHERE NOT EXISTS(SELECT 1 FROM import_identity_decisions d WHERE d.left_id=p.l AND d.right_id=p.r AND d.left_digest=a.digest AND d.right_digest=b.digest)
-"#, std::iter::once(&touched as &(dyn postgres::types::ToSql + Sync)))?;
-            while let Some(row) = candidates.next()? {
-                let pair = (row.get::<_, String>(0), row.get::<_, String>(1));
-                if seen.contains(&pair) {
-                    continue;
-                }
-                if !row.get::<_, bool>(4)
-                    && !crate::dedupe::same_host_name_candidates(
-                        &row.get::<_, String>(5),
-                        &row.get::<_, String>(6),
-                    )
-                {
-                    continue;
-                }
-                seen.insert(pair);
-                rows.push(row);
-                if rows.len() > provider.max_pairs {
-                    bail!(
-                        "import brand reconciliation exceeds {} distinct identity pairs; increase --dedupe-max-pairs to cover the complete affected buckets or reduce --chunk-size; no changes committed",
-                        provider.max_pairs
-                    );
-                }
-            }
-        }
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let ids: Vec<String> = rows
-            .iter()
-            .flat_map(|r| [r.get::<_, String>(0), r.get::<_, String>(1)])
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let snapshot = postgres_identity_snapshot_for_ids(self.tx, &ids)?;
-        let indices: HashMap<_, _> = snapshot
-            .merchants
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (m.id.clone(), i))
-            .collect();
-        let pairs = rows
-            .iter()
-            .map(|r| {
-                (
-                    indices[&r.get::<_, String>(0)],
-                    indices[&r.get::<_, String>(1)],
-                )
-            })
-            .collect();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let evaluated = runtime.block_on(crate::dedupe::evaluate(
-            &snapshot,
-            pairs,
-            Some(provider.api_key.clone()),
-            provider.model.clone(),
-            provider.threshold,
-            self.report.dry_run,
-            provider.max_pairs,
-            &provider.endpoint,
-            self.cache.as_mut(),
-        ))?;
-        if evaluated.errors > 0 {
-            bail!(
-                "{} invalid import identity answers; no changes committed",
-                evaluated.errors
-            );
-        }
-        for row in rows {
-            self.tx.execute(
-                "INSERT INTO import_identity_decisions VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
-                &[
-                    &row.get::<_, String>(0),
-                    &row.get::<_, String>(1),
-                    &row.get::<_, String>(2),
-                    &row.get::<_, String>(3),
-                ],
-            )?;
-        }
-        merge_groups(self.tx, &evaluated.groups)?;
-        self.report.model = provider.model.clone();
-        self.report.threshold = provider.threshold;
-        self.report.candidates += evaluated.candidates;
-        self.report.groups.extend(evaluated.groups);
-        if self.report.decisions.len() + evaluated.decisions.len() <= DETAILS
-            && self.report.merchants.len() + evaluated.merchants.len() <= DETAILS
-        {
-            self.report.decisions.extend(evaluated.decisions);
-            self.report.merchants.extend(evaluated.merchants);
-        } else {
-            self.report.details_truncated = true;
-        }
-        Ok(())
     }
     fn details(&mut self, group: Vec<String>, members: Vec<Merchant>) -> Result<()> {
         if group.len() < 2 {
@@ -329,7 +187,7 @@ WHERE NOT EXISTS(SELECT 1 FROM import_identity_decisions d WHERE d.left_id=p.l A
             )
             .context("source records must have unique nonblank source/external ID pairs")?;
         let mut baseline = empty_snapshot();
-        baseline.sources=self.tx.query("SELECT s.merchant_id,s.data FROM unnest($1::text[],$2::text[]) AS i(source,external_id) JOIN source_records_documents s USING(source,external_id) ORDER BY s.source,s.external_id", &[&sources,&external])?.into_iter().map(|r|Ok((r.get(0),serde_json::from_str(r.get(1))?))).collect::<Result<_>>()?;
+        baseline.sources=self.tx.query("SELECT s.* FROM unnest($1::text[],$2::text[]) AS i(source,external_id) JOIN source_records s USING(source,external_id) ORDER BY s.source,s.external_id", &[&sources,&external])?.into_iter().map(|r|Ok((r.get("merchant_id"),rows::source(&r)?))).collect::<Result<_>>()?;
         let previous: HashMap<_, _> = baseline
             .sources
             .iter()
@@ -450,7 +308,6 @@ SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE
             merging.advance(index + 1);
         }
         merging.finish();
-        self.reconcile_brands(&touched)?;
         self.report.merchants_scanned += fresh.len();
         self.selected += fresh.len() + existing.len();
         self.progress.report(self.selected);
@@ -477,210 +334,8 @@ SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn record(i: usize) -> SourceRecord {
-        serde_json::from_value(json!({"source":"stream-fixture","external_id":i.to_string(),"merchant":{"id":i.to_string(),"name":"Starbucks"},"attribution":"test","license":"test","url":"https://example.test","version":null,"raw":{}})).unwrap()
-    }
-    #[test]
-    fn streaming_chunks_reuse_identity_and_late_failures_roll_back() -> Result<()> {
-        let store = crate::store::MerchantStore::temporary()?;
-        let directory =
-            std::env::temp_dir().join(format!("ultra-stream-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory)?;
-        let path = directory.join("knowledge.json");
-        let mut records: Vec<_> = (0..(BATCH + 1)).map(record).collect();
-        std::fs::write(&path, serde_json::to_vec(&records)?)?;
-        let before = serde_json::to_value((
-            store.list(None, 100, 0)?,
-            store.source_records("stream-fixture", None, 100, 0)?,
-        ))?;
-        let (preview, available, selected) = store.reconcile_file(
-            path.clone(),
-            None,
-            true,
-            crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE,
-        )?;
-        assert_eq!((available, selected), (BATCH + 1, BATCH + 1));
-        assert_eq!(preview.dedupe.candidates, BATCH);
-        assert!(preview.dedupe.details_truncated);
-        assert_eq!(
-            serde_json::to_value((
-                store.list(None, 100, 0)?,
-                store.source_records("stream-fixture", None, 100, 0)?
-            ))?,
-            before
-        );
-        assert_eq!(store.stats()?.total, 0);
-        // A duplicate source key after the first completed chunk must roll back it.
-        records[BATCH] = records[0].clone();
-        std::fs::write(&path, serde_json::to_vec(&records)?)?;
-        assert!(
-            store
-                .reconcile_file(
-                    path.clone(),
-                    None,
-                    false,
-                    crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE
-                )
-                .is_err()
-        );
-        assert_eq!(
-            serde_json::to_value((
-                store.list(None, 100, 0)?,
-                store.source_records("stream-fixture", None, 100, 0)?
-            ))?,
-            before
-        );
-        records[BATCH] = record(BATCH);
-        let encoded = serde_json::to_string(&records)?;
-        std::fs::write(&path, format!("{encoded} trailing garbage"))?;
-        assert!(
-            store
-                .reconcile_file(
-                    path.clone(),
-                    None,
-                    false,
-                    crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE
-                )
-                .is_err()
-        );
-        assert_eq!(
-            serde_json::to_value((
-                store.list(None, 100, 0)?,
-                store.source_records("stream-fixture", None, 100, 0)?
-            ))?,
-            before
-        );
-        std::fs::write(&path, encoded)?;
-        let (result, _, _) = store.reconcile_file(
-            path.clone(),
-            None,
-            false,
-            crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE,
-        )?;
-        assert_eq!(result.delta.added, BATCH + 1);
-        assert_eq!(result.dedupe.candidates, BATCH);
-        assert_eq!(store.stats()?.total, 1);
-        let target = store.resolve_source("stream-fixture", "0")?.unwrap();
-        assert_eq!(
-            store.resolve_source("stream-fixture", &BATCH.to_string())?,
-            Some(target)
-        );
-        let (refresh, _, selected) = store.reconcile_file(
-            path,
-            Some(2),
-            false,
-            crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE,
-        )?;
-        assert_eq!(selected, 2);
-        assert_eq!(refresh.delta.unchanged, 2);
-        std::fs::remove_dir_all(directory)?;
-        Ok(())
-    }
-    #[test]
-    fn configured_chunks_preserve_dedupe_and_rollback() -> Result<()> {
-        for size in [1, 2, 17, 10000] {
-            let store = crate::store::MerchantStore::temporary()?;
-            let records: Vec<_> = (0..19).map(record).collect();
-            assert!(store.reconcile_import(records.clone(), false, 0).is_err());
-            let preview = store.reconcile_import(records.clone(), true, size)?;
-            assert_eq!(preview.dedupe.candidates, 18);
-            assert_eq!(store.stats()?.total, 0);
-            let result = store.reconcile_import(records.clone(), false, size)?;
-            assert_eq!(result.delta.added, 19);
-            assert_eq!(result.dedupe.candidates, 18);
-            assert_eq!(store.stats()?.total, 1);
-            let before = serde_json::to_value((
-                store.list(None, 100, 0)?,
-                store.source_records("stream-fixture", None, 100, 0)?,
-            ))?;
-            let mut invalid = records.clone();
-            invalid.push(records[0].clone());
-            assert!(store.reconcile_import(invalid, false, size).is_err());
-            assert_eq!(
-                serde_json::to_value((
-                    store.list(None, 100, 0)?,
-                    store.source_records("stream-fixture", None, 100, 0)?
-                ))?,
-                before
-            );
-            assert_eq!(
-                store
-                    .reconcile_import(records, false, size)?
-                    .delta
-                    .unchanged,
-                19
-            );
-        }
-        Ok(())
-    }
-    #[tokio::test]
-    async fn concurrent_imports_share_indexed_identity() -> Result<()> {
-        let store = crate::store::MerchantStore::temporary()?;
-        let a = crate::dedupe::import(store.clone(), vec![record(0)], Default::default());
-        let b = crate::dedupe::import(store.clone(), vec![record(1)], Default::default());
-        let (a, b) = tokio::join!(a, b);
-        a?;
-        b?;
-        assert_eq!(store.stats()?.total, 1);
-        assert_eq!(
-            store.resolve_source("stream-fixture", "0")?,
-            store.resolve_source("stream-fixture", "1")?
-        );
-        Ok(())
-    }
-    #[test]
-    fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
-        let lease = crate::store::MerchantStore::temporary()?;
-        let base = lease.temporary_url().to_owned();
-        let legacy = PostgresStore::connect(&base, false)?;
-        legacy.run(|client| {
-            client.batch_execute("INSERT INTO merchants(id,name,website,markets_json,aliases_json,sources_json) SELECT 'legacy-'||lpad(i::text,8,'0'),'Café Brand LLC',CASE WHEN i%2=0 THEN 'https://www.brand.test/ca' ELSE NULL END,'[]','[]','[]' FROM generate_series(0,5000) i; DROP TABLE merchant_identity_keys; DROP FUNCTION advance_catalog_revision() CASCADE; DROP TABLE catalog_revision; UPDATE ultrafinance_schema SET version=6")?;
-            Ok(())
-        })?;
-        let upgraded = PostgresStore::connect(&base, true)?;
-        upgraded.run(|client| {
-            let count:i64=client.query_one("SELECT count(*) FROM merchant_identity_keys",&[])?.get(0);
-            assert_eq!(count,5001);
-            let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00005000'",&[])?;
-            assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
-            let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00004999'",&[])?;
-            assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-            assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),12);
-            Ok(())
-        })
-    }
+#[path = "../../tests/unit/postgres_store/indexed_import/tests.rs"]
+mod tests;
 
-    #[test]
-    fn identity_index_tracks_corrections_and_uses_indexed_lookup() -> Result<()> {
-        let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
-        let store = PostgresStore::temporary(&base)?;
-        let mut m = record(0).merchant;
-        m.id = "manual".into();
-        m.name = "Café Brand, LLC".into();
-        m.website = Some("https://www.brand.test/ca".into());
-        store.put(&m)?;
-        store.run(|client| {
-            client.batch_execute("SET enable_seqscan=off")?;
-            let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='manual'",&[])?;
-            assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
-            let plan=client.query("EXPLAIN SELECT merchant_id FROM merchant_identity_keys WHERE rule_name='cafe brand' AND rule_host='brand.test'",&[])?;
-            assert!(plan.iter().any(|r|r.get::<_,String>(0).contains("merchant_identity_rule")));
-            Ok(())
-        })?;
-        m.name = "Renamed".into();
-        m.website = None;
-        store.put(&m)?;
-        store.run(|client| {
-            let row = client.query_one(
-                "SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='manual'",
-                &[],
-            )?;
-            assert_eq!(row.get::<_, String>(0), "renamed");
-            assert_eq!(row.get::<_, String>(1), "");
-            Ok(())
-        })
-    }
-}
+#[cfg(test)]
+include!("../../tests/unit/postgres_store/indexed_import/support.rs");

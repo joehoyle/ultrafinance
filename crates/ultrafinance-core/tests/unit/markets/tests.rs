@@ -1,0 +1,127 @@
+use super::*;
+use crate::location::LocationRecord;
+use crate::{import, store::MerchantStore};
+use serde_json::json;
+
+#[test]
+fn prepared_bundle_versions_retain_dataset_region() -> anyhow::Result<()> {
+    let studio =
+        r#"{"schemaVersion":"1.1.0","merchants":[{"id":"brand","canonicalName":"Brand"}]}"#;
+    let mut record = import::merchant_studio(studio)?.remove(0);
+    record.source = "open-enrichment".into();
+    record.version = Some("fnv1a64:12345678:us:".into());
+    assert_eq!(dataset_region(&record).as_deref(), Some("us"));
+    assert_eq!(source_region(&record).as_deref(), Some("US"));
+    record.version = Some("fnv1a64:abcdef:global:fnv1a64:12345678".into());
+    assert_eq!(dataset_region(&record).as_deref(), Some("global"));
+    assert!(source_region(&record).is_none());
+    Ok(())
+}
+
+#[test]
+fn markets_combine_sources_outlets_and_manual_declarations() -> anyhow::Result<()> {
+    let store = MerchantStore::temporary()?;
+    let studio = r#"{"schemaVersion":"1.1.0","merchants":[{"id":"brand","canonicalName":"Brand","countryHints":["US","CA","CA"]}]}"#;
+    let mut records = import::merchant_studio(studio)?;
+    let mut regional = records[0].clone();
+    regional.source = "open-enrichment".into();
+    regional.version = Some("au:snapshot".into());
+    regional.raw = json!({});
+    store.import(&records)?;
+    store.import(&[regional.clone()])?;
+    let id = store.resolve_source("merchant-studio", "brand")?.unwrap();
+    store.link("open-enrichment", "brand", &id)?;
+    store.put(&serde_json::from_value(
+        json!({"id":id,"name":"Brand","markets":["GB","GB"]}),
+    )?)?;
+    let mut outlets: Vec<LocationRecord> = serde_json::from_str(include_str!(
+        "../../../../../data/locations/open-enrichment-au.json"
+    ))?;
+    outlets.truncate(1);
+    outlets[0].merchant = crate::location::MerchantReference::Source {
+        source: "open-enrichment".into(),
+        external_id: "brand".into(),
+    };
+    outlets[0].location.country = Some("NZ".into());
+    store.import_locations(&outlets)?;
+    let merchant = store.list(None, 10, 0)?.merchants.remove(0);
+    assert_eq!(merchant.markets, ["AU", "CA", "GB", "NZ", "US"]);
+    let mut client = postgres::Client::connect(store.temporary_url(), postgres::NoTls)?;
+    let stored: String = client
+        .query_one("SELECT markets_json FROM merchants WHERE id=$1", &[&id])?
+        .get(0);
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&stored)?,
+        merchant.markets
+    );
+    assert!(client.query_one("SELECT to_regclass('source_market_inputs') IS NULL AND to_regclass('merchant_market_evidence') IS NULL AND NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND column_name='market_evidence_json')", &[])?.get::<_,bool>(0));
+    assert_eq!(store.list(Some("CA"), 10, 0)?.total, 1);
+    assert_eq!(store.list(Some("DE"), 10, 0)?.total, 0);
+    let stats = store.stats()?;
+    assert_eq!(stats.total, 1);
+    assert_eq!(stats.by_market.len(), 5);
+    assert_eq!(stats.by_source_region[0].region, "au");
+    assert_eq!(stats.without_markets, 0);
+    // Refresh removes obsolete source hints, while manual and outlet evidence survive.
+    records[0].raw = json!({"countryHints":["CA"]});
+    regional.version = Some("global:snapshot".into());
+    store.import(&records)?;
+    store.import(&[regional])?;
+    let merchant = store.list(None, 10, 0)?.merchants.remove(0);
+    assert_eq!(merchant.markets, ["CA", "GB", "NZ"]);
+    assert_eq!(store.stats()?.by_source_region[0].region, "global");
+    // Relinking the source moves its outlet-derived coverage immediately.
+    store.put(&serde_json::from_value(
+        json!({"id":"other","name":"Other"}),
+    )?)?;
+    store.link("open-enrichment", "brand", "other")?;
+    let original = store.search("Brand", None, 10)?.remove(0).merchant;
+    assert_eq!(original.markets, ["CA", "GB"]);
+    assert_eq!(store.list(Some("NZ"), 10, 0)?.merchants[0].id, "other");
+    Ok(())
+}
+
+#[test]
+fn absent_markets_never_exclude_and_collisions_remain_ambiguous() -> anyhow::Result<()> {
+    let store = MerchantStore::temporary()?;
+    for merchant in [
+        json!({"id":"a","name":"Same Brand","markets":["US"]}),
+        json!({"id":"b","name":"Same Brand","markets":["CA"]}),
+        json!({"id":"c","name":"Same Brand"}),
+    ] {
+        store.put(&serde_json::from_value(merchant)?)?;
+    }
+    let candidates = store.search("Same Brand", Some("CA"), 1)?;
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(candidates[0].merchant.id, "b");
+    assert_eq!(store.search("Same Brand", Some("DE"), 1)?.len(), 3);
+    assert_eq!(store.stats()?.without_markets, 1);
+    Ok(())
+}
+
+#[test]
+fn publisher_geography_is_not_coverage() -> anyhow::Result<()> {
+    let mut records = import::catalog(
+        r#"[{"id":"brand","name":"Brand","markets":["CA"]}]"#,
+        "custom",
+    )?;
+    records[0].version = Some("us:snapshot".into());
+    records[0].raw = json!({"publisherCountry":"US","countryHints":["NZ","invalid"]});
+    let store = MerchantStore::temporary()?;
+    store.import(&records)?;
+    let merchant = store.list(None, 10, 0)?.merchants.remove(0);
+    assert_eq!(merchant.markets, ["CA", "NZ"]);
+    assert!(store.stats()?.by_source_region.is_empty());
+    assert!(
+        serde_json::from_value::<Merchant>(json!({"id":"old","name":"Old","country":"CA"}))
+            .is_err()
+    );
+    assert!(
+        store
+            .put(&serde_json::from_value(
+                json!({"id":"bad","name":"Bad","markets":["ca"]})
+            )?)
+            .is_err()
+    );
+    Ok(())
+}

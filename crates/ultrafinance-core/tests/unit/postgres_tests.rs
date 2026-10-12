@@ -26,17 +26,18 @@ fn postgres_source_columns_retain_matching_fields_without_raw_payloads() -> Resu
         }))?;
         lease.import(std::slice::from_ref(&record))?;
         let row = client.query_one(
-            "SELECT data,transaction_pattern,parent_id FROM source_records_documents WHERE source='column-fixture' AND external_id=$1",
+            "SELECT * FROM source_records WHERE source='column-fixture' AND external_id=$1",
             &[&n.to_string()],
         )?;
-        let restored: SourceRecord = serde_json::from_str(row.get(0))?;
+        let restored = postgres_store::rows::source(&row)?;
         assert_eq!(restored.raw, record.matching_raw());
         assert_eq!(
-            row.get::<_, Option<String>>(1).as_deref(),
+            row.get::<_, Option<String>>("transaction_pattern")
+                .as_deref(),
             raw.get("transaction_text_regexp").and_then(|v| v.as_str())
         );
         assert_eq!(
-            row.get::<_, Option<String>>(2).as_deref(),
+            row.get::<_, Option<String>>("parent_id").as_deref(),
             raw.get("parent_id").and_then(|v| v.as_str())
         );
     }
@@ -107,9 +108,9 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         "market migration fixture requires an empty database"
     );
     client.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")?;
-    client.batch_execute(include_str!("../migrations/001_postgres.sql"))?;
-    client.batch_execute(include_str!("../migrations/002_enrichment_log.sql"))?;
-    client.batch_execute(include_str!("../migrations/003_locations.sql"))?;
+    client.batch_execute(include_str!("../../migrations/001_postgres.sql"))?;
+    client.batch_execute(include_str!("../../migrations/002_enrichment_log.sql"))?;
+    client.batch_execute(include_str!("../../migrations/003_locations.sql"))?;
     let old =
         serde_json::json!({"id":"pre-market","name":"Before markets","country":"CA"}).to_string();
     let source = serde_json::json!({
@@ -197,7 +198,7 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        12
+        14
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);

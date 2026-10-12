@@ -1,6 +1,6 @@
 # Database lookup columns
 
-Schema version 12 stores fixed catalog and matching fields in columns in
+Schema version 14 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
 indexes. JSON remains for variable evidence, source payloads and arrays whose
 searchable values have relational indexes.
@@ -14,7 +14,8 @@ searchable values have relational indexes.
 | `merchant_search_words` | Distinct search lexemes with B-tree identity and GIN trigram indexes; fuzzy spelling expansion without merchant-sized trigram posting lists |
 | `aliases` | Merchant ID and normalized alias; indexed exact-name lookup |
 | `source_records` | Source identity and metadata; typed input name, website, logo, markets, aliases, sources, country hints and dataset region; composite source identity and pattern-selection index |
-| `location_records` | Source identity, merchant or source-merchant reference, name, precision, address, city, region, postal code, country, store number, coordinates, pattern, manual override and attribution fields; merchant, country/city and merchant/store-number indexes |
+| `location_records` | Source identity, required canonical merchant ID and optional source-merchant reference, name, precision, address, city, region, postal code, country, store number, coordinates, pattern, manual override and shared source-provenance FK; merchant, country/city and merchant/store-number indexes |
+| `source_provenance` | Shared source attribution, licence and dataset URL; distinct metadata variants are preserved |
 | `descriptor_resolutions` | ID derived from context hash, merchant FK, description, country, amount, currency, supplied location fields, verified flag, review evidence, created and updated timestamps; merchant/status and description/country indexes |
 | `enrichment_log` | Existing ID, batch ID, status, merchant ID and timestamps; status/merchant/time indexes |
 | `merchant_redirects` | Retired ID and surviving merchant ID |
@@ -22,7 +23,7 @@ searchable values have relational indexes.
 Source refreshes and import rebuilds read typed fields and country arrays
 without parsing source JSON. Full source payloads and duplicate merchant JSON are not stored. Source identities,
 versions, attribution, licenses and typed matching fields are retained; source
-documents are reconstructed from them. Re-download or re-import the original
+documents are reconstructed in Rust from them. Re-download or re-import the original
 dataset when other fields are needed. Raw projections contain only country hints,
 negative aliases, transaction patterns and parent references. Changes only to
 discarded fields do not trigger catalog updates. Catalog
@@ -32,9 +33,10 @@ variable `extra` context and provenance, not a duplicated merchant snapshot.
 Enrichment logs retain full audit payloads. Merge reports are returned to callers
 and are not stored; merchant and location redirects preserve retired identities.
 
-`*_documents` views reconstruct the existing application JSON representations
-from columns. Their `data` values are computed read projections, not stored
-catalog blobs. Changing a scalar column changes its representation immediately.
+The application reads authoritative columns directly and maps PostgreSQL rows to
+Rust structs. JSON is parsed only for variable fields such as alias arrays,
+external place evidence, and resolution provenance/context. There are no
+`*_documents` views or SQL conversions of complete catalog objects into JSON.
 Normal writes must still use the store so derived alias/search/market indexes
 stay consistent with source refreshes, links and manual corrections.
 
@@ -52,6 +54,20 @@ reviewed identity or silently change an existing mapping to another merchant.
 
 PostgreSQL requires `ultrafinance
 database init` with the schema-owner connection before running this version.
+The version-14 migration drops all five document views after transferring their
+explicit privileges to the main tables and the supporting tables needed for
+location and resolution joins. Runtime reads now use typed row decoders. IDs,
+source evidence, mappings, and catalog revisions are preserved. Initialization
+is transactional; custom views depending on these projections cause a rollback
+rather than being removed with CASCADE.
+The version-13 migration backfills every outlet's canonical merchant ID from
+its source reference, requires a merchant FK, and keeps source-linked outlet IDs
+in sync through database triggers on source relinking. Unresolvable legacy
+references abort the migration. Location reads use the canonical merchant index.
+It moves location attribution, licence and URL into shared `source_provenance`
+rows and preserves existing location projection grants. Dataset URL/licence
+variants remain distinct; no outlet IDs or external place evidence are discarded.
+Source references remain as provenance and continue following explicit links.
 The version-12 migration adds a partial B-tree index on accepted business website
 hosts. Import brand reconciliation uses it to find affected host buckets without
 repeated scans of the complete identity table. It also refreshes all derived
@@ -85,14 +101,14 @@ legacy descriptor JSON into columns, following existing merchant redirects.
 Invalid legacy rows cause rollback. Fingerprints use canonical application
 serialization, so SQL JSON formatting does not change catalog identity.
 
-Grant the runtime role SELECT on the document views and SELECT, INSERT, UPDATE
-and DELETE on the underlying application tables, including `merchant_search_words` and the market, identity-key, catalog-revision and resolution tables.
+Grant the runtime role SELECT, INSERT, UPDATE
+and DELETE on the application tables, including `source_provenance`, `merchant_search_words` and the market, identity-key, catalog-revision and resolution tables. INSERT into `source_provenance` also requires USAGE on its identity sequence.
 Revision triggers require UPDATE on `catalog_revision`. Set the owner's default privileges for future tables/views
 if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 12; coordinate the database upgrade with the new application
+run against version 14; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.
@@ -114,3 +130,21 @@ starts its own disposable server; the runtime image contains no database server.
 
 The fresh schema stores operating countries in `markets_json`. Country evidence
 tables and merchant evidence JSON have been removed. Version 9 migrates the former evidence layout while preserving country coverage.
+
+## Source inputs and projections
+
+`source_records` retains import identity and matching inputs:
+refreshes rebuild merchants from these inputs, regex matching uses source patterns,
+and negative aliases exclude incorrect matches. `manual_merchants` retains reviewed
+inputs separately so source refreshes cannot overwrite corrections or delete
+manually created merchants. Removing either input store requires changing those
+product behaviors or replacing its persistence; neither is an enrichment cache.
+
+`place_ids_json` contains external provider evidence such as Apple and Google
+place IDs for one outlet; these differ from the source's `external_id` and can
+connect records from different datasets. Some providers repeat their own source
+identity in this map, but deleting the map would discard independent evidence.
+
+All Rust test code live under each crate's `tests/` directory. Modules in
+`tests/unit/` are included as unit tests using `#[path]` to retain private-code
+coverage; command-level integration tests remain at the directory root.

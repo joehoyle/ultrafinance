@@ -318,18 +318,10 @@ GPT-6 Sol, Astra and Luna; other models still report tokens but show cost as
 unavailable. Missing usage and interrupted runs are marked partial. Estimates cover
 reported usage, not an authoritative billing total.
 
-Import reconciliation first merges deterministic identities. When `TYPESAFE_API_KEY`
-is set, CLI imports also compare remaining records sharing a normalized name or alias, or similar names on a merchant-owned website host
-using Jev at a 98% confidence and same-brand probability threshold. Regional websites
-and missing websites can then be reconciled without treating name equality as proof.
-Outlets of a confirmed brand retain their individual location records. Provider errors,
-invalid answers, or excessive candidate counts roll back the entire import. A dry run
-performs the same evaluation and rolls back its changes. Without a key, import remains
-offline and performs only deterministic reconciliation.
-Use `--dedupe-max-pairs` to set the comparison budget per affected import chunk
-(default 10,000). Oversized single name buckets require a larger budget; reducing
-the record chunk size cannot split a bucket's identity assessment. No comparisons
-are silently skipped when the budget is exceeded.
+Import reconciliation uses indexed deterministic identity rules only, regardless
+of `TYPESAFE_API_KEY` or provider checkpoint settings. Imports and import previews
+make zero Jev requests. Uncertain identities remain separate; explicit
+`merchants dedupe` is available for provider-assisted review outside the import path.
 
 The shared-platform website safeguard recognizes a platform's own complete brand
 name while excluding tenant businesses. Rule keys are refreshed on source reimport,
@@ -562,7 +554,7 @@ commands remain available for explicit offline preparation and application.
 ## Repeatable dataset imports
 
 Foursquare OS Places also supports merchant and outlet imports from a filtered CSV
-export, with optional reviewed brand grouping and source place IDs retained as
+export, with source place IDs retained as
 evidence. See [Foursquare merchant imports](docs/foursquare.md) for export format,
 dry-run/apply commands, attribution, and refresh limitations. Addressed places are
 imported as locations linked to their matched merchant, with stable IDs on refresh.
@@ -931,7 +923,7 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 12 before running this application. See
+schema version 14 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
 Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
@@ -1308,13 +1300,8 @@ number, with that pair's rule or Jev decision. A merchant can appear in multiple
 pairs, making each comparison explicit.
 
 Merchant imports (`sources import`, `datasets apply`, and `merchants import`)
-first use deterministic reconciliation. If `TYPESAFE_API_KEY` is configured,
-remaining same-name, alias, or similar-name/business-host identity candidates are evaluated by Jev
-at 98% before the import commits. Source IDs preserve known identities.
-On the same accepted business host, a complete multiword brand name within a
-longer branch name also qualifies for comparison, as do branch names sharing a
-complete prefix of at least two words and five characters. This widens candidate selection;
-Jev must still establish identity before any semantic merge.
+use deterministic reconciliation only, with zero Jev requests regardless of
+provider credentials. Source IDs preserve known identities.
 New identities are grouped by a conservative canonical name plus business website host: case,
 accents, punctuation, `www.`, HTTP/HTTPS, URL paths and trailing legal suffixes
 (`Inc`, `LLC`, `Ltd`, `Corp`, etc.) are normalized. Shared social platforms,
@@ -1325,18 +1312,18 @@ identical complete normalized names merge without stripping legal suffixes.
 This deliberately groups same-name businesses with no websites; blank websites
 never match populated websites. A shared domain alone does not establish brand
 identity. Product names, locality suffixes and store numbers are
-not stripped. Uncertain provider decisions remain separate and appear in the report.
+not stripped. Uncertain identities remain separate.
 
-For long provider-backed imports, set `ULTRAFINANCE_DEDUPE_CHECKPOINT` to a local
+For explicit provider-backed `merchants dedupe` runs, set `ULTRAFINANCE_DEDUPE_CHECKPOINT` to a local
 JSONL file. Each successful request saves validated answers before the next
-request, so a later provider or import failure can be retried without resending
+request, so a later provider failure can be retried without resending
 completed comparisons. The journal stores answers and SHA-256 digests of the
 exact question, endpoint and model; it omits API keys and question contents.
 Changed evidence or model settings require new answers, and the current merge
 threshold and complete-link checks still apply. Use a fresh checkpoint file when
 you want a fresh evaluation of a mutable model name such as `jev-latest`.
 An interrupted final append is discarded on reopening; malformed complete entries
-stop the import. The catalogue transaction still rolls back on any failure.
+stop reconciliation. Provider calls finish before the guarded merge transaction.
 
 Indexed PostgreSQL identity buckets replace import-time fuzzy/all-pairs scans. Every member
 of an accepted bucket shares the same key, so the report needs only one edge per
@@ -1347,7 +1334,7 @@ survivor, retaining source links, aliases, markets and matching inputs. Existing
 merchants can be merged with redirects and references updated atomically.
 
 Use `--dedupe-dry-run` to preview reconciliation without committing database
-writes; with a key configured, it includes provider calls. For `sources import`,
+writes or provider calls. For `sources import`,
 plain `--dry-run` remains bundle preparation only. Broader fuzzy review is available
 through `merchants dedupe`, with its own model, threshold and pair budget.
 
@@ -1391,10 +1378,10 @@ streaming database cursor. Retired identities and their references are reconcile
 in bounded groups, restricted to touched brands.
 
 Foursquare downloads are copied from DuckDB's output file without loading the
-CSV into memory. Default preparation (without reviewed brand mappings) sorts
+CSV into memory. Preparation sorts
 5,000-row runs on disk and merges them with at most 64 open runs, preserving
-place ordering and duplicate/conflict validation. Reviewed brand grouping and
-other source adapters retain their existing preparation behavior.
+place ordering and duplicate/conflict validation. Other source adapters retain
+their existing preparation behavior.
 
 The transaction exempts itself from request statement and idle transaction
 timeouts, preserving the lock timeout and restoring normal settings after
