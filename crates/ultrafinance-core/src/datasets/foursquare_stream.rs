@@ -9,6 +9,8 @@ use crate::{
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct ApplyCheckpoint {
     target: String,
+    #[serde(default)]
+    merchants_only: bool,
     offset: u64,
     processed: usize,
     selected: usize,
@@ -31,6 +33,21 @@ fn prepared(
         record.version = Some(format!("{fingerprint}:{region}:"));
     }
     Ok((records, skipped))
+}
+
+// Keep canonical merchant fields and provider IDs; the identity writer stores
+// IDs without outlets in foursquare_unlocated until a later full import.
+fn select_merchants(mut records: Vec<SourceRecord>, merchants_only: bool) -> Vec<SourceRecord> {
+    if merchants_only {
+        for record in &mut records {
+            record
+                .raw
+                .as_object_mut()
+                .expect("prepared Foursquare object")
+                .remove("places");
+        }
+    }
+    records
 }
 
 // Used for validation/counting and a single-transaction reconciliation preview.
@@ -225,12 +242,17 @@ fn import_from(
             &fingerprint,
             None,
         );
-        let scratch = base.with_extension(if options.initial_load {
+        let extension = if options.initial_load {
             "initial"
         } else if preview {
             "preview"
         } else {
             "streaming"
+        };
+        let scratch = base.with_extension(if options.merchants_only {
+            format!("merchants-{extension}")
+        } else {
+            extension.to_owned()
         });
         std::fs::create_dir_all(&scratch)?;
         (fingerprint, scratch)
@@ -240,13 +262,9 @@ fn import_from(
         .truncate(false)
         .read(true)
         .write(true)
-        .open(scratch.with_extension(if options.initial_load {
-            "initial.lock"
-        } else if preview {
-            "preview.lock"
-        } else {
-            "streaming.lock"
-        }))?;
+        .open(scratch.with_extension(format!(
+            "{}.lock", scratch.extension().and_then(|s| s.to_str()).unwrap_or("streaming")
+        )))?;
     lock.try_lock()
         .context("another process is importing this Foursquare dataset")?;
     let checkpoint_path = scratch.join("checkpoint.json");
@@ -267,6 +285,13 @@ fn import_from(
     {
         bail!(
             "Foursquare checkpoint belongs to a different database; use a different --output directory"
+        );
+    }
+    if let Some(apply) = existing.as_ref().and_then(|c| c.application.as_ref())
+        && apply.merchants_only != options.merchants_only
+    {
+        bail!(
+            "Foursquare checkpoint import mode differs; resume with the same --merchants-only setting, or import the original CSV into a different --output directory"
         );
     }
     let mut checkpoint = if let Some(checkpoint) =
@@ -348,7 +373,7 @@ fn import_from(
             .iter()
             .map(|name| scratch.join(name))
             .collect();
-        let mut report = json!({"bundle":null,"checkpoint":scratch,"manifest":checkpoint.manifest,
+        let mut report = json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,"manifest":checkpoint.manifest,
             "initial_load":true,"dry_run":preview,
             "selection":{"available_records":available,"selected_records":selected_total,"limit":options.limit,"chunk_size":chunk_size}});
         if let Some(store) = store {
@@ -366,7 +391,7 @@ fn import_from(
                         chunk_size,
                         options.limit,
                         total_rows,
-                        consume,
+                        |records| consume(select_merchants(records, options.merchants_only)),
                     )?;
                     Ok(())
                 },
@@ -384,7 +409,7 @@ fn import_from(
             .iter()
             .map(|name| scratch.join(name))
             .collect();
-        let mut report = json!({"bundle":null,"checkpoint":scratch,"manifest":checkpoint.manifest,"dry_run":true,
+        let mut report = json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,"manifest":checkpoint.manifest,"dry_run":true,
             "selection":{"available_records":available,"selected_records":selected_total,"limit":options.limit,"chunk_size":chunk_size}});
         if let Some(store) = store {
             let mut manifest = empty_manifest(&headers, region, &fingerprint)?;
@@ -398,7 +423,7 @@ fn import_from(
                         chunk_size,
                         options.limit,
                         total_rows,
-                        consume,
+                        |records| consume(select_merchants(records, options.merchants_only)),
                     )?;
                     Ok(())
                 })?;
@@ -418,6 +443,7 @@ fn import_from(
     if checkpoint.application.is_none() {
         checkpoint.application = Some(ApplyCheckpoint {
             target,
+            merchants_only: options.merchants_only,
             ..Default::default()
         });
         checkpoint.save(&scratch)?;
@@ -484,7 +510,7 @@ fn import_from(
             let started = std::time::Instant::now();
             let result: ImportReport =
                 store.reconcile_generated(count, false, chunk_size, move |consume| {
-                    consume(records)
+                    consume(select_merchants(records, options.merchants_only))
                 })?;
             apply.delta.added += result.delta.added;
             apply.delta.updated += result.delta.updated;
@@ -537,7 +563,7 @@ fn import_from(
         apply.selected, apply.chunks, apply.delta.added, apply.delta.updated, apply.delta.unchanged
     );
     Ok(
-        json!({"bundle":null,"checkpoint":scratch,"manifest":checkpoint.manifest,"dry_run":false,
+        json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,"manifest":checkpoint.manifest,"dry_run":false,
         "selection":{"available_records":available,"selected_records":apply.selected,"limit":options.limit,"chunk_size":chunk_size},
         "resume":{"previously_committed":resumed,"committed_this_run":apply.selected-resumed,"complete":apply.complete},
         "delta":{"added":apply.delta.added-start_delta.0,"updated":apply.delta.updated-start_delta.1,"unchanged":apply.delta.unchanged-start_delta.2},"dedupe":{"dry_run":false,"model":"deterministic","candidates":apply.candidates,"errors":0,"details_truncated":true},"committed_chunks":apply.chunks}),

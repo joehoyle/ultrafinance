@@ -31,6 +31,7 @@ fn options(
 ) -> FoursquareImportOptions {
     FoursquareImportOptions {
         initial_load: false,
+        merchants_only: false,
         database_url: store.map(|s| s.temporary_url().to_owned()),
         limit,
         dry_run,
@@ -390,5 +391,61 @@ fn initial_load_preparation_preview_and_commit_share_retryable_input() -> Result
             .to_string()
             .contains("empty catalog")
     );
+    Ok(())
+}
+
+#[test]
+fn merchants_only_can_resume_and_add_locations_later() -> Result<()> {
+    for initial in [false, true] {
+        let store = MerchantStore::temporary()?;
+        let root = Scratch(
+            std::env::temp_dir().join(format!("ultra-fsq-merchants-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&root.0)?;
+        let file = input(&root.0)?;
+        let output = root.0.join("out");
+        let mut config = options(Some(&store), false, if initial { None } else { Some(2) });
+        config.initial_load = initial;
+        config.merchants_only = true;
+        let report = import_file(&file, &output, "ca", config)?;
+        assert_eq!(report["merchants_only"], true);
+        let merchant = store.resolve_source("foursquare", "place:0")?.unwrap();
+        assert!(store.location_sources(&merchant)?.is_empty());
+        if !initial {
+            let checkpoint = Path::new(report["checkpoint"].as_str().unwrap());
+            let error =
+                resume_import(checkpoint, "ca", options(Some(&store), false, None)).unwrap_err();
+            assert!(error.to_string().contains("import mode differs"));
+            let mut config = options(Some(&store), false, None);
+            config.merchants_only = true;
+            let resumed = resume_import(checkpoint, "ca", config)?;
+            assert_eq!(resumed["resume"]["previously_committed"], 2);
+        }
+        assert_eq!(store.stats()?.total, 1);
+        assert_eq!(store.source_records("foursquare", None, 100, 0)?.len(), 5);
+        assert!(store.location_sources(&merchant)?.is_empty());
+
+        // A normal import rereads every provider ID and attaches its outlet.
+        let full = import_file(&file, &output, "ca", options(Some(&store), false, None))?;
+        assert_eq!(full["delta"]["added"], 0);
+        assert_eq!(store.stats()?.total, 1);
+        let outlets = store.location_sources(&merchant)?;
+        assert_eq!(outlets.len(), 5);
+        for i in 0..5 {
+            assert_eq!(
+                store.resolve_source("foursquare", &format!("place:{i}"))?,
+                Some(merchant.clone())
+            );
+        }
+        // Replaying merchants-only never removes or replaces existing outlets.
+        let mut config = options(Some(&store), false, None);
+        config.merchants_only = true;
+        import_file(&file, &output, "ca", config)?;
+        let after = store.location_sources(&merchant)?;
+        assert_eq!(after.len(), outlets.len());
+        for outlet in outlets {
+            assert!(after.iter().any(|a| a.location.id == outlet.location.id));
+        }
+    }
     Ok(())
 }

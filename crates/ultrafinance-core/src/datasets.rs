@@ -24,6 +24,8 @@ pub fn prepare_foursquare_file(
 pub struct FoursquareImportOptions {
     /// Atomic, grouped load into an empty catalog; no chunk-level resume.
     pub initial_load: bool,
+    /// Retain provider identities but defer outlet writes.
+    pub merchants_only: bool,
     pub database_url: Option<String>,
     pub limit: Option<u32>,
     pub dry_run: bool,

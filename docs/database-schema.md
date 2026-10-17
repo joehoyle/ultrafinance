@@ -58,8 +58,9 @@ reviewed identity or silently change an existing mapping to another merchant.
 Foursquare does not retain per-place merchant source evidence. Addressed places
 use `location_records(source,external_id)` as their import key and reference the
 current canonical merchant directly. `foursquare_unlocated(external_id,merchant_id)`
-keeps only IDs for places without an outlet; an addressed refresh moves identity
-to the outlet in the same transaction. `source_identities` is a non-materialized
+keeps only IDs for places without an outlet, including locations deferred with
+`--merchants-only`; a later full import with an address moves identity to the
+outlet in the same transaction. `source_identities` is a non-materialized
 union for source lookup, listings, and statistics. Other providers continue using
 `source_records` and their existing evidence-based refresh behavior.
 

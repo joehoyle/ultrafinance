@@ -119,6 +119,9 @@ enum Command {
         /// Atomically load Foursquare into an empty catalog and build secondary indexes last.
         #[arg(long, conflicts_with = "resume")]
         initial_load: bool,
+        /// Import Foursquare merchants and provider IDs, deferring locations until a later import.
+        #[arg(long)]
+        merchants_only: bool,
         /// Allow the names-only synthetic BusinessTransactions evaluation catalog.
         #[arg(long)]
         evaluation: bool,
@@ -853,11 +856,15 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
             dry_run,
             evaluation,
             initial_load,
+            merchants_only,
             dedupe,
         } => {
             let r = registry(source);
             if initial_load && !matches!(r.source, Source::Foursquare) {
                 bail!("--initial-load is supported only for Foursquare imports");
+            }
+            if merchants_only && !matches!(r.source, Source::Foursquare) {
+                bail!("--merchants-only is supported only for Foursquare imports");
             }
             urls(r.source, &region)?;
             if let Some(checkpoint) = resume {
@@ -869,6 +876,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     region,
                     datasets::FoursquareImportOptions {
                         initial_load,
+                        merchants_only,
                         database_url: database_url.map(str::to_owned),
                         limit: dedupe.limit,
                         dry_run,
@@ -942,6 +950,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     region,
                     datasets::FoursquareImportOptions {
                         initial_load,
+                        merchants_only,
                         database_url: database_url.map(str::to_owned),
                         limit: dedupe.limit,
                         dry_run,

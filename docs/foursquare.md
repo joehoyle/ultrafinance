@@ -655,3 +655,33 @@ unindexed outlet table for each record. Source/outlet IDs, manual overrides,
 repeat imports, addressless-to-addressed transitions, migration and rollback are
 covered by regression tests. Existing databases require migration 18; deleting
 old evidence rows does not immediately shrink their existing relation files.
+
+### Import merchants now, locations later
+
+Use `--merchants-only` with a regular Foursquare import or an empty-catalog
+`--initial-load`:
+
+```sh
+ultrafinance sources import foursquare --region ca --input places.csv --initial-load --merchants-only
+```
+
+This imports canonical merchant fields and retains every selected place ID in
+the compact ID-to-merchant mapping, without writing outlets. It still reads all
+selected places to group merchants. Existing outlets are preserved.
+
+Keep the CSV (or download it again). To attach locations later, run a normal
+import without either flag:
+
+```sh
+ultrafinance sources import foursquare --region ca --input places.csv
+```
+
+The saved provider IDs attach outlets to the same merchants. Locations without
+usable addresses remain ID mappings. No database reset or schema migration is
+needed for this flag.
+
+Merchants-only imports use separate checkpoint directories. Resume an interrupted
+merchants-only import with `--resume <checkpoint> --merchants-only`; changing
+the mode of a saved application checkpoint is rejected. A later full import
+must read the CSV again, because completed streaming imports delete consumed
+sorted files.

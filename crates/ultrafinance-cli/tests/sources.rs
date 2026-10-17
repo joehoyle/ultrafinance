@@ -55,8 +55,10 @@ fn foursquare_prepares_place_identities_without_manual_review_or_transaction_lab
             "--output",
             output.to_str().unwrap(),
             "--dry-run",
+            "--merchants-only",
         ],
     ));
+    assert_eq!(report["merchants_only"], true);
     assert_eq!(report["manifest"]["merchant_records"], 4);
     assert_eq!(report["manifest"]["retained_places"], 4);
     assert_eq!(report["manifest"]["holdout_samples"], 0);
@@ -73,6 +75,7 @@ fn foursquare_prepares_place_identities_without_manual_review_or_transaction_lab
             "--region",
             "ca",
             "--offline",
+            "--merchants-only",
             "--output",
             output.to_str().unwrap(),
             "--dry-run",
@@ -939,4 +942,18 @@ fn initial_load_requires_foursquare_and_conflicts_with_resume() {
     );
     assert!(!resume.status.success());
     assert!(String::from_utf8_lossy(&resume.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn merchants_only_requires_foursquare() {
+    let root = tempfile::tempdir().unwrap();
+    let result = run(
+        root.path(),
+        &["import", "merchant-studio", "--merchants-only", "--dry-run"],
+    );
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("--merchants-only is supported only for Foursquare")
+    );
 }
