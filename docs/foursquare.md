@@ -111,6 +111,41 @@ Import transactions use 64 MiB of PostgreSQL `work_mem` per sort/hash operation
 to reduce disk spills; this setting ends with the transaction. Concurrent
 operations and parallel query workers can each use this allowance.
 
+Source and merchant lookups use bounded primary-key probes, even before
+PostgreSQL has current statistics for a growing catalog. The ordered-evidence
+check first selects a merchant's own source rows, then checks source, ordering
+and website/logo requirements. The SQL `OFFSET 0` boundaries are intentional:
+without them, the planner can repeatedly build a bitmap of the entire earlier
+Foursquare source-key range for each merchant in a batch. This preserves the
+existing reconciliation rules, indexes and per-chunk transactions; it does not
+require an infrastructure change or schema migration.
+
+With `--verbose`, the importer reports the ordered-evidence check separately
+and prints each committed chunk's record count, database duration, rate and
+cumulative committed count. Chunk duration includes reconciliation and commit,
+but excludes CSV decoding/preparation and checkpoint saving.
+
+To compare release binaries against the same initialized local catalog, use
+`dev/bench-foursquare.py`. Supply a CSV window containing fresh source IDs to
+measure append performance, or previously imported IDs to measure refreshes:
+
+```sh
+ULTRAFINANCE_DATABASE_URL='postgresql://ultrafinance@127.0.0.1:55432/ultrafinance_bench?sslmode=disable' \
+  python3 dev/bench-foursquare.py \
+  --binary /tmp/ultrafinance-before --binary target/release/ultrafinance \
+  --input /tmp/places-ca-window.csv --region ca --limit 10000 \
+  --repeats 3 --output /tmp/foursquare-comparison
+```
+
+This prepares the CSV once, alternates binaries, and runs reconciliation previews
+that roll back. Use an isolated catalog: previews acquire writer locks and
+generate real database work. The JSON summary includes wall time and phase
+timings; phase timings are rounded and nested, so they are not additive.
+Run without concurrent builds or imports. Preview throughput excludes commit
+costs and is not a full-import forecast. Compare both fresh-statistics and
+lagging-statistics cases; automatic analysis after an import stops can conceal
+the plan that was slow while the catalog was growing.
+
 Crash-safe resume requires durable PostgreSQL commits. The local Compose database
 defaults to disposable development mode (`fsync=off`, `full_page_writes=off`,
 `synchronous_commit=off`) for import throughput. Graceful interruption can resume,
@@ -348,6 +383,45 @@ database I/O, and transaction commit costs can change the rate. The current
 Aurora capacity ceiling is 1 ACU. Database work dominated the preview; increasing
 CLI cores alone does not resolve it. Rebenchmark after tuning the database and
 import pipeline before starting a global production import.
+
+## Local growth benchmark (2026-10-17)
+
+The Canada download contained 2,284,369 open places (548.9 MiB), of which
+2,077,583 were eligible. A local PostgreSQL 17 run reproduced a slowdown while
+loading the catalog: the ordered-evidence query built a source-key bitmap of
+425,666 rows **500 times** for 500 merchant probes. `EXPLAIN (ANALYZE, BUFFERS)`
+reported 6,030 ms; restricting each probe to its merchant first took 18 ms.
+After automatic analysis caught up, the original query also became fast.
+
+End-to-end reconciliation comparisons used the `a50bd45` release binary and the
+bounded-probe fix against the same isolated catalog, alternating three rollback
+previews per binary. Each comparison selected 10,000 fresh records from a
+50,000-row CSV window shared by both binaries; the window differed between
+catalog sizes. Preparation was cached; startup, CSV reads and reconciliation were
+included, but commits were not. Results are medians:
+
+| Existing source records | Source statistics | Before | After | Speedup |
+| --- | --- | --- | --- | --- |
+| 500,000 | Absent | 24.96 s | 3.56 s | 7.0× |
+| 1,000,000 | Absent | 26.90 s | 5.25 s | 5.1× |
+| 1,000,000 | Fresh | 5.66 s | 5.55 s | About equal |
+
+The absent-statistics comparisons used a restored catalog with source
+auto-analysis disabled **only for the benchmark**, to hold the bad-plan
+condition observed during the growing import constant. Auto-analysis was then
+restored and `VACUUM (ANALYZE)` run for the control. Selected-record and merge
+candidate counts agreed across all runs. These measurements do not establish a
+consistent 10× whole-import improvement or a ten-million-record completion time.
+
+The fixed importer separately committed another 500,000 records, growing the
+catalog from 500,000 to one million, in 264.09 seconds of database work including
+commits (about 1,893 records/s; 117 chunks). This excludes CSV preparation and
+checkpoint writes. The server retained 128 MiB shared buffers and durable
+commits (`fsync`, `full_page_writes`, `synchronous_commit` enabled) on a host with
+two vCPUs and 15 GiB RAM. A raw CSV `COPY` control loaded 50,000 rows into an
+unindexed temporary table in 0.22 seconds; that is a transport baseline, not a
+comparable indexed/reconciled import. The remaining measured work includes
+location writes and merchant/search index maintenance.
 
 ## Attribution
 

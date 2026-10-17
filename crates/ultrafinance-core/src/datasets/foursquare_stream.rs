@@ -439,6 +439,7 @@ fn import_from(
         let (records, _) = prepared(&headers, &rows, region, &fingerprint)?;
         let count = records.len();
         if count > 0 {
+            let started = std::time::Instant::now();
             let result: ImportReport =
                 store.reconcile_generated(count, false, chunk_size, move |consume| {
                     consume(records)
@@ -449,6 +450,15 @@ fn import_from(
             apply.candidates += result.dedupe.candidates;
             apply.selected += count;
             apply.chunks += 1;
+            if crate::import_progress::verbose() {
+                let seconds = started.elapsed().as_secs_f64();
+                eprintln!(
+                    "Import: committed chunk {}: {count} source records in {seconds:.3}s ({:.0}/s); {} total committed",
+                    apply.chunks,
+                    count as f64 / seconds.max(0.001),
+                    apply.selected,
+                );
+            }
         }
         if eof {
             checkpoint.paths.remove(0);

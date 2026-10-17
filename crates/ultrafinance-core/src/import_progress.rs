@@ -171,6 +171,7 @@ fn stage(label: &'static str) -> &'static str {
         "looking up existing source identities" => "Finding merchants",
         "matching new merchant identities" => "Matching merchants",
         "inserting new merchants with final fields" => "Saving merchants",
+        "checking ordered Foursquare evidence" => "Checking prior evidence",
         "checking/writing source records" => "Saving source records",
         "rebuilding merchant search and markets" => "Rebuilding merchants",
         "reading merchant source inputs" => "Reading source inputs",

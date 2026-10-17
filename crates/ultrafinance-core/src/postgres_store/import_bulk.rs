@@ -225,6 +225,26 @@ struct OrderedAppend {
     eligible: HashSet<String>,
 }
 
+// Fence the merchant lookup before filtering source/order. Otherwise PostgreSQL
+// can BitmapAnd the merchant index with the entire imported source-key prefix
+// once per merchant. On Canada this read ~426k index entries 500 times per batch.
+// OFFSET 0 keeps the probe restricted to this merchant; LIMIT still stops at
+// the first supporting row without reading the rest of a chain's history.
+const ORDERED_APPEND_PROOF: &str = r#"
+SELECT e.id FROM unnest($1::text[],$2::bool[],$3::bool[]) e(id,needs_website,needs_logo)
+CROSS JOIN LATERAL (
+    SELECT 1 FROM (
+        SELECT source,external_id,input_website,input_logo_url
+        FROM source_records WHERE merchant_id=e.id OFFSET 0
+    ) s
+    WHERE s.source='foursquare' AND s.external_id<$4
+      AND (NOT e.needs_website OR s.input_website IS NOT NULL)
+      AND (NOT e.needs_logo OR s.input_logo_url IS NOT NULL)
+    LIMIT 1
+) prior
+WHERE NOT EXISTS (SELECT 1 FROM manual_merchants m WHERE m.id=e.id)
+"#;
+
 /// Prove that each reused merchant has retained evidence preceding this batch,
 /// including a website/logo when its canonical fields contain them. This keeps
 /// first-source precedence even if unrelated later IDs already exist. Limit each
@@ -242,6 +262,10 @@ fn ordered_foursquare_append(
     {
         return Ok(None);
     }
+    let progress = crate::import_progress::Progress::new(
+        "checking ordered Foursquare evidence",
+        canonical.len(),
+    );
     let external: Vec<_> = records.iter().map(|r| r.external_id.clone()).collect();
     let rows = tx.query(
         r#"
@@ -269,23 +293,11 @@ ORDER BY external_id
     let logos: Vec<_> = before.iter().map(|m| m.logo_url.is_some()).collect();
     let minimum = &external[order[0]];
     let eligible: HashSet<String> = tx
-        .query(
-            r#"
-SELECT e.id FROM unnest($1::text[],$2::bool[],$3::bool[]) e(id,needs_website,needs_logo)
-CROSS JOIN LATERAL (
-    SELECT 1 FROM source_records s
-    WHERE s.merchant_id=e.id AND s.source='foursquare' AND s.external_id<$4
-      AND (NOT e.needs_website OR s.input_website IS NOT NULL)
-      AND (NOT e.needs_logo OR s.input_logo_url IS NOT NULL)
-    LIMIT 1
-) prior
-WHERE NOT EXISTS (SELECT 1 FROM manual_merchants m WHERE m.id=e.id)
-"#,
-            &[&ids, &websites, &logos, &minimum],
-        )?
+        .query(ORDERED_APPEND_PROOF, &[&ids, &websites, &logos, &minimum])?
         .iter()
         .map(|row| row.get(0))
         .collect();
+    progress.finish();
     Ok((!eligible.is_empty()).then_some(OrderedAppend { order, eligible }))
 }
 

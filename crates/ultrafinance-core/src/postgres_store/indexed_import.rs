@@ -5,6 +5,13 @@ use postgres::{binary_copy::BinaryCopyInWriter, types::Type};
 pub(super) const BATCH: usize = crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE;
 const DETAILS: usize = 5000;
 
+// Keep bounded imports bounded even when PostgreSQL estimates a hash join over
+// the entire catalog to be cheaper. OFFSET 0 prevents flattening these lateral
+// probes; each incoming key uses the existing primary key. Do not replace with
+// an unrestricted join: it repeatedly scanned source_records in the Canada run.
+const SOURCE_LOOKUP: &str = "SELECT s.* FROM unnest($1::text[],$2::text[]) AS i(source,external_id) CROSS JOIN LATERAL (SELECT * FROM source_records s WHERE s.source=i.source AND s.external_id=i.external_id OFFSET 0) s ORDER BY s.source,s.external_id";
+const MERCHANT_LOOKUP: &str = "SELECT m.* FROM (SELECT DISTINCT unnest($1::text[]) AS id) i CROSS JOIN LATERAL (SELECT * FROM merchants m WHERE m.id=i.id OFFSET 0) m ORDER BY m.id";
+
 pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
     let mut after = String::new();
     loop {
@@ -72,13 +79,13 @@ fn empty_snapshot() -> Snapshot {
     }
 }
 fn merchants(tx: &mut Transaction<'_>, ids: &[String]) -> Result<Vec<Merchant>> {
-    tx.query(
-        "SELECT * FROM merchants WHERE id=ANY($1) ORDER BY id",
-        &[&ids],
-    )?
-    .into_iter()
-    .map(|r| rows::merchant(&r))
-    .collect()
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    tx.query(MERCHANT_LOOKUP, &[&ids])?
+        .into_iter()
+        .map(|r| rows::merchant(&r))
+        .collect()
 }
 
 pub(super) struct Import<'a, 'b> {
@@ -208,7 +215,12 @@ impl<'a, 'b> Import<'a, 'b> {
             )
             .context("source records must have unique nonblank source/external ID pairs")?;
         let mut baseline = empty_snapshot();
-        baseline.sources=self.tx.query("SELECT s.* FROM unnest($1::text[],$2::text[]) AS i(source,external_id) JOIN source_records s USING(source,external_id) ORDER BY s.source,s.external_id", &[&sources,&external])?.into_iter().map(|r|Ok((r.get("merchant_id"),rows::source(&r)?))).collect::<Result<_>>()?;
+        baseline.sources = self
+            .tx
+            .query(SOURCE_LOOKUP, &[&sources, &external])?
+            .into_iter()
+            .map(|r| Ok((r.get("merchant_id"), rows::source(&r)?)))
+            .collect::<Result<_>>()?;
         let previous: HashMap<_, _> = baseline
             .sources
             .iter()

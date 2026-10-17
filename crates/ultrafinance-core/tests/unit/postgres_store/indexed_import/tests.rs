@@ -2,6 +2,45 @@ use super::*;
 fn record(i: usize) -> SourceRecord {
     serde_json::from_value(json!({"source":"stream-fixture","external_id":i.to_string(),"merchant":{"id":i.to_string(),"name":"Starbucks"},"attribution":"test","license":"test","url":"https://example.test","version":null,"raw":{}})).unwrap()
 }
+
+#[test]
+fn import_lookups_probe_keys_without_scanning_the_catalog() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    store.run(|client| {
+        let mut tx = client.transaction()?;
+        // Temp relations shadow the real tables. Leave them unanalyzed, like
+        // rapidly growing catalogs between auto-analyze passes. Wide payloads
+        // make an accidental catalog scan expensive without a huge test fixture.
+        tx.batch_execute("CREATE TEMP TABLE source_records(source TEXT,external_id TEXT,payload TEXT,PRIMARY KEY(source,external_id)); CREATE TEMP TABLE merchants(id TEXT PRIMARY KEY,payload TEXT); INSERT INTO source_records SELECT 'fixture',i::text,repeat('x',512) FROM generate_series(1,20000) i; INSERT INTO merchants SELECT i::text,repeat('x',512) FROM generate_series(1,20000) i")?;
+        let sources = vec!["fixture".to_owned(); 5000];
+        let external: Vec<_> = (1..=5000).map(|i| i.to_string()).collect();
+        let rows = tx.query(SOURCE_LOOKUP, &[&sources, &external])?;
+        assert_eq!(rows.len(), 5000);
+        assert!(rows.iter().all(|r| r.get::<_, String>("source") == "fixture"));
+        let source_plan = tx.query(&format!("EXPLAIN {SOURCE_LOOKUP}"), &[&sources, &external])?;
+        let source_plan: String = source_plan.iter().map(|r| r.get::<_, String>(0)).collect();
+        assert!(source_plan.contains("Index Scan"), "{source_plan}");
+        assert!(!source_plan.contains("Seq Scan"), "{source_plan}");
+
+        let mut ids = external;
+        ids.extend(["1".to_owned(), "missing".to_owned()]);
+        let rows = tx.query(MERCHANT_LOOKUP, &[&ids])?;
+        // ANY semantics: duplicate requested IDs return one row; missing IDs
+        // return none. Sorting continues to use PostgreSQL's text collation.
+        assert_eq!(rows.len(), 5000);
+        let plan = tx.query(&format!("EXPLAIN {MERCHANT_LOOKUP}"), &[&ids])?;
+        let plan: String = plan.iter().map(|r| r.get::<_, String>(0)).collect();
+        assert!(plan.contains("Index Scan"), "{plan}");
+        assert!(!plan.contains("Seq Scan"), "{plan}");
+        let missing = vec!["missing".to_owned(); sources.len()];
+        assert!(tx.query(SOURCE_LOOKUP, &[&sources, &missing])?.is_empty());
+        let empty: Vec<String> = vec![];
+        assert!(tx.query(MERCHANT_LOOKUP, &[&empty])?.is_empty());
+        Ok(())
+    })
+}
 #[test]
 fn streaming_chunks_reuse_identity_and_late_failures_roll_back() -> Result<()> {
     let store = crate::store::MerchantStore::temporary()?;

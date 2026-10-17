@@ -1,4 +1,38 @@
 use super::*;
+
+#[test]
+fn ordered_append_probes_only_each_merchants_history() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    store.run(|client| {
+        let mut tx = client.transaction()?;
+        // No statistics: this reproduces the BitmapAnd plan seen during the
+        // growing import. Analyzed tables hide the regression in the old SQL.
+        tx.batch_execute("CREATE TEMP TABLE source_records(source TEXT,external_id TEXT,merchant_id TEXT,input_website TEXT,input_logo_url TEXT,PRIMARY KEY(source,external_id)); CREATE INDEX ON source_records(merchant_id); INSERT INTO source_records SELECT 'foursquare',lpad(i::text,8,'0'),i::text,NULL,NULL FROM generate_series(1,20000) i")?;
+        let ids: Vec<_> = (1..=500).map(|i| i.to_string()).collect();
+        let needs = vec![false; ids.len()];
+        let before = "99999999";
+        let rows = tx.query(ORDERED_APPEND_PROOF, &[&ids, &needs, &needs, &before])?;
+        assert_eq!(rows.len(), ids.len());
+        let plan = tx.query(
+            &format!("EXPLAIN {ORDERED_APPEND_PROOF}"),
+            &[&ids, &needs, &needs, &before],
+        )?;
+        let plan: String = plan.iter().map(|r| r.get::<_, String>(0)).collect();
+        // In particular, never build a source-wide external-ID bitmap per
+        // merchant. All source index access must be by merchant_id.
+        assert!(plan.contains("source_records_merchant_id_idx"), "{plan}");
+        assert!(!plan.contains("source_records_pkey"), "{plan}");
+        assert!(!plan.contains("BitmapAnd"), "{plan}");
+        let website_required = vec![true; ids.len()];
+        assert!(tx.query(ORDERED_APPEND_PROOF, &[&ids, &website_required, &needs, &before])?.is_empty());
+        let before = "00000000";
+        assert!(tx.query(ORDERED_APPEND_PROOF, &[&ids, &needs, &needs, &before])?.is_empty());
+        Ok(())
+    })
+}
+
 #[test]
 fn copy_roundtrips_null_unicode_empty_and_large_text() -> Result<()> {
     let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
