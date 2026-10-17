@@ -13,6 +13,26 @@ pub fn refresh(root: &Path, site: &str) -> Result<()> {
         bail!("homepage example source must be an HTTPS URL without credentials");
     }
     let endpoint = site.join("/v1/enrich")?;
+    // Resume a sleeping database with a read before the single POST capture.
+    // curl bounds each attempt and retries transient HTTP errors twice.
+    let readiness = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "70",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "2",
+            site.join("/v1/merchants?limit=1")?.as_str(),
+        ])
+        .output()
+        .context("could not run curl for homepage catalog readiness")?;
+    if !readiness.status.success() {
+        bail!("homepage catalog readiness failed ({})", readiness.status);
+    }
     eprintln!("Capturing homepage example from {endpoint}");
     let output = Command::new("curl")
         .args([

@@ -9,6 +9,7 @@ struct Fake {
     alias_conflict: bool,
     image_conflict: bool,
     unchanged: bool,
+    catalog_failures: RefCell<usize>,
 }
 
 impl Lambda for Fake {
@@ -40,11 +41,45 @@ impl Lambda for Fake {
 
     fn check(&self, qualifier: &str) -> Result<()> {
         self.checks.borrow_mut().push(qualifier.into());
+        let mut failures = self.catalog_failures.borrow_mut();
+        if *failures > 0 {
+            *failures -= 1;
+            return Err(CatalogNotReady {
+                qualifier: qualifier.into(),
+                status: 503,
+            }
+            .into());
+        }
         if self.fail_check == Some(qualifier) {
             bail!("smoke check failed");
         }
         Ok(())
     }
+}
+
+#[test]
+fn catalog_resume_is_retried_with_a_bounded_budget() {
+    for (failures, succeeds, checks) in [(2, true, 3), (3, false, 3)] {
+        let client = Fake {
+            catalog_failures: RefCell::new(failures),
+            ..Default::default()
+        };
+        let mut pauses = 0;
+        let result = check_with_resume_retry(&client, "8", || pauses += 1);
+        assert_eq!(result.is_ok(), succeeds);
+        assert_eq!(client.checks.borrow().len(), checks);
+        assert_eq!(pauses, 2);
+    }
+}
+
+#[test]
+fn other_readiness_failures_are_not_retried() {
+    let client = Fake {
+        fail_check: Some("8"),
+        ..Default::default()
+    };
+    assert!(check_with_resume_retry(&client, "8", || panic!("unexpected retry")).is_err());
+    assert_eq!(client.checks.borrow().len(), 1);
 }
 
 #[test]

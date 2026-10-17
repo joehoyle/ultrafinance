@@ -989,6 +989,11 @@ previous snapshot. The candidate and live Lambda checks also run the example
 request and verify the expected merchant. The capture reflects the production API
 at build time; its timestamp distinguishes it from a live lookup.
 
+Capture first probes the catalog with bounded read retries to allow Aurora to
+resume. Lambda readiness checks likewise allow three attempts for catalog
+503/504 responses before rejecting the candidate or rolling back live. Other
+readiness failures stop immediately; enrichment requests are not replayed.
+
 After catalog changes, refresh manually and include the updated snapshot in the
 next release:
 

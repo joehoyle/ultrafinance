@@ -19,6 +19,46 @@ struct Client<'a> {
     example: &'a Value,
 }
 
+#[derive(Debug)]
+struct CatalogNotReady {
+    qualifier: String,
+    status: u64,
+}
+
+impl std::fmt::Display for CatalogNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Lambda {} returned {} for /v1/merchants, expected 200",
+            self.qualifier, self.status
+        )
+    }
+}
+
+impl std::error::Error for CatalogNotReady {}
+
+fn check_with_resume_retry(
+    client: &impl Lambda,
+    qualifier: &str,
+    mut pause: impl FnMut(),
+) -> Result<()> {
+    for attempt in 1..=3 {
+        match client.check(qualifier) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 3 && error.is::<CatalogNotReady>() => {
+                eprintln!("{error}; retrying readiness check ({attempt}/3)");
+                pause();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the last readiness attempt returns its result")
+}
+
+fn resume_delay() {
+    std::thread::sleep(std::time::Duration::from_secs(2));
+}
+
 impl Lambda for Client<'_> {
     fn call(&self, operation: &str, arguments: &[&str]) -> Result<Value> {
         let mut args = vec!["lambda", operation];
@@ -70,6 +110,18 @@ impl Lambda for Client<'_> {
             }
             let result: Value = serde_json::from_slice(&std::fs::read(response)?)?;
             if result["statusCode"] != expected {
+                // This read can race Aurora resume. Failures after reaching the
+                // enrichment check are never retried, so writes are not replayed.
+                if method == "GET"
+                    && path == "/v1/merchants"
+                    && let Some(status @ (503 | 504)) = result["statusCode"].as_u64()
+                {
+                    return Err(CatalogNotReady {
+                        qualifier: qualifier.into(),
+                        status,
+                    }
+                    .into());
+                }
                 bail!(
                     "Lambda {qualifier} returned {} for {path}, expected {expected}",
                     result["statusCode"]
@@ -186,7 +238,7 @@ fn release(client: &impl Lambda, image: &str) -> Result<(String, String)> {
         )?;
         text(&published, "Version")?.to_owned()
     };
-    client.check(&version)?;
+    check_with_resume_retry(client, &version, resume_delay)?;
     let promoted = client.call(
         "update-alias",
         &[
@@ -200,7 +252,7 @@ fn release(client: &impl Lambda, image: &str) -> Result<(String, String)> {
             "{\"AdditionalVersionWeights\":{}}",
         ],
     )?;
-    if let Err(error) = client.check("live") {
+    if let Err(error) = check_with_resume_retry(client, "live", resume_delay) {
         let routing = previous
             .get("RoutingConfig")
             .cloned()
