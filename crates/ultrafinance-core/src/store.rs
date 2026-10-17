@@ -316,6 +316,19 @@ impl MerchantStore {
         self.0
             .reconcile_generated(total, dry_run, chunk_size, produce)
     }
+    pub(crate) fn initial_foursquare_load<F>(
+        &self,
+        total: usize,
+        dry_run: bool,
+        chunk_size: usize,
+        produce: F,
+    ) -> Result<crate::dedupe::ImportReport>
+    where
+        F: FnOnce(&mut dyn FnMut(Vec<SourceRecord>) -> Result<()>) -> Result<()> + Send + 'static,
+    {
+        self.0
+            .initial_foursquare_load(total, dry_run, chunk_size, produce)
+    }
     pub(crate) fn import_database_identity(&self) -> Result<String> {
         self.0.import_database_identity()
     }

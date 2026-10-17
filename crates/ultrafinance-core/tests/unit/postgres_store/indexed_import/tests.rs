@@ -195,6 +195,7 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
     let base = lease.temporary_url().to_owned();
     let legacy = PostgresStore::connect(&base, false)?;
     legacy.run(|client| {
+        client.batch_execute(include_str!("../version_14_json.sql"))?;
         client.batch_execute(include_str!("../version_12_locations.sql"))?;
         client.batch_execute("INSERT INTO merchants(id,name,website,markets_json,aliases_json,sources_json) SELECT 'legacy-'||lpad(i::text,8,'0'),'Café Brand LLC',CASE WHEN i%2=0 THEN 'https://www.brand.test/ca' ELSE NULL END,'[]','[]','[]' FROM generate_series(0,5000) i; DROP TABLE merchant_identity_keys; DROP FUNCTION advance_catalog_revision() CASCADE; DROP TABLE catalog_revision; UPDATE ultrafinance_schema SET version=6")?;
         Ok(())
@@ -207,7 +208,7 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
         assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
         let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00004999'",&[])?;
         assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),14);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),15);
         Ok(())
     })
 }

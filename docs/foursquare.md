@@ -146,6 +146,52 @@ costs and is not a full-import forecast. Compare both fresh-statistics and
 lagging-statistics cases; automatic analysis after an import stops can conceal
 the plan that was slow while the catalog was growing.
 
+The catalog uses native PostgreSQL arrays for merchant markets, aliases and
+sources and location aliases; external place-ID maps use `jsonb`. Schema version
+15 removes the JSON-text casts and list serialization from catalog writes and
+reads. Run `ultrafinance database init` to migrate an existing catalog before
+using this binary; see [schema migration details](database-schema.md#upgrade).
+
+### Initial load into an empty catalog
+
+Use `--initial-load` for a new Foursquare catalog:
+
+```sh
+ultrafinance database init
+ultrafinance sources import foursquare --region ca --input /path/to/places.csv --initial-load
+```
+
+This mode refuses a populated catalog. It uses the configured database and keeps
+one transaction open through staging, reconciliation, index construction and
+commit. Regular imports remain the resumable path for updates and mixed-source
+catalogs.
+
+The initial loader streams prepared records through binary COPY into a temporary
+PostgreSQL table, computes identity keys with the same Rust rules, and sorts the
+staged records by identity and source ID. Related places are processed together,
+reducing repeated updates to established chains. Reconciliation still uses the
+shared importer, with bounded chunks even for a very large chain. Diagnostic
+merge groups are capped; candidate and imported-record counts remain exact.
+
+Primary/unique keys and matching indexes remain active. Secondary search,
+geography and browsing indexes are built once after loading. Foreign keys on the
+loaded tables are restored and validated against the complete tables before
+commit, avoiding a reference lookup for every inserted row. Location writes use
+typed COPY fields instead of serializing and reparsing entire JSON records.
+Search vocabulary and all normal indexes are present when the transaction commits.
+
+An initial load holds exclusive catalog locks: readers wait until the complete
+catalog is published. Failure rolls back both data and schema changes. Restart
+with the original command; cached preparation is retained, but database progress
+is not resumable and `--resume` cannot be combined with `--initial-load`. Allow
+disk space for the staged records, PostgreSQL sort spill, final tables/indexes
+and WAL. Nothing changes database durability settings.
+
+`--dry-run --initial-load` only prepares and counts input. To exercise staging,
+reconciliation, index building and integrity validation without publishing the
+catalog, use `--initial-load --dedupe-dry-run` against an empty database. This
+preview takes the same exclusive locks and rolls back at the end.
+
 Crash-safe resume requires durable PostgreSQL commits. The local Compose database
 defaults to disposable development mode (`fsync=off`, `full_page_writes=off`,
 `synchronous_commit=off`) for import throughput. Graceful interruption can resume,
@@ -422,6 +468,47 @@ two vCPUs and 15 GiB RAM. A raw CSV `COPY` control loaded 50,000 rows into an
 unindexed temporary table in 0.22 seconds; that is a transport baseline, not a
 comparable indexed/reconciled import. The remaining measured work includes
 location writes and merchant/search index maintenance.
+
+## Initial-load and typed-schema benchmark (2026-10-17)
+
+A committed comparison against empty catalogs used the same 600,000-row Canada
+CSV and selected 500,000 eligible place/source records. Both runs included CSV
+preparation, reconciliation, location writes, indexes and durable commits; schema
+initialization and downloading were excluded. These are individual runs, not
+medians:
+
+| Import path | End-to-end time |
+| --- | --- |
+| Previous bounded-probe importer, schema 14 | 144.33 s |
+| Initial load, schema 15 and direct source COPY | 90.29 s |
+
+This is a **1.6×** improvement over the already optimized importer, not another
+10×. Database staging, loading, index construction, integrity validation and
+commit took 80.48 seconds in the new run. Direct COPY of keys proven new also
+benefits regular incremental imports; existing-source refreshes retain the
+upsert path.
+
+Both catalogs contained **424,925 merchants and 445,053 locations** from the
+500,000 input records, with 75,075 duplicate candidates. Every source's canonical
+merchant and location fields matched after excluding generated internal IDs.
+The schema-14 catalog was also migrated to schema 15 in 11.30 seconds, and the
+same complete field comparison matched before and after migration.
+
+A separate scale check selected one million eligible records from a 1.2-million-row
+Canada CSV. The final initial-load implementation completed in **203.78 seconds**
+end to end, including 182.09 seconds for database staging through commit. It
+produced **830,823 merchants and 880,530 locations**, with matching merchant search
+and identity-key counts, zero incorrect location owners, and all foreign keys
+and indexes validated. This run had no paired old-binary baseline. Its throughput
+extrapolates to about 34 minutes for ten million input places; that is not a
+measured ten-million-record result or a time for ten million final merchants.
+
+Input/source counts are not final merchant counts. This Canada sample does not
+support assuming a global ten-to-one reduction from places to merchants. All
+measurements include locations; no merchant-only shortcut, disabled durability,
+or relaxed identity rules were used. The host and server settings match the
+local growth benchmark above. The initial loader builds indexes and validates
+foreign keys before publishing the catalog in one transaction.
 
 ## Attribution
 

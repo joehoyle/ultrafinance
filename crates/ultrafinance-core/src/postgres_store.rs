@@ -22,6 +22,8 @@ mod foursquare_locations;
 mod import_bulk;
 #[path = "postgres_store/indexed_import.rs"]
 mod indexed_import;
+#[path = "postgres_store/initial_load.rs"]
+mod initial_load;
 #[path = "postgres_store/merchant_provenance.rs"]
 mod merchant_provenance;
 #[path = "postgres_store/read_cache.rs"]
@@ -205,7 +207,7 @@ impl PostgresStore {
                         .context("schema upgrade could not initialize merchant redirects")?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)
                         .context("schema upgrade could not initialize location redirects")?;
-                    if version > 14 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 15 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -257,12 +259,17 @@ impl PostgresStore {
                         tx.batch_execute(include_str!("../migrations/014_remove_document_views.sql"))
                             .context("schema migration 14 (document views) failed")?;
                     }
+                    if version < 15 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/015_typed_catalog_lists.sql"))
+                            .context("schema migration 15 (typed catalog lists) failed")?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 14 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 15 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -717,6 +724,18 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             Ok(report)
         })
     }
+    pub(super) fn initial_foursquare_load<F>(
+        &self,
+        total: usize,
+        dry_run: bool,
+        chunk_size: usize,
+        produce: F,
+    ) -> Result<crate::dedupe::ImportReport>
+    where
+        F: FnOnce(&mut dyn FnMut(Vec<SourceRecord>) -> Result<()>) -> Result<()> + Send + 'static,
+    {
+        self.run(move |client| initial_load::run(client, total, dry_run, chunk_size, produce))
+    }
     pub fn reconcile_file(
         &self,
         path: std::path::PathBuf,
@@ -766,11 +785,11 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             // Coverage is maintained transactionally by catalog writes. Stats
             // needs only aggregate rows, never a hydrated catalog or source payloads.
             let without_markets = usize::try_from(tx.query_one(
-                "SELECT count(*) FROM merchants m WHERE COALESCE(m.markets_json,'[]')::jsonb='[]'::jsonb",
+                "SELECT count(*) FROM merchants m WHERE cardinality(m.markets)=0",
                 &[],
             )?.get::<_, i64>(0))?;
             let by_market = tx.query(
-                "SELECT country,count(DISTINCT m.id) FROM merchants m CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(m.markets_json,'[]')::jsonb) country GROUP BY country ORDER BY count(DISTINCT m.id) DESC,country",
+                "SELECT country,count(DISTINCT m.id) FROM merchants m CROSS JOIN LATERAL unnest(m.markets) country GROUP BY country ORDER BY count(DISTINCT m.id) DESC,country",
                 &[],
             )?.into_iter().map(|r| Ok(super::MerchantMarketStats {
                 market:r.get(0), merchants:usize::try_from(r.get::<_,i64>(1))?,
@@ -804,9 +823,9 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         let sql_offset = i64::try_from(offset)?;
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
-            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets_json::jsonb ? $1)", &[&market])?.get(0);
+            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text])", &[&market])?.get(0);
             let mut merchants = Vec::new();
-            for row in tx.query("SELECT m.* FROM merchants m WHERE ($1::text IS NULL OR m.markets_json::jsonb ? $1) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset])? {
+            for row in tx.query("SELECT m.* FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset])? {
                 merchants.push(rows::merchant(&row)?);
             }
             let page = MerchantPage {merchants,total:usize::try_from(total)?,limit,offset};
@@ -831,7 +850,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
-            let exact = tx.query("SELECT m.id,m.name,m.aliases_json,m.markets_json FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
+            let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
             for row in exact {
                 add_candidate(&mut found, &row, true, None, &mut scorer)?;
             }
@@ -844,7 +863,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             }
             for (id, length) in matches {
                 if !found.contains_key(&id) {
-                    let row = tx.query_one("SELECT id,name,aliases_json,markets_json FROM merchants WHERE id=$1", &[&id])?;
+                    let row = tx.query_one("SELECT id,name,aliases,markets FROM merchants WHERE id=$1", &[&id])?;
                     add_candidate(&mut found, &row, false, Some(length), &mut scorer)?;
                 }
                 if let Some(candidate) = found.get_mut(&id) { candidate.regex_match_length = Some(length); }
@@ -861,7 +880,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
                 .collect();
             if !combined_terms.is_empty() {
                 for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases_json,m.markets_json FROM (
+                    "SELECT m.id,m.name,m.aliases,m.markets FROM (
                         SELECT DISTINCT pool.merchant_id
                         FROM unnest($1::text[]) term(query)
                         CROSS JOIN LATERAL (
@@ -880,7 +899,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             // does not bound work on a million-row catalog.
             if !terms.is_empty() {
                 for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases_json,m.markets_json FROM (
+                    "SELECT m.id,m.name,m.aliases,m.markets FROM (
                         SELECT DISTINCT pool.merchant_id
                         FROM unnest($1::text[]) term(query)
                         CROSS JOIN LATERAL (
@@ -902,7 +921,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             let fuzzy_words = owner.reads.lock().unwrap().fuzzy_words(&mut tx, &fuzzy_tokens)?;
             if !fuzzy_words.is_empty() {
                 for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases_json,m.markets_json FROM (
+                    "SELECT m.id,m.name,m.aliases,m.markets FROM (
                         SELECT DISTINCT pool.merchant_id
                         FROM unnest($1::text[]) words(word)
                         CROSS JOIN LATERAL (
@@ -1037,8 +1056,8 @@ fn add_candidate(
     let merchant = Merchant {
         id: row.get(0),
         name: row.get(1),
-        aliases: serde_json::from_str(row.get(2))?,
-        markets: serde_json::from_str(row.get(3))?,
+        aliases: row.try_get(2)?,
+        markets: row.try_get(3)?,
         website: None,
         logo_url: None,
         logo_source: None,
@@ -1179,8 +1198,11 @@ fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> 
     for id in ids {
         if let Some(row) = c.query_opt("SELECT * FROM merchants WHERE id=$1", &[&id])? {
             let merchant = rows::merchant(&row)?;
-            let markets = serde_json::to_string(&index.hydrate(merchant).markets)?;
-            c.execute("UPDATE merchants SET markets_json=$2 WHERE id=$1 AND markets_json IS DISTINCT FROM $2", &[&id,&markets])?;
+            let markets = index.hydrate(merchant).markets;
+            c.execute(
+                "UPDATE merchants SET markets=$2 WHERE id=$1 AND markets IS DISTINCT FROM $2",
+                &[&id, &markets],
+            )?;
         }
     }
 

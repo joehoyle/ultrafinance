@@ -16,9 +16,9 @@ pub(super) fn merchant(row: &Row) -> Result<Merchant> {
         website: row.try_get("website")?,
         logo_url: row.try_get("logo_url")?,
         logo_source: row.try_get("logo_source")?,
-        markets: json_column(row, "markets_json")?,
-        aliases: json_column(row, "aliases_json")?,
-        sources: json_column(row, "sources_json")?,
+        markets: row.try_get("markets")?,
+        aliases: row.try_get("aliases")?,
+        sources: row.try_get("sources")?,
     })
 }
 
@@ -103,8 +103,8 @@ pub(super) fn location(row: &Row) -> Result<LocationRecord> {
             latitude: row.try_get("latitude")?,
             longitude: row.try_get("longitude")?,
         },
-        aliases: json_column(row, "aliases_json")?,
-        place_ids: json_column(row, "place_ids_json")?,
+        aliases: row.try_get("aliases")?,
+        place_ids: row.try_get::<_, postgres::types::Json<_>>("place_ids")?.0,
         transaction_pattern: row.try_get("transaction_pattern")?,
         manual_override: row.try_get("manual_override")?,
         attribution: row.try_get("attribution")?,

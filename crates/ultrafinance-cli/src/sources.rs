@@ -116,6 +116,9 @@ enum Command {
         /// Prepare a bundle and report its size without changing the database.
         #[arg(long)]
         dry_run: bool,
+        /// Atomically load Foursquare into an empty catalog and build secondary indexes last.
+        #[arg(long, conflicts_with = "resume")]
+        initial_load: bool,
         /// Allow the names-only synthetic BusinessTransactions evaluation catalog.
         #[arg(long)]
         evaluation: bool,
@@ -849,9 +852,13 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
             resume,
             dry_run,
             evaluation,
+            initial_load,
             dedupe,
         } => {
             let r = registry(source);
+            if initial_load && !matches!(r.source, Source::Foursquare) {
+                bail!("--initial-load is supported only for Foursquare imports");
+            }
             urls(r.source, &region)?;
             if let Some(checkpoint) = resume {
                 if !matches!(r.source, Source::Foursquare) {
@@ -861,6 +868,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     checkpoint,
                     region,
                     datasets::FoursquareImportOptions {
+                        initial_load,
                         database_url: database_url.map(str::to_owned),
                         limit: dedupe.limit,
                         dry_run,
@@ -933,6 +941,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     output,
                     region,
                     datasets::FoursquareImportOptions {
+                        initial_load,
                         database_url: database_url.map(str::to_owned),
                         limit: dedupe.limit,
                         dry_run,

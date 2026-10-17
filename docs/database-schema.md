@@ -1,9 +1,10 @@
 # Database lookup columns
 
-Schema version 14 stores fixed catalog and matching fields in columns in
+Schema version 15 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
-indexes. JSON remains for variable evidence, source payloads and arrays whose
-searchable values have relational indexes.
+indexes. Merchant markets, aliases and sources and location aliases use native `text[]`
+columns. JSON remains for keyed external place IDs (`jsonb`), variable resolution
+evidence/context, and audit logs.
 
 | Table | Column fields and relationships |
 | --- | --- |
@@ -28,14 +29,14 @@ dataset when other fields are needed. Raw projections contain only country hints
 negative aliases, transaction patterns and parent references. Changes only to
 discarded fields do not trigger catalog updates. Catalog
 arrays preserve declarations and display metadata; alias lookup uses `aliases`
-and country filtering uses the GIN index on `merchants.markets_json::jsonb`. Mapping JSON contains only
+and country filtering uses the GIN index on `merchants.markets`. Mapping JSON contains only
 variable `extra` context and provenance, not a duplicated merchant snapshot.
 Enrichment logs retain full audit payloads. Merge reports are returned to callers
 and are not stored; merchant and location redirects preserve retired identities.
 
 The application reads authoritative columns directly and maps PostgreSQL rows to
-Rust structs. JSON is parsed only for variable fields such as alias arrays,
-external place evidence, and resolution provenance/context. There are no
+Rust structs. Lists are decoded directly as PostgreSQL arrays; JSON is decoded only for
+external place maps and resolution provenance/context. There are no
 `*_documents` views or SQL conversions of complete catalog objects into JSON.
 Normal writes must still use the store so derived alias/search/market indexes
 stay consistent with source refreshes, links and manual corrections.
@@ -54,6 +55,18 @@ reviewed identity or silently change an existing mapping to another merchant.
 
 PostgreSQL requires `ultrafinance
 database init` with the schema-owner connection before running this version.
+The version-15 migration converts merchant/manual markets, aliases and sources
+and location aliases from JSON text to `text[]`, and external place maps to
+`jsonb`. It renames the columns without the `_json` suffix, supplies empty-list/map
+defaults, and replaces the country GIN expression index with a native array index.
+API representations, list order, IDs, ownership and provenance are preserved.
+This rewrites populated merchant and location tables and rebuilds their indexes;
+allow maintenance time and free disk space. It runs transactionally, and invalid
+legacy data or dependent custom views cause rollback. Regular runtime writes do
+not need schema-owner privileges; the optional `--initial-load` mode does because
+it rebuilds indexes and validates foreign keys before committing an empty-catalog
+bootstrap.
+
 The version-14 migration drops all five document views after transferring their
 explicit privileges to the main tables and the supporting tables needed for
 location and resolution joins. Runtime reads now use typed row decoders. IDs,
@@ -108,7 +121,7 @@ if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 14; coordinate the database upgrade with the new application
+run against version 15; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.
@@ -128,7 +141,7 @@ production database URL. CI provides PostgreSQL, and the Docker build's test sta
 starts its own disposable server; the runtime image contains no database server.
 
 
-The fresh schema stores operating countries in `markets_json`. Country evidence
+The fresh schema stores operating countries in `markets` (`text[]`). Country evidence
 tables and merchant evidence JSON have been removed. Version 9 migrates the former evidence layout while preserving country coverage.
 
 ## Source inputs and projections
@@ -140,7 +153,7 @@ inputs separately so source refreshes cannot overwrite corrections or delete
 manually created merchants. Removing either input store requires changing those
 product behaviors or replacing its persistence; neither is an enrichment cache.
 
-`place_ids_json` contains external provider evidence such as Apple and Google
+`place_ids` (`jsonb`) contains external provider evidence such as Apple and Google
 place IDs for one outlet; these differ from the source's `external_id` and can
 connect records from different datasets. Some providers repeat their own source
 identity in this map, but deleting the map would discard independent evidence.

@@ -70,7 +70,7 @@ fn fresh_merchants_insert_final_fields_once_across_source_batches() -> Result<()
         .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
     let store = PostgresStore::temporary(&base)?;
     store.run(|client| {
-        client.batch_execute("CREATE TABLE merchant_writes(id TEXT,operation TEXT,aliases TEXT); CREATE FUNCTION record_merchant_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO merchant_writes VALUES(NEW.id,TG_OP,NEW.aliases_json); RETURN NEW; END $$; CREATE TRIGGER merchant_write AFTER INSERT OR UPDATE ON merchants FOR EACH ROW EXECUTE FUNCTION record_merchant_write()")?;
+        client.batch_execute("CREATE TABLE merchant_writes(id TEXT,operation TEXT,aliases TEXT); CREATE FUNCTION record_merchant_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO merchant_writes VALUES(NEW.id,TG_OP,to_json(NEW.aliases)::text); RETURN NEW; END $$; CREATE TRIGGER merchant_write AFTER INSERT OR UPDATE ON merchants FOR EACH ROW EXECUTE FUNCTION record_merchant_write()")?;
         Ok(())
     })?;
     let records: Vec<SourceRecord> =

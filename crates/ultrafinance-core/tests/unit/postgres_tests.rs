@@ -198,7 +198,7 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        14
+        15
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);

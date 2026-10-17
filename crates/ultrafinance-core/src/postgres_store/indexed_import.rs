@@ -382,6 +382,32 @@ FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
         self.progress.report(self.selected);
         Ok(())
     }
+    /// The initial loader has staged and grouped all input on disk. Fetch only
+    /// one chunk at a time, including for chains larger than memory.
+    pub(super) fn staged(&mut self) -> Result<()> {
+        loop {
+            let rows = self.tx.query(
+                &format!("FETCH {} FROM initial_records", self.chunk_size),
+                &[],
+            )?;
+            if rows.is_empty() {
+                break;
+            }
+            let records = rows
+                .iter()
+                .map(|row| serde_json::from_str(row.get::<_, &str>(0)))
+                .collect::<std::result::Result<Vec<SourceRecord>, _>>()?;
+            self.chunk(records)?;
+            // Initial loads can collapse millions of records. Counts are exact;
+            // keep diagnostic groups bounded just like decisions and merchants.
+            if self.report.groups.len() > DETAILS {
+                self.report.groups.truncate(DETAILS);
+                self.report.details_truncated = true;
+            }
+        }
+        self.tx.batch_execute("CLOSE initial_records")?;
+        Ok(())
+    }
     fn add_delta(&mut self, delta: super::super::ImportDelta) {
         self.delta.added += delta.added;
         self.delta.updated += delta.updated;

@@ -41,6 +41,7 @@ fn version_eleven_import_host_index_preserves_catalog_and_supports_host_lookup()
     let id = lease.resolve_source("merchant-studio", "alpha")?;
     assert!(id.is_some());
     let revision: i64 = lease.run(|client| {
+        client.batch_execute(include_str!("version_14_json.sql"))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute(
             "DROP INDEX merchant_identity_rule_host; UPDATE ultrafinance_schema SET version=11; UPDATE merchant_identity_keys SET rule_name='cafe',rule_host='yp.ca' WHERE normalized_name='cafe'",
@@ -73,6 +74,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
         )?.get::<_, bool>(0));
+        client.batch_execute(include_str!("version_14_json.sql"))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute("CREATE TABLE merchant_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); CREATE TABLE location_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); INSERT INTO merchant_merge_runs VALUES('merchant-audit','{}'); INSERT INTO location_merge_runs VALUES('location-audit','{}'); INSERT INTO merchant_redirects VALUES('retired','survivor'); UPDATE ultrafinance_schema SET version=9")?;
         Ok(())
@@ -83,7 +85,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
     // Reinitialization must not recreate either audit table.
     let initialized = PostgresStore::connect(&url, true)?;
     initialized.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 14);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 15);
         assert!(client.query_one(
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
@@ -110,29 +112,37 @@ fn version_eight_legacy_views_are_migrated_before_import() -> Result<()> {
             &mut tx, "merchant-studio", "alpha", "alpha",
             &serde_json::to_string(&records[0])?,
         )?;
+        tx.batch_execute(include_str!("version_14_json.sql"))?;
         tx.batch_execute(include_str!("version_12_locations.sql"))?;
         // Recreate the stale projections found in existing version-8 catalogs.
         tx.batch_execute(r#"
-            ALTER VIEW merchants_documents RENAME TO merchants_current;
-            ALTER VIEW manual_merchants_documents RENAME TO manual_merchants_current;
-            ALTER VIEW source_records_documents RENAME TO source_records_current;
             ALTER TABLE merchants ADD COLUMN market_evidence_json TEXT DEFAULT '[]';
             ALTER TABLE manual_merchants ADD COLUMN market_evidence_json TEXT DEFAULT '[]';
             CREATE TABLE source_market_inputs (source TEXT);
             CREATE TABLE merchant_market_evidence (merchant_id TEXT);
-            CREATE VIEW merchants_documents AS SELECT id,
-                (data::jsonb || '{"market_evidence":[]}'::jsonb)::text AS data FROM merchants_current;
-            CREATE VIEW manual_merchants_documents AS SELECT id,
-                (data::jsonb || '{"market_evidence":[]}'::jsonb)::text AS data FROM manual_merchants_current;
-            CREATE VIEW source_records_documents AS SELECT source,external_id,merchant_id,
-                jsonb_set(data::jsonb,'{merchant,market_evidence}','[]'::jsonb)::text AS data FROM source_records_current;
+            -- Embed the old projection directly, without inventing extra custom
+            -- views that would correctly block a later column-type migration.
+            DO $$ DECLARE definition text; projection text; resolutions text; BEGIN
+                resolutions := pg_get_viewdef('descriptor_resolution_documents'::regclass);
+                DROP VIEW descriptor_resolution_documents;
+                FOREACH projection IN ARRAY ARRAY['merchants_documents','manual_merchants_documents','source_records_documents'] LOOP
+                    definition := rtrim(pg_get_viewdef(projection::regclass), ';');
+                    EXECUTE format('DROP VIEW %I', projection);
+                    IF projection='source_records_documents' THEN
+                        EXECUTE format('CREATE VIEW %I AS SELECT source,external_id,merchant_id,jsonb_set(data::jsonb,''{merchant,market_evidence}'',''[]''::jsonb)::text AS data FROM (%s) legacy', projection, definition);
+                    ELSE
+                        EXECUTE format('CREATE VIEW %I AS SELECT id,(data::jsonb || ''{"market_evidence":[]}''::jsonb)::text AS data FROM (%s) legacy', projection, definition);
+                    END IF;
+                END LOOP;
+                EXECUTE 'CREATE VIEW descriptor_resolution_documents AS ' || resolutions;
+            END $$;
             GRANT SELECT ON merchants_documents,manual_merchants_documents,source_records_documents TO PUBLIC;
             UPDATE ultrafinance_schema SET version=8;
         "#)?;
         tx.commit()?;
         Ok(())
     })?;
-    assert_eq!(lease.get("alpha")?.unwrap().name, "Alpha");
+
     let error = match PostgresStore::connect(&url, false) {
         Ok(_) => bail!("legacy schema must require initialization"),
         Err(error) => error,
@@ -205,7 +215,7 @@ fn postgres_idle_session_reconnects_before_work_without_replaying_jobs() -> Resu
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get(0);
         assert_eq!(
-            version, 14,
+            version, 15,
             "market migration must run before application use"
         );
         let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
@@ -277,6 +287,7 @@ fn version_twelve_locations_backfill_merchants_and_share_provenance() -> Result<
         lease.run(|client| Ok(client.query_one("SHOW work_mem", &[])?.get(0)))?;
     let before = lease.location_sources(&original)?;
     lease.run(|client| {
+        client.batch_execute(include_str!("version_14_json.sql"))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute("GRANT SELECT ON location_records_documents TO PUBLIC")?;
         assert_eq!(
@@ -391,13 +402,14 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
         lease.save_resolution(&resolution)?;
     }
     let (expected, resolutions, exports, revision) = lease.run(|client| {
+        let mut expected = postgres_dedupe_snapshot(client)?;
+        client.batch_execute(include_str!("version_14_json.sql"))?;
         client.batch_execute(include_str!("version_13_documents.sql"))?;
         client.batch_execute("GRANT SELECT ON merchants_documents,manual_merchants_documents,source_records_documents,location_records_documents,descriptor_resolution_documents TO PUBLIC")?;
         fn merchants(client: &mut Client, table: &str) -> Result<Vec<Merchant>> {
             client.query(&format!("SELECT data FROM {table} ORDER BY id"), &[])?.iter()
                 .map(|r| Ok(serde_json::from_str(r.get(0))?)).collect()
         }
-        let mut expected = postgres_dedupe_snapshot(client)?;
         expected.merchants = merchants(client, "merchants_documents")?;
         expected.manual = merchants(client, "manual_merchants_documents")?;
         expected.sources = client.query("SELECT merchant_id,data FROM source_records_documents ORDER BY source,external_id", &[])?.iter()
@@ -454,6 +466,7 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     lease.run(|client| {
+        client.batch_execute(include_str!("version_14_json.sql"))?;
         client.batch_execute(include_str!("version_13_documents.sql"))?;
         Ok(())
     })?;
@@ -478,7 +491,7 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
             client
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            14
+            15
         );
         assert_eq!(
             client
@@ -502,6 +515,7 @@ fn document_view_migration_preserves_custom_dependencies_on_failure() -> Result<
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     lease.run(|client| {
+        client.batch_execute(include_str!("version_14_json.sql"))?;
         client.batch_execute(include_str!("version_13_documents.sql"))?;
         client.batch_execute("CREATE VIEW custom_export AS SELECT data FROM merchants_documents; GRANT SELECT ON merchants_documents TO PUBLIC")?;
         Ok(())
@@ -571,5 +585,49 @@ fn file_import_reconnects_after_idle_timeout_during_slow_counting() -> Result<()
             .resolve_source("merchant-studio", "slow-count")?
             .is_some()
     );
+    Ok(())
+}
+
+#[test]
+fn version_fourteen_json_lists_migrate_without_changing_api_values() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    let merchant: Merchant = serde_json::from_value(serde_json::json!({
+        "id":"typed-fixture","name":"Café 東京","markets":["CA","JP"],
+        "aliases":["quoted \"name\"", "back\\slash", "東京"],
+        "sources":["https://example.test/é"]
+    }))?;
+    lease.put(&merchant)?;
+    let expected = lease.get(&merchant.id)?;
+    lease.run(|client| {
+        client.batch_execute(include_str!("version_14_json.sql"))?;
+        // Historic nullable lists migrate to empty native arrays.
+        client.batch_execute("INSERT INTO merchants(id,name,markets_json,aliases_json,sources_json) VALUES('nullable','No lists',NULL,NULL,NULL)")?;
+        client.batch_execute("CREATE VIEW custom_lists AS SELECT aliases_json FROM merchants")?;
+        Ok(())
+    })?;
+    assert!(PostgresStore::connect(lease.temporary_url().unwrap(), true).is_err());
+    lease.run(|client| {
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 14);
+        assert_eq!(client.query_one("SELECT pg_typeof(markets_json)::text FROM merchants LIMIT 1", &[])?.get::<_, String>(0), "text");
+        assert!(client.query_one("SELECT indisvalid FROM pg_index WHERE indexrelid='merchants_markets'::regclass", &[])?.get::<_, bool>(0));
+        client.batch_execute("DROP VIEW custom_lists")?;
+        Ok(())
+    })?;
+    let migrated = PostgresStore::connect(lease.temporary_url().unwrap(), true)?;
+    assert_eq!(
+        serde_json::to_value(migrated.get(&merchant.id)?)?,
+        serde_json::to_value(expected)?
+    );
+    assert!(migrated.get("nullable")?.unwrap().markets.is_empty());
+    migrated.run(|client| {
+        assert_eq!(client.query_one("SELECT pg_typeof(markets)::text FROM merchants LIMIT 1", &[])?.get::<_, String>(0), "text[]");
+        assert_eq!(client.query_one("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('merchants','manual_merchants','location_records') AND column_name LIKE '%\\_json' ESCAPE '\\'", &[])?.get::<_, i64>(0), 0);
+        assert!(client.query_one("SELECT indisvalid FROM pg_index WHERE indexrelid='merchants_markets'::regclass", &[])?.get::<_, bool>(0));
+        Ok(())
+    })?;
+    assert_eq!(migrated.list(Some("JP"), 10, 0)?.total, 1);
+    PostgresStore::connect(lease.temporary_url().unwrap(), true)?;
     Ok(())
 }

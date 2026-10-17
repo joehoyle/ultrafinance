@@ -161,6 +161,9 @@ fn import_from(
     if chunk_size == 0 {
         bail!("import chunk size must be greater than zero");
     }
+    if options.initial_load && resume.is_some() {
+        bail!("initial loads restart from the input CSV; --resume is not supported");
+    }
     let preview = options.dry_run || options.dedupe.dry_run;
     if resume.is_some() && preview {
         bail!(
@@ -227,7 +230,13 @@ fn import_from(
             &fingerprint,
             None,
         );
-        let scratch = base.with_extension(if preview { "preview" } else { "streaming" });
+        let scratch = base.with_extension(if options.initial_load {
+            "initial"
+        } else if preview {
+            "preview"
+        } else {
+            "streaming"
+        });
         std::fs::create_dir_all(&scratch)?;
         (fingerprint, scratch)
     };
@@ -236,7 +245,9 @@ fn import_from(
         .truncate(false)
         .read(true)
         .write(true)
-        .open(scratch.with_extension(if preview {
+        .open(scratch.with_extension(if options.initial_load {
+            "initial.lock"
+        } else if preview {
             "preview.lock"
         } else {
             "streaming.lock"
@@ -336,6 +347,42 @@ fn import_from(
         .limit
         .map_or(available, |n| available.min(n as usize));
     eprintln!("Import: {available} available source records; {selected_total} selected");
+    if options.initial_load {
+        let paths: Vec<_> = checkpoint
+            .paths
+            .iter()
+            .map(|name| scratch.join(name))
+            .collect();
+        let mut report = json!({"bundle":null,"checkpoint":scratch,"manifest":checkpoint.manifest,
+            "initial_load":true,"dry_run":preview,
+            "selection":{"available_records":available,"selected_records":selected_total,"limit":options.limit,"chunk_size":chunk_size}});
+        if let Some(store) = store {
+            let mut manifest = empty_manifest(&headers, region, &fingerprint)?;
+            let total_rows = checkpoint.total_rows;
+            let result = store.initial_foursquare_load(
+                selected_total,
+                options.dedupe.dry_run,
+                chunk_size,
+                move |consume| {
+                    scan(
+                        &paths,
+                        &headers,
+                        &mut manifest,
+                        chunk_size,
+                        options.limit,
+                        total_rows,
+                        consume,
+                    )?;
+                    Ok(())
+                },
+            )?;
+            report["delta"] = json!(result.delta);
+            report["dedupe"] = json!(result.dedupe);
+        }
+        // Retain prepared input for retry. The database transaction is atomic;
+        // no application cursor can become inconsistent with a committed load.
+        return Ok(report);
+    }
     if preview {
         let paths: Vec<_> = checkpoint
             .paths

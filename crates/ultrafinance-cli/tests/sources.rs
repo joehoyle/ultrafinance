@@ -906,3 +906,28 @@ fn foursquare_checkpoint_resume_flags_reject_incompatible_modes() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("only for Foursquare"));
 }
+
+#[test]
+fn initial_load_requires_foursquare_and_conflicts_with_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let wrong_source = run(
+        root.path(),
+        &["import", "merchant-studio", "--initial-load", "--dry-run"],
+    );
+    assert!(!wrong_source.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong_source.stderr).contains("supported only for Foursquare")
+    );
+    let resume = run(
+        root.path(),
+        &[
+            "import",
+            "foursquare",
+            "--initial-load",
+            "--resume",
+            "missing",
+        ],
+    );
+    assert!(!resume.status.success());
+    assert!(String::from_utf8_lossy(&resume.stderr).contains("cannot be used with"));
+}

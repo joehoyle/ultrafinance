@@ -47,13 +47,10 @@ fn markets_combine_sources_outlets_and_manual_declarations() -> anyhow::Result<(
     let merchant = store.list(None, 10, 0)?.merchants.remove(0);
     assert_eq!(merchant.markets, ["AU", "CA", "GB", "NZ", "US"]);
     let mut client = postgres::Client::connect(store.temporary_url(), postgres::NoTls)?;
-    let stored: String = client
-        .query_one("SELECT markets_json FROM merchants WHERE id=$1", &[&id])?
+    let stored: Vec<String> = client
+        .query_one("SELECT markets FROM merchants WHERE id=$1", &[&id])?
         .get(0);
-    assert_eq!(
-        serde_json::from_str::<Vec<String>>(&stored)?,
-        merchant.markets
-    );
+    assert_eq!(stored, merchant.markets);
     assert!(client.query_one("SELECT to_regclass('source_market_inputs') IS NULL AND to_regclass('merchant_market_evidence') IS NULL AND NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND column_name='market_evidence_json')", &[])?.get::<_,bool>(0));
     assert_eq!(store.list(Some("CA"), 10, 0)?.total, 1);
     assert_eq!(store.list(Some("DE"), 10, 0)?.total, 0);

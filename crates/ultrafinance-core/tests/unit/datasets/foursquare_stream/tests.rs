@@ -30,6 +30,7 @@ fn options(
     limit: Option<u32>,
 ) -> FoursquareImportOptions {
     FoursquareImportOptions {
+        initial_load: false,
         database_url: store.map(|s| s.temporary_url().to_owned()),
         limit,
         dry_run,
@@ -350,5 +351,44 @@ fn checkpoint_only_resume_rejects_incomplete_sorting_or_validation() -> Result<(
         );
         assert_eq!(store.source_records("foursquare", None, 100, 0)?.len(), 1);
     }
+    Ok(())
+}
+
+#[test]
+fn initial_load_preparation_preview_and_commit_share_retryable_input() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let root =
+        Scratch(std::env::temp_dir().join(format!("ultra-fsq-initial-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir_all(&root.0)?;
+    let file = input(&root.0)?;
+    let out = root.0.join("out");
+    let mut config = options(None, true, Some(3));
+    config.initial_load = true;
+    let prepared = import_file(&file, &out, "ca", config)?;
+    assert_eq!(prepared["selection"]["selected_records"], 3);
+    assert_eq!(prepared["initial_load"], true);
+    let mut config = options(Some(&store), false, Some(3));
+    config.initial_load = true;
+    config.dedupe.dry_run = true;
+    let preview = import_file(&file, &out, "ca", config)?;
+    assert_eq!(preview["checkpoint"], prepared["checkpoint"]);
+    assert_eq!(store.stats()?.total, 0);
+    let mut config = options(Some(&store), false, Some(3));
+    config.initial_load = true;
+    let committed = import_file(&file, &out, "ca", config)?;
+    assert_eq!(committed["delta"]["added"], 3);
+    assert_eq!(store.source_records("foursquare", None, 100, 0)?.len(), 3);
+    let checkpoint: Checkpoint = serde_json::from_reader(File::open(
+        Path::new(committed["checkpoint"].as_str().unwrap()).join("checkpoint.json"),
+    )?)?;
+    assert!(checkpoint.application.is_none());
+    let mut config = options(Some(&store), false, None);
+    config.initial_load = true;
+    assert!(
+        import_file(&file, &out, "ca", config)
+            .unwrap_err()
+            .to_string()
+            .contains("empty catalog")
+    );
     Ok(())
 }
