@@ -247,7 +247,7 @@ fn indexed_chunks_write_keys_once_and_still_repair_unchanged_sources() -> Result
         .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
     let store = PostgresStore::temporary(&base)?;
     store.run(|client| {
-        client.batch_execute("CREATE TABLE key_attempts(merchant_id TEXT); CREATE FUNCTION record_key_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO key_attempts VALUES(NEW.merchant_id); RETURN NEW; END $$; CREATE TRIGGER key_attempt BEFORE INSERT ON merchant_identity_keys FOR EACH ROW EXECUTE FUNCTION record_key_attempt()")?;
+        client.batch_execute("CREATE TABLE key_attempts(merchant_id TEXT); CREATE FUNCTION record_key_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO key_attempts VALUES(merchant_public_id(NEW.merchant_id)); RETURN NEW; END $$; CREATE TRIGGER key_attempt BEFORE INSERT ON merchant_identity_keys FOR EACH ROW EXECUTE FUNCTION record_key_attempt()")?;
         Ok(())
     })?;
     let mut record: SourceRecord = serde_json::from_value(serde_json::json!({
@@ -279,7 +279,7 @@ fn indexed_chunks_write_keys_once_and_still_repair_unchanged_sources() -> Result
     let corrupt_id = id.clone();
     store.run(move |client| {
         assert_eq!(client.query_one("SELECT count(*) FROM key_attempts", &[])?.get::<_, i64>(0), 1);
-        client.execute("UPDATE merchant_identity_keys SET rule_name='obsolete',rule_host='obsolete' WHERE merchant_id=$1", &[&corrupt_id])?;
+        client.execute("UPDATE merchant_identity_keys SET rule_name='obsolete',rule_host='obsolete' WHERE merchant_id=merchant_key($1)", &[&corrupt_id])?;
         client.batch_execute("TRUNCATE key_attempts")?;
         Ok(())
     })?;
@@ -298,7 +298,7 @@ fn indexed_chunks_write_keys_once_and_still_repair_unchanged_sources() -> Result
             1
         );
         let row = client.query_one(
-            "SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=$1",
+            "SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=merchant_key($1)",
             &[&id],
         )?;
         assert_eq!(row.get::<_, String>(0), expected.0);

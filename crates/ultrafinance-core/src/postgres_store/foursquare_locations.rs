@@ -6,7 +6,7 @@ use postgres::{binary_copy::BinaryCopyInWriter, types::Type};
 pub(super) fn import_owned(
     tx: &mut Transaction<'_>,
     records: &[SourceRecord],
-    identities: &[String],
+    identities: &[i64],
     initial: bool,
 ) -> Result<()> {
     if records.len() != identities.len() {
@@ -15,12 +15,12 @@ pub(super) fn import_owned(
     let owners = records
         .iter()
         .zip(identities)
-        .map(|(r, id)| ((r.source.as_str(), r.external_id.as_str()), id.as_str()))
+        .map(|(r, id)| ((r.source.as_str(), r.external_id.as_str()), *id))
         .collect();
     import_with_owners(tx, records, Some(&owners), initial)
 }
 
-type Owners<'a> = HashMap<(&'a str, &'a str), &'a str>;
+type Owners<'a> = HashMap<(&'a str, &'a str), i64>;
 fn import_with_owners(
     tx: &mut Transaction<'_>,
     records: &[SourceRecord],
@@ -31,7 +31,7 @@ fn import_with_owners(
         return Ok(());
     }
     tx.batch_execute(
-        "CREATE TEMP TABLE IF NOT EXISTS fsq_location_stage(id TEXT,source TEXT,external_id TEXT,merchant_source TEXT,merchant_external_id TEXT,name TEXT,precision TEXT,address TEXT,city TEXT,region TEXT,postal_code TEXT,country TEXT,store_number TEXT,latitude DOUBLE PRECISION,longitude DOUBLE PRECISION,aliases TEXT[],place_ids JSONB,transaction_pattern TEXT,manual_override BOOLEAN,attribution TEXT,license TEXT,url TEXT,merchant_id TEXT) ON COMMIT DROP",
+        "CREATE TEMP TABLE IF NOT EXISTS fsq_location_stage(id TEXT,source TEXT,external_id TEXT,merchant_source TEXT,merchant_external_id TEXT,name TEXT,precision TEXT,address TEXT,city TEXT,region TEXT,postal_code TEXT,country TEXT,store_number TEXT,latitude DOUBLE PRECISION,longitude DOUBLE PRECISION,aliases TEXT[],place_ids JSONB,transaction_pattern TEXT,manual_override BOOLEAN,attribution TEXT,license TEXT,url TEXT,merchant_id BIGINT) ON COMMIT DROP",
     )?;
     let total: usize = records
         .iter()
@@ -87,6 +87,7 @@ fn write(
     types[15] = Type::TEXT_ARRAY;
     types[16] = Type::JSONB;
     types[18] = Type::BOOL;
+    types[22] = Type::INT8;
     let mut writer = BinaryCopyInWriter::new(sink, &types);
     for record in records {
         let id = format!("loc_{}", uuid::Uuid::new_v4().simple());

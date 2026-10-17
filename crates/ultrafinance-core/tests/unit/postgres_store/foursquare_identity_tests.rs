@@ -81,6 +81,7 @@ fn migration_removes_foursquare_evidence_and_preserves_import_identity() -> Resu
     let owner = merchant.clone();
     store.0.run(move |c| {
         let mut tx=c.transaction()?;
+        tx.batch_execute(include_str!("version_18_public_ids.sql"))?;
         tx.batch_execute("DROP VIEW source_identities; DROP TABLE foursquare_unlocated; ALTER TABLE source_records DROP CONSTRAINT source_records_no_foursquare; UPDATE ultrafinance_schema SET version=17")?;
         for record in inputs {
             crate::columns::postgres_source_records(&mut tx,&record.source,&record.external_id,&owner,&serde_json::to_string(&record)?)?;
@@ -113,7 +114,7 @@ fn migration_removes_foursquare_evidence_and_preserves_import_identity() -> Resu
         assert_eq!(
             c.query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            18
+            19
         );
         Ok(())
     })?;

@@ -1,6 +1,6 @@
 # Database lookup columns
 
-Schema version 18 stores fixed catalog and matching fields in columns in
+Schema version 19 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
 indexes. Merchant markets, aliases and sources and location aliases use native `text[]`
 columns. JSON remains for keyed external place IDs (`jsonb`), variable resolution
@@ -52,6 +52,30 @@ Descriptor mappings reference the current merchant. Deduplication moves their
 foreign keys to the surviving merchant before retiring the duplicate. Verified
 mappings require review evidence; model-derived results cannot overwrite a
 reviewed identity or silently change an existing mapping to another merchant.
+
+## Numeric internal merchant keys (version 19)
+
+Public merchant IDs remain unchanged in API responses, exports, source listings,
+manual inputs and redirects. `merchants.id` retains its public primary key;
+`merchants.merchant_key` is a sequence-generated, unique `bigint` internal key.
+The `merchant_id` columns in `aliases`, `merchant_search`,
+`merchant_identity_keys`, `location_records`, and `foursquare_unlocated` now
+reference that numeric key. Outlet IDs and Foursquare provider IDs remain unchanged.
+
+Non-Foursquare source records, manual inputs, descriptor resolutions, redirects
+and audit references retain public IDs. `source_identities` exposes public IDs
+by joining compact ownership keys to merchants. Application reads translate at
+the boundary; bulk initial loads reserve numeric keys in bounded batches and
+COPY them directly, including across merchant groups spanning chunks. Sequence
+gaps from grouping, previews or rolled-back transactions are normal.
+
+Migration 19 backfills ownership with joins, rebuilds affected indexes and
+validates foreign keys in one transaction. It preserves public IDs, source and
+outlet links, view grants, and the outlet ownership trigger's enabled mode.
+Existing merchant writers receive usage on the new identity sequence. The
+migration locks the affected catalog tables and needs disk space for rewrites;
+coordinate it with application release using `ultrafinance database init`.
+Older application binaries require the previous schema.
 
 ## Foursquare identity-only storage (version 18)
 
@@ -172,13 +196,13 @@ Invalid legacy rows cause rollback. Fingerprints use canonical application
 serialization, so SQL JSON formatting does not change catalog identity.
 
 Grant the runtime role SELECT, INSERT, UPDATE
-and DELETE on the application tables, including `source_provenance`, `merchant_search_words` and the market, identity-key, catalog-revision and resolution tables. INSERT into `source_provenance` also requires USAGE on its identity sequence.
+and DELETE on the application tables, including `source_provenance`, `merchant_search_words` and the market, identity-key, catalog-revision and resolution tables. INSERT into `source_provenance` and `merchants` also requires USAGE on their identity sequences.
 Revision triggers require UPDATE on `catalog_revision`. Set the owner's default privileges for future tables/views
 if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 18; coordinate the database upgrade with the new application
+run against version 19; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.

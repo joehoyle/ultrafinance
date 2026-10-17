@@ -62,7 +62,7 @@ pub(crate) fn source(row: &Row) -> Result<SourceRecord> {
     })
 }
 
-pub(super) const LOCATIONS: &str = "SELECT l.*,p.attribution,p.license,p.url FROM location_records l JOIN source_provenance p ON p.id=l.source_provenance_id";
+pub(super) const LOCATIONS: &str = "SELECT l.*,m.id AS public_merchant_id,p.attribution,p.license,p.url FROM location_records l JOIN merchants m ON m.merchant_key=l.merchant_id JOIN source_provenance p ON p.id=l.source_provenance_id";
 
 pub(super) fn location(row: &Row) -> Result<LocationRecord> {
     let merchant = match row.try_get::<_, Option<String>>("merchant_source")? {
@@ -71,7 +71,7 @@ pub(super) fn location(row: &Row) -> Result<LocationRecord> {
             external_id: row.try_get("merchant_external_id")?,
         },
         None => MerchantReference::Local {
-            merchant_id: row.try_get("merchant_id")?,
+            merchant_id: row.try_get("public_merchant_id")?,
         },
     };
     let precision = row

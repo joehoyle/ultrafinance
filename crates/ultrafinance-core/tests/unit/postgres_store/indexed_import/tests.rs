@@ -195,7 +195,7 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
     let base = lease.temporary_url().to_owned();
     let legacy = PostgresStore::connect(&base, false)?;
     legacy.run(|client| {
-        client.batch_execute(include_str!("../version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("../version_18_public_ids.sql"), include_str!("../version_14_json.sql")))?;
         client.batch_execute(include_str!("../version_12_locations.sql"))?;
         client.batch_execute("INSERT INTO merchants(id,name,website,markets_json,aliases_json,sources_json) SELECT 'legacy-'||lpad(i::text,8,'0'),'Café Brand LLC',CASE WHEN i%2=0 THEN 'https://www.brand.test/ca' ELSE NULL END,'[]','[]','[]' FROM generate_series(0,5000) i; DROP TABLE merchant_identity_keys; DROP FUNCTION advance_catalog_revision() CASCADE; DROP TABLE catalog_revision; UPDATE ultrafinance_schema SET version=6")?;
         Ok(())
@@ -204,11 +204,11 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
     upgraded.run(|client| {
         let count:i64=client.query_one("SELECT count(*) FROM merchant_identity_keys",&[])?.get(0);
         assert_eq!(count,5001);
-        let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00005000'",&[])?;
+        let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=merchant_key('legacy-00005000')",&[])?;
         assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
-        let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00004999'",&[])?;
+        let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=merchant_key('legacy-00004999')",&[])?;
         assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),18);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),19);
         Ok(())
     })
 }
@@ -225,7 +225,7 @@ fn identity_index_tracks_corrections_and_uses_indexed_lookup() -> Result<()> {
     store.put(&m)?;
     store.run(|client| {
         client.batch_execute("SET enable_seqscan=off")?;
-        let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='manual'",&[])?;
+        let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=merchant_key('manual')",&[])?;
         assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
         let plan=client.query("EXPLAIN SELECT merchant_id FROM merchant_identity_keys WHERE rule_name='cafe brand' AND rule_host='brand.test'",&[])?;
         assert!(plan.iter().any(|r|r.get::<_,String>(0).contains("merchant_identity_rule")));
@@ -236,7 +236,7 @@ fn identity_index_tracks_corrections_and_uses_indexed_lookup() -> Result<()> {
     store.put(&m)?;
     store.run(|client| {
         let row = client.query_one(
-            "SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='manual'",
+            "SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=merchant_key('manual')",
             &[],
         )?;
         assert_eq!(row.get::<_, String>(0), "renamed");

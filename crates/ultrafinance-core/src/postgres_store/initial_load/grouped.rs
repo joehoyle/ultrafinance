@@ -7,16 +7,18 @@ const DETAILS: usize = 5000;
 struct Group {
     key: Option<(String, String)>,
     merchant: Merchant,
+    numeric_id: i64,
     countries: MarketCountries,
     reported: bool,
 }
 impl Group {
-    fn new(key: Option<(String, String)>, record: &SourceRecord) -> Self {
+    fn new(key: Option<(String, String)>, record: &SourceRecord, numeric_id: i64) -> Self {
         let mut merchant = record.merchant.clone();
         merchant.id = format!("mer_{}", uuid::Uuid::new_v4().simple());
         Self {
             key,
             merchant,
+            numeric_id,
             countries: MarketCountries::default(),
             reported: false,
         }
@@ -32,10 +34,10 @@ impl Group {
         self.countries
             .source_fields(&self.merchant.id, &record.merchant, &hints, None);
     }
-    fn finish(mut self) -> Merchant {
+    fn finish(mut self) -> (Merchant, i64) {
         let id = self.merchant.id.clone();
         import_bulk::finish_merchant(&mut self.merchant, &id);
-        self.countries.hydrate(self.merchant)
+        (self.countries.hydrate(self.merchant), self.numeric_id)
     }
     fn duplicate(&mut self, record: &SourceRecord, report: &mut Report) {
         report.candidates += 1;
@@ -99,7 +101,13 @@ pub(super) fn load(
         let mut records = Vec::with_capacity(rows.len());
         let mut owners = Vec::with_capacity(rows.len());
         let mut merchants = Vec::with_capacity(rows.len());
-        for row in &rows {
+        // Reserve sequence values in one round trip. Gaps for grouped places
+        // are intentional; no public identifier depends on these numbers.
+        let keys = tx.query(
+            "SELECT nextval('merchants_merchant_key_seq') FROM generate_series(1,$1::int)",
+            &[&(rows.len() as i32)],
+        )?;
+        for (row, key_row) in rows.iter().zip(keys) {
             let key = row
                 .get::<_, Option<String>>(0)
                 .map(|name| (name, row.get::<_, String>(1)));
@@ -110,14 +118,14 @@ pub(super) fn load(
                 if let Some(group) = current.take() {
                     merchants.push(group.finish());
                 }
-                current = Some(Group::new(key, &record));
+                current = Some(Group::new(key, &record, key_row.get(0)));
             }
             let group = current.as_mut().expect("group initialized above");
             group.add(&record);
             if same {
                 group.duplicate(&record, &mut report);
             }
-            owners.push(group.merchant.id.clone());
+            owners.push(group.numeric_id);
             records.push(record);
         }
         import_bulk::write_initial_merchants(tx, &merchants)?;

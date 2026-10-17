@@ -28,6 +28,8 @@ mod indexed_import;
 mod initial_load;
 #[path = "postgres_store/merchant_provenance.rs"]
 mod merchant_provenance;
+#[path = "postgres_store/numeric_ids.rs"]
+mod numeric_ids;
 #[path = "postgres_store/read_cache.rs"]
 mod read_cache;
 #[cfg(test)]
@@ -209,7 +211,7 @@ impl PostgresStore {
                         .context("schema upgrade could not initialize merchant redirects")?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)
                         .context("schema upgrade could not initialize location redirects")?;
-                    if version > 18 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 19 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -226,7 +228,6 @@ impl PostgresStore {
                     if version < 7 {
                         tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
                         tx.batch_execute(include_str!("../migrations/008_merchant_identity_index.sql"))?;
-                        indexed_import::backfill(&mut tx)?;
                     }
                     if version < 8 {
                         tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
@@ -246,10 +247,6 @@ impl PostgresStore {
                         tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'")?;
                         tx.batch_execute(include_str!("../migrations/012_import_host_index.sql"))
                             .context("schema migration 12 (merchant host index) failed")?;
-                        // Website guard changes must reach untouched legacy
-                        // merchants before their buckets select provider comparisons.
-                        indexed_import::backfill(&mut tx)
-                            .context("schema migration 12 (merchant lookup keys) failed")?;
                     }
                     if version < 13 {
                         // Bound hash-join spills during the large outlet backfill.
@@ -275,16 +272,23 @@ impl PostgresStore {
                         tx.batch_execute(include_str!("../migrations/017_source_provenance.sql"))
                             .context("schema migration 17 (shared source provenance) failed")?;
                     }
-                    if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     if version < 18 {
                         tx.batch_execute(include_str!("../migrations/018_foursquare_identity_only.sql"))
                             .context("schema migration 18 (Foursquare import identities) failed")?;
                     }
+                    if version < 19 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'; SET LOCAL work_mem='64MB'")?;
+                        tx.batch_execute(include_str!("../migrations/019_numeric_merchant_keys.sql"))
+                            .context("schema migration 19 (numeric merchant keys) failed")?;
+                    }
+                    if version < 4 { refresh_market_lookup(&mut tx,None)?; }
+                    // Run historical normalizer backfills after key conversion.
+                    if version < 12 { indexed_import::backfill(&mut tx)?; }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 18 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 19 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -548,8 +552,8 @@ impl PostgresStore {
                 bail!("target merchant does not exist");
             }
             if source == "foursquare" {
-                tx.execute("UPDATE location_records SET merchant_id=$2 WHERE source='foursquare' AND external_id=$1", &[&external_id,&target])?;
-                tx.execute("UPDATE foursquare_unlocated SET merchant_id=$2 WHERE external_id=$1", &[&external_id,&target])?;
+                tx.execute("UPDATE location_records SET merchant_id=merchant_key($2) WHERE source='foursquare' AND external_id=$1", &[&external_id,&target])?;
+                tx.execute("UPDATE foursquare_unlocated SET merchant_id=merchant_key($2) WHERE external_id=$1", &[&external_id,&target])?;
             } else {
             tx.execute(
                 "UPDATE source_records SET merchant_id=$3 WHERE source=$1 AND external_id=$2",
@@ -595,7 +599,7 @@ UNION ALL
 SELECT a.merchant_id,b.merchant_id,TRUE FROM merchant_identity_keys a JOIN merchant_identity_keys b ON a.website_host=b.website_host AND a.merchant_id<b.merchant_id WHERE a.website_host IS NOT NULL
 UNION ALL
 SELECT a.merchant_id,b.merchant_id,FALSE FROM merchant_identity_keys a JOIN merchant_identity_keys b ON b.normalized_name % a.normalized_name AND a.merchant_id<b.merchant_id WHERE length(a.normalized_name)>=3 AND length(b.normalized_name)>=3)
-SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM candidates c JOIN merchant_identity_keys a ON a.merchant_id=c.left_id JOIN merchant_identity_keys b ON b.merchant_id=c.right_id"#,std::iter::empty::<&str>())?;
+SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.normalized_name,b.normalized_name FROM candidates c JOIN merchant_identity_keys a ON a.merchant_id=c.left_id JOIN merchant_identity_keys b ON b.merchant_id=c.right_id"#,std::iter::empty::<&str>())?;
                 while let Some(row)=rows.next()? {
                     let pair=(row.get::<_,String>(0),row.get::<_,String>(1));
                     if seen.contains(&pair) {continue;}
@@ -879,7 +883,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
-            let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.id WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
+            let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.merchant_key WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
             for row in exact {
                 add_candidate(&mut found, &row, true, None, &mut scorer)?;
             }
@@ -917,7 +921,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
                             WHERE tokens @@ to_tsquery('simple',term.query)
                             LIMIT 32
                         ) pool
-                    ) s JOIN merchants m ON m.id=s.merchant_id",
+                    ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
                     &[&combined_terms],
                 )? {
                     add_candidate(&mut found,&row,false,None,&mut scorer)?;
@@ -936,7 +940,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
                             WHERE tokens @@ to_tsquery('simple',term.query)
                             LIMIT 100
                         ) pool
-                    ) s JOIN merchants m ON m.id=s.merchant_id",
+                    ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
                     &[&terms],
                 )? {
                     add_candidate(&mut found,&row,false,None,&mut scorer)?;
@@ -958,7 +962,7 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
                             WHERE tokens @@ plainto_tsquery('simple',words.word)
                             LIMIT 32
                         ) pool
-                    ) s JOIN merchants m ON m.id=s.merchant_id",
+                    ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
                     &[&fuzzy_words],
                 )? {
                     add_candidate(&mut found,&row,false,None,&mut scorer)?;
@@ -1063,9 +1067,9 @@ fn postgres_market_outlets(
     use postgres::fallible_iterator::FallibleIterator;
     // Coverage needs only country and provenance, not full address documents.
     let sql = if ids.is_some() {
-        "SELECT DISTINCT merchant_id,country FROM location_records WHERE merchant_id=ANY($1::text[]) AND country IS NOT NULL"
+        "SELECT DISTINCT merchant_public_id(merchant_id),country FROM location_records WHERE merchant_id=ANY(merchant_keys($1)) AND country IS NOT NULL"
     } else {
-        "SELECT DISTINCT merchant_id,country FROM location_records WHERE $1::text[] IS NULL AND country IS NOT NULL"
+        "SELECT DISTINCT merchant_public_id(merchant_id),country FROM location_records WHERE $1::text[] IS NULL AND country IS NOT NULL"
     };
     let mut rows = tx.query_raw(sql, [&ids as &(dyn postgres::types::ToSql + Sync)])?;
     while let Some(row) = rows.next()? {
@@ -1147,8 +1151,14 @@ fn rebuild_with_market_refresh(
         }
         Ok(())
     })?;
-    tx.execute("DELETE FROM aliases WHERE merchant_id=$1", &[&id])?;
-    tx.execute("DELETE FROM merchant_search WHERE merchant_id=$1", &[&id])?;
+    tx.execute(
+        "DELETE FROM aliases WHERE merchant_id=merchant_key($1)",
+        &[&id],
+    )?;
+    tx.execute(
+        "DELETE FROM merchant_search WHERE merchant_id=merchant_key($1)",
+        &[&id],
+    )?;
     let Some(mut merchant) = merchant else {
         let redirects: bool = tx
             .query_one(
@@ -1184,10 +1194,13 @@ fn rebuild_with_market_refresh(
     names.sort();
     names.dedup();
     for name in &names {
-        tx.execute("INSERT INTO aliases VALUES($1,$2)", &[&id, name])?;
+        tx.execute(
+            "INSERT INTO aliases VALUES(merchant_key($1),$2)",
+            &[&id, name],
+        )?;
     }
     tx.execute(
-        "INSERT INTO merchant_search(merchant_id,text) VALUES($1,$2)",
+        "INSERT INTO merchant_search(merchant_id,text) VALUES(merchant_key($1),$2)",
         &[&id, &names.join(" \n ")],
     )?;
     if refresh_markets {
@@ -1413,7 +1426,7 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
                 import_bulk::write_current_merchants(tx, &[target_merchant])?;
             }
             tx.execute(
-                "UPDATE foursquare_unlocated SET merchant_id=$1 WHERE merchant_id=$2",
+                "UPDATE foursquare_unlocated SET merchant_id=merchant_key($1) WHERE merchant_id=merchant_key($2)",
                 &[target, retired],
             )?;
             tx.execute(
@@ -1421,7 +1434,7 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
                 &[target, retired],
             )?;
             tx.execute(
-                "UPDATE location_records SET merchant_id=$1 WHERE merchant_id=$2",
+                "UPDATE location_records SET merchant_id=merchant_key($1) WHERE merchant_id=merchant_key($2)",
                 &[target, retired],
             )?;
             tx.execute(
@@ -1476,7 +1489,7 @@ fn location_rows(
 ) -> Result<Vec<(String, LocationRecord)>> {
     // Canonical merchant IDs use the merchant index directly.
     let filter = if merchant_id.is_some() {
-        "l.merchant_id=$1"
+        "l.merchant_id=merchant_key($1)"
     } else {
         "$1::text IS NULL"
     };
@@ -1485,7 +1498,7 @@ fn location_rows(
         &[&merchant_id],
     )?
     .iter()
-    .map(|r| Ok((r.try_get("merchant_id")?, rows::location(r)?)))
+    .map(|r| Ok((r.try_get("public_merchant_id")?, rows::location(r)?)))
     .collect()
 }
 fn reconcile_locations(
@@ -1558,7 +1571,7 @@ fn postgres_snapshot_for_ids_inner(
     let locations = if include_locations {
         c.query(
             &format!(
-                "{} WHERE l.merchant_id=ANY($1) ORDER BY l.id",
+                "{} WHERE l.merchant_id=ANY(merchant_keys($1)) ORDER BY l.id",
                 rows::LOCATIONS
             ),
             &[&ids],
@@ -1572,7 +1585,7 @@ fn postgres_snapshot_for_ids_inner(
     Ok(crate::dedupe::Snapshot {
         merchants, manual, sources, locations,
         redirects:c.query("SELECT retired_id,merchant_id FROM merchant_redirects WHERE merchant_id=ANY($1) ORDER BY retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect(),
-        location_redirects:if include_locations {c.query("SELECT d.retired_id,d.location_id FROM location_redirects d JOIN location_records l ON l.id=d.location_id WHERE l.merchant_id=ANY($1) ORDER BY d.retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect()} else {vec![]},
+        location_redirects:if include_locations {c.query("SELECT d.retired_id,d.location_id FROM location_redirects d JOIN location_records l ON l.id=d.location_id WHERE l.merchant_id=ANY(merchant_keys($1)) ORDER BY d.retired_id",&[&ids])?.into_iter().map(|r|(r.get(0),r.get(1))).collect()} else {vec![]},
         revision:Some(c.query_one("SELECT revision FROM catalog_revision",&[])?.get(0)),
     })
 }

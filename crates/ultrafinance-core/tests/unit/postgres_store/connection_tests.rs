@@ -41,7 +41,7 @@ fn version_eleven_import_host_index_preserves_catalog_and_supports_host_lookup()
     let id = lease.resolve_source("merchant-studio", "alpha")?;
     assert!(id.is_some());
     let revision: i64 = lease.run(|client| {
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute(
             "DROP INDEX merchant_identity_rule_host; UPDATE ultrafinance_schema SET version=11; UPDATE merchant_identity_keys SET rule_name='cafe',rule_host='yp.ca' WHERE normalized_name='cafe'",
@@ -74,7 +74,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
         )?.get::<_, bool>(0));
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute("CREATE TABLE merchant_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); CREATE TABLE location_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); INSERT INTO merchant_merge_runs VALUES('merchant-audit','{}'); INSERT INTO location_merge_runs VALUES('location-audit','{}'); INSERT INTO merchant_redirects VALUES('retired','survivor'); UPDATE ultrafinance_schema SET version=9")?;
         Ok(())
@@ -85,7 +85,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
     // Reinitialization must not recreate either audit table.
     let initialized = PostgresStore::connect(&url, true)?;
     initialized.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 18);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 19);
         assert!(client.query_one(
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
@@ -112,7 +112,7 @@ fn version_eight_legacy_views_are_migrated_before_import() -> Result<()> {
             &mut tx, "merchant-studio", "alpha", "alpha",
             &serde_json::to_string(&records[0])?,
         )?;
-        tx.batch_execute(include_str!("version_14_json.sql"))?;
+        tx.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         tx.batch_execute(include_str!("version_12_locations.sql"))?;
         // Recreate the stale projections found in existing version-8 catalogs.
         tx.batch_execute(r#"
@@ -215,7 +215,7 @@ fn postgres_idle_session_reconnects_before_work_without_replaying_jobs() -> Resu
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get(0);
         assert_eq!(
-            version, 18,
+            version, 19,
             "market migration must run before application use"
         );
         let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
@@ -287,7 +287,10 @@ fn version_twelve_locations_backfill_merchants_and_share_provenance() -> Result<
         lease.run(|client| Ok(client.query_one("SHOW work_mem", &[])?.get(0)))?;
     let before = lease.location_sources(&original)?;
     lease.run(|client| {
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(
+            include_str!("version_18_public_ids.sql"),
+            include_str!("version_14_json.sql")
+        ))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute("GRANT SELECT ON location_records_documents TO PUBLIC")?;
         assert_eq!(
@@ -312,13 +315,13 @@ fn version_twelve_locations_backfill_merchants_and_share_provenance() -> Result<
     );
     upgraded.run(move |client| {
         assert_eq!(client.query_one("SHOW work_mem", &[])?.get::<_, String>(0), work_mem_before);
-        assert_eq!(client.query_one("SELECT count(*) FROM location_records WHERE merchant_id=$1", &[&original])?.get::<_, i64>(0), 2);
+        assert_eq!(client.query_one("SELECT count(*) FROM location_records WHERE merchant_id=merchant_key($1)", &[&original])?.get::<_, i64>(0), 2);
         assert_eq!(client.query_one("SELECT count(DISTINCT source_provenance_id) FROM location_records", &[])?.get::<_, i64>(0), 1);
         assert_eq!(client.query_one("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='location_records' AND column_name IN ('attribution','license','url')", &[])?.get::<_, i64>(0), 0);
         assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name='location_records' AND grantee='PUBLIC' AND privilege_type='SELECT')", &[])?.get::<_, bool>(0));
         assert!(client.execute("UPDATE location_records SET merchant_id=NULL,merchant_source=NULL,merchant_external_id=NULL", &[]).is_err());
         assert_eq!(client.query_one("SELECT count(*) FROM pg_constraint WHERE conrelid='location_records'::regclass AND conname IN ('location_records_merchant_id_fkey','location_records_provenance_fk') AND convalidated", &[])?.get::<_, i64>(0), 2);
-        let invalid = client.execute("UPDATE location_records SET merchant_id='missing' WHERE merchant_source IS NULL", &[]).unwrap_err();
+        let invalid = client.execute("UPDATE location_records SET merchant_id=-1 WHERE merchant_source IS NULL", &[]).unwrap_err();
         assert_eq!(invalid.as_db_error().unwrap().code(), &postgres::error::SqlState::FOREIGN_KEY_VIOLATION);
         Ok(())
     })?;
@@ -331,7 +334,7 @@ fn version_twelve_locations_backfill_merchants_and_share_provenance() -> Result<
         assert_eq!(
             client
                 .query_one(
-                    "SELECT count(*) FROM location_records WHERE merchant_id='target'",
+                    "SELECT count(*) FROM location_records WHERE merchant_id=merchant_key('target')",
                     &[]
                 )?
                 .get::<_, i64>(0),
@@ -403,7 +406,7 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
     }
     let (expected, resolutions, exports, revision) = lease.run(|client| {
         let mut expected = postgres_dedupe_snapshot(client)?;
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_13_documents.sql"))?;
         client.batch_execute("GRANT SELECT ON merchants_documents,manual_merchants_documents,source_records_documents,location_records_documents,descriptor_resolution_documents TO PUBLIC")?;
         fn merchants(client: &mut Client, table: &str) -> Result<Vec<Merchant>> {
@@ -471,7 +474,10 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     lease.run(|client| {
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(
+            include_str!("version_18_public_ids.sql"),
+            include_str!("version_14_json.sql")
+        ))?;
         client.batch_execute(include_str!("version_13_documents.sql"))?;
         Ok(())
     })?;
@@ -496,7 +502,7 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
             client
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            18
+            19
         );
         assert_eq!(
             client
@@ -520,7 +526,7 @@ fn document_view_migration_preserves_custom_dependencies_on_failure() -> Result<
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     lease.run(|client| {
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_13_documents.sql"))?;
         client.batch_execute("CREATE VIEW custom_export AS SELECT data FROM merchants_documents; GRANT SELECT ON merchants_documents TO PUBLIC")?;
         Ok(())
@@ -606,7 +612,7 @@ fn version_fourteen_json_lists_migrate_without_changing_api_values() -> Result<(
     lease.put(&merchant)?;
     let expected = lease.get(&merchant.id)?;
     lease.run(|client| {
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         // Historic nullable lists migrate to empty native arrays.
         client.batch_execute("INSERT INTO merchants(id,name,markets_json,aliases_json,sources_json) VALUES('nullable','No lists',NULL,NULL,NULL)")?;
         client.batch_execute("CREATE VIEW custom_lists AS SELECT aliases_json FROM merchants")?;
@@ -649,7 +655,7 @@ fn version_fifteen_removes_unused_indexes_without_changing_evidence() -> Result<
     lease.import(&records)?;
     let id = lease.resolve_source("merchant-studio", "alpha")?;
     let revision: i64 = lease.run(|client| {
-        client.batch_execute(include_str!("version_16_source_metadata.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_16_source_metadata.sql")))?;
         client.batch_execute("CREATE INDEX merchant_search_trigrams ON merchant_search USING GIN(text gin_trgm_ops); CREATE INDEX merchant_identity_name ON merchant_identity_keys(normalized_name); UPDATE ultrafinance_schema SET version=15")?;
         Ok(client.query_one("SELECT revision FROM catalog_revision", &[])?.get(0))
     })?;
@@ -690,7 +696,7 @@ fn shared_source_provenance_migrates_variants_and_refreshes_independently() -> R
                 .get::<_, i64>(0),
             2
         );
-        client.batch_execute(include_str!("version_16_source_metadata.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_16_source_metadata.sql")))?;
         client.batch_execute("DELETE FROM source_provenance; GRANT SELECT ON source_records TO PUBLIC; REVOKE ALL ON source_provenance FROM PUBLIC; CREATE VIEW custom_source_urls AS SELECT url FROM source_records")?;
         Ok(())
     })?;

@@ -107,7 +107,7 @@ fn apply(
     baseline: &crate::dedupe::Snapshot,
     append_only: bool,
 ) -> Result<Applied> {
-    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_source_stage(source TEXT,external_id TEXT,merchant_id TEXT,version TEXT,attribution TEXT,license TEXT,url TEXT,transaction_pattern TEXT,parent_id TEXT,input_id TEXT,input_name TEXT) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage (LIKE merchants) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_input_stage ON COMMIT DROP AS SELECT source,external_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases FROM source_records WITH NO DATA")?;
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_source_stage(source TEXT,external_id TEXT,merchant_id TEXT,version TEXT,attribution TEXT,license TEXT,url TEXT,transaction_pattern TEXT,parent_id TEXT,input_id TEXT,input_name TEXT) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[]) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_input_stage ON COMMIT DROP AS SELECT source,external_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases FROM source_records WITH NO DATA")?;
     let previous: HashMap<_, _> = baseline
         .sources
         .iter()
@@ -608,19 +608,24 @@ fn write_aliases(
     aliases: &[Vec<Option<String>>],
 ) -> Result<()> {
     if existing.is_empty() {
-        return copy_rows(
+        let ids: Vec<_> = aliases
+            .iter()
+            .map(|r| r[0].clone().expect("alias owner"))
+            .collect();
+        let keys = numeric_ids::keys(tx, &ids)?;
+        return copy_derived_rows(
             tx,
             "COPY aliases(merchant_id,normalized) FROM STDIN BINARY",
-            2,
             aliases,
+            &keys,
         );
     }
     // Source/market changes often leave names unchanged. Keep those index rows
     // rather than deleting and reinserting every alias of the touched merchants.
     tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_alias_stage(merchant_id TEXT,normalized TEXT,PRIMARY KEY(merchant_id,normalized)) ON COMMIT DROP; TRUNCATE import_alias_stage")?;
     copy_rows(tx, "COPY import_alias_stage FROM STDIN BINARY", 2, aliases)?;
-    tx.execute("DELETE FROM aliases a WHERE a.merchant_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM import_alias_stage s WHERE s.merchant_id=a.merchant_id AND s.normalized=a.normalized)", &[&existing])?;
-    tx.execute("INSERT INTO aliases(merchant_id,normalized) SELECT merchant_id,normalized FROM import_alias_stage ON CONFLICT(merchant_id,normalized) DO NOTHING", &[])?;
+    tx.execute("DELETE FROM aliases a WHERE a.merchant_id=ANY(merchant_keys($1)) AND NOT EXISTS (SELECT 1 FROM import_alias_stage s WHERE merchant_key(s.merchant_id)=a.merchant_id AND s.normalized=a.normalized)", &[&existing])?;
+    tx.execute("INSERT INTO aliases(merchant_id,normalized) SELECT merchant_key(merchant_id),normalized FROM import_alias_stage ON CONFLICT(merchant_id,normalized) DO NOTHING", &[])?;
     tx.batch_execute("TRUNCATE import_alias_stage")?;
     Ok(())
 }
@@ -636,7 +641,7 @@ fn write_search(tx: &mut Transaction<'_>, rows: &[Vec<Option<String>>]) -> Resul
         2,
         rows,
     )?;
-    tx.execute("INSERT INTO merchant_search(merchant_id,text) SELECT merchant_id,text FROM import_search_stage ON CONFLICT(merchant_id) DO UPDATE SET text=excluded.text WHERE merchant_search.text IS DISTINCT FROM excluded.text", &[])?;
+    tx.execute("INSERT INTO merchant_search(merchant_id,text) SELECT merchant_key(merchant_id),text FROM import_search_stage ON CONFLICT(merchant_id) DO UPDATE SET text=excluded.text WHERE merchant_search.text IS DISTINCT FROM excluded.text", &[])?;
     tx.batch_execute("TRUNCATE import_search_stage")?;
     Ok(())
 }
@@ -644,17 +649,43 @@ fn write_search(tx: &mut Transaction<'_>, rows: &[Vec<Option<String>>]) -> Resul
 /// Every merchant is final and new. No staging joins, reads, upserts or deletes.
 pub(super) fn write_initial_merchants(
     tx: &mut Transaction<'_>,
-    merchants: &[Merchant],
+    entries: &[(Merchant, i64)],
 ) -> Result<()> {
-    if merchants.is_empty() {
+    if entries.is_empty() {
         return Ok(());
     }
-    copy_merchants_to(
-        tx,
-        merchants,
-        "COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) FROM STDIN BINARY",
-    )?;
-    write_initial_derived(tx, merchants)
+    let sink = tx.copy_in("COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,merchant_key) FROM STDIN BINARY")?;
+    let mut writer = BinaryCopyInWriter::new(
+        sink,
+        &[
+            Type::TEXT,
+            Type::TEXT,
+            Type::TEXT,
+            Type::TEXT,
+            Type::TEXT,
+            Type::TEXT_ARRAY,
+            Type::TEXT_ARRAY,
+            Type::TEXT_ARRAY,
+            Type::INT8,
+        ],
+    );
+    for (m, key) in entries {
+        writer.write(&[
+            &m.id,
+            &m.name,
+            &m.website,
+            &m.logo_url,
+            &m.logo_source,
+            &m.markets,
+            &m.aliases,
+            &m.sources,
+            key,
+        ])?;
+    }
+    writer.finish()?;
+    let keys = entries.iter().map(|(m, k)| (m.id.clone(), *k)).collect();
+    let merchants: Vec<_> = entries.iter().map(|(m, _)| m.clone()).collect();
+    write_initial_derived(tx, &merchants, &keys)
 }
 
 pub(super) fn write_current_merchants(
@@ -664,23 +695,31 @@ pub(super) fn write_current_merchants(
     if merchants.is_empty() {
         return Ok(());
     }
-    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage (LIKE merchants) ON COMMIT DROP; TRUNCATE import_merchant_stage")?;
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[]) ON COMMIT DROP; TRUNCATE import_merchant_stage")?;
     copy_merchants(tx, merchants)?;
     tx.batch_execute(UPSERT_MERCHANTS)?;
     let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();
-    tx.execute("DELETE FROM aliases WHERE merchant_id=ANY($1)", &[&ids])?;
     tx.execute(
-        "DELETE FROM merchant_search WHERE merchant_id=ANY($1)",
+        "DELETE FROM aliases WHERE merchant_id=ANY(merchant_keys($1))",
         &[&ids],
     )?;
     tx.execute(
-        "DELETE FROM merchant_identity_keys WHERE merchant_id=ANY($1)",
+        "DELETE FROM merchant_search WHERE merchant_id=ANY(merchant_keys($1))",
         &[&ids],
     )?;
-    write_initial_derived(tx, merchants)
+    tx.execute(
+        "DELETE FROM merchant_identity_keys WHERE merchant_id=ANY(merchant_keys($1))",
+        &[&ids],
+    )?;
+    let keys = numeric_ids::keys(tx, &ids)?;
+    write_initial_derived(tx, merchants, &keys)
 }
 
-fn write_initial_derived(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Result<()> {
+fn write_initial_derived(
+    tx: &mut Transaction<'_>,
+    merchants: &[Merchant],
+    keys: &HashMap<String, i64>,
+) -> Result<()> {
     let mut aliases = Vec::new();
     let mut search = Vec::with_capacity(merchants.len());
     for m in merchants {
@@ -695,31 +734,54 @@ fn write_initial_derived(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Re
         }
         search.push(vec![Some(m.id.clone()), Some(names.join(" \n "))]);
     }
-    copy_rows(
+    copy_derived_rows(
         tx,
         "COPY aliases(merchant_id,normalized) FROM STDIN BINARY",
-        2,
         &aliases,
+        keys,
     )?;
-    copy_rows(
+    copy_derived_rows(
         tx,
         "COPY merchant_search(merchant_id,text) FROM STDIN BINARY",
-        2,
         &search,
+        keys,
     )?;
     let sink = tx.copy_in("COPY merchant_identity_keys(merchant_id,normalized_name,website_host,rule_name,rule_host) FROM STDIN BINARY")?;
-    let mut writer = BinaryCopyInWriter::new(sink, &[Type::TEXT; 5]);
+    let mut writer = BinaryCopyInWriter::new(
+        sink,
+        &[Type::INT8, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT],
+    );
     for m in merchants {
         let key = crate::dedupe::deterministic_key(m);
         let name = key.as_ref().map(|k| k.0.as_str());
         let rule_host = key.as_ref().map(|k| k.1.as_deref().unwrap_or(""));
         writer.write(&[
-            &m.id,
+            &keys[&m.id],
             &normalize(&m.name),
             &crate::dedupe::host(&m.website),
             &name,
             &rule_host,
         ])?;
+    }
+    writer.finish()?;
+    Ok(())
+}
+
+// Binary COPY keeps compact ownership keys numeric all the way to PostgreSQL.
+fn copy_derived_rows(
+    tx: &mut Transaction<'_>,
+    sql: &str,
+    rows: &[Vec<Option<String>>],
+    keys: &HashMap<String, i64>,
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let sink = tx.copy_in(sql)?;
+    let mut writer = BinaryCopyInWriter::new(sink, &[Type::INT8, Type::TEXT]);
+    for row in rows {
+        let id = row[0].as_ref().context("missing derived owner")?;
+        writer.write(&[&keys[id], &row[1]])?;
     }
     writer.finish()?;
     Ok(())

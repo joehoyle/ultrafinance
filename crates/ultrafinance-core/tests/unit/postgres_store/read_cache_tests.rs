@@ -122,7 +122,7 @@ fn search_vocabulary_backfills_and_follows_bulk_refreshes() -> Result<()> {
     // Recreate the actual previous schema: the next initialization must backfill
     // existing search rows, not just maintain future inserts.
     store.run(|client| {
-        client.batch_execute(include_str!("version_14_json.sql"))?;
+        client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
         client.batch_execute("DROP TRIGGER merchant_search_words_insert ON merchant_search; DROP TRIGGER merchant_search_words_update ON merchant_search; DROP FUNCTION remember_merchant_search_words(); DROP TABLE merchant_search_words; UPDATE ultrafinance_schema SET version=10")?;
         Ok(())

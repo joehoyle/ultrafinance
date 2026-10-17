@@ -59,5 +59,5 @@ fn current_foursquare(c: &mut impl GenericClient, ids: Option<&[String]>) -> Res
     if !ready {
         return Ok(vec![]);
     }
-    c.query("SELECT m.* FROM merchants m WHERE ($1::text[] IS NULL OR m.id=ANY($1)) AND (EXISTS(SELECT 1 FROM location_records l WHERE l.merchant_id=m.id AND l.source='foursquare') OR EXISTS(SELECT 1 FROM foursquare_unlocated u WHERE u.merchant_id=m.id))", &[&ids])?.iter().map(|r| Ok(Input { merchant_id:r.get("id"), merchant:rows::merchant(r)?,url:String::new(),hints:vec![],region:None })).collect()
+    c.query("SELECT m.* FROM merchants m WHERE ($1::text[] IS NULL OR m.id=ANY($1)) AND (EXISTS(SELECT 1 FROM location_records l WHERE l.merchant_id=m.merchant_key AND l.source='foursquare') OR EXISTS(SELECT 1 FROM foursquare_unlocated u WHERE u.merchant_id=m.merchant_key))", &[&ids])?.iter().map(|r| Ok(Input { merchant_id:r.get("id"), merchant:rows::merchant(r)?,url:String::new(),hints:vec![],region:None })).collect()
 }

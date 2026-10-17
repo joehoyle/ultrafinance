@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn persist(
     tx: &mut Transaction<'_>,
     records: &[SourceRecord],
-    owners: &[String],
+    owners: &[i64],
     initial: bool,
 ) -> Result<()> {
     if records.len() != owners.len() {
@@ -18,7 +18,7 @@ pub(super) fn persist(
         // Initial outlet indexes are deferred: never probe the growing heap.
         // Record the plan and validate ownership once after indexes are rebuilt.
         tx.execute(
-            "INSERT INTO initial_identity_owners SELECT * FROM unnest($1::text[],$2::text[])",
+            "INSERT INTO initial_identity_owners SELECT * FROM unnest($1::text[],$2::bigint[])",
             &[&keys, &owners],
         )?;
         let mut missing_keys = Vec::new();
@@ -29,18 +29,18 @@ pub(super) fn persist(
                 .any(|l| l.external_id == record.external_id)
             {
                 missing_keys.push(record.external_id.clone());
-                missing_owners.push(owner.clone());
+                missing_owners.push(*owner);
             }
         }
         tx.execute(
-            "INSERT INTO foursquare_unlocated SELECT * FROM unnest($1::text[],$2::text[])",
+            "INSERT INTO foursquare_unlocated SELECT * FROM unnest($1::text[],$2::bigint[])",
             &[&missing_keys, &missing_owners],
         )?;
         return Ok(());
     }
-    tx.execute("INSERT INTO foursquare_unlocated SELECT i.external_id,i.merchant_id FROM unnest($1::text[],$2::text[]) i(external_id,merchant_id) WHERE NOT EXISTS (SELECT 1 FROM location_records l WHERE l.source='foursquare' AND l.external_id=i.external_id) ON CONFLICT(external_id) DO UPDATE SET merchant_id=excluded.merchant_id WHERE foursquare_unlocated.merchant_id IS DISTINCT FROM excluded.merchant_id", &[&keys,&owners])?;
+    tx.execute("INSERT INTO foursquare_unlocated SELECT i.external_id,i.merchant_id FROM unnest($1::text[],$2::bigint[]) i(external_id,merchant_id) WHERE NOT EXISTS (SELECT 1 FROM location_records l WHERE l.source='foursquare' AND l.external_id=i.external_id) ON CONFLICT(external_id) DO UPDATE SET merchant_id=excluded.merchant_id WHERE foursquare_unlocated.merchant_id IS DISTINCT FROM excluded.merchant_id", &[&keys,&owners])?;
     tx.execute("DELETE FROM foursquare_unlocated u USING unnest($1::text[]) i(external_id) WHERE u.external_id=i.external_id AND EXISTS(SELECT 1 FROM location_records l WHERE l.source='foursquare' AND l.external_id=i.external_id)", &[&keys])?;
-    let bad: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM unnest($1::text[],$2::text[]) i(external_id,merchant_id) WHERE (SELECT count(*) FROM source_identities s WHERE s.source='foursquare' AND s.external_id=i.external_id AND s.merchant_id=i.merchant_id)<>1)", &[&keys,&owners])?.get(0);
+    let bad: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM unnest($1::text[],$2::bigint[]) i(external_id,merchant_id) WHERE (SELECT count(*) FROM source_identities s WHERE s.source='foursquare' AND s.external_id=i.external_id AND s.merchant_id=merchant_public_id(i.merchant_id))<>1)", &[&keys,&owners])?.get(0);
     if bad {
         bail!("Foursquare import identity ownership does not match its merchant");
     }
@@ -78,7 +78,7 @@ pub(super) fn import(
         .collect();
     let names: Vec<_> = rules.iter().map(|k| k.0.clone()).collect();
     let hosts: Vec<_> = rules.iter().map(|k| k.1.clone()).collect();
-    let anchors: HashMap<(String,String),(i64,Option<String>)> = tx.query("SELECT i.name,i.host,(SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k JOIN manual_merchants m ON m.id=k.merchant_id WHERE k.rule_name=i.name AND k.rule_host=i.host LIMIT 2) manuals),COALESCE((SELECT k.merchant_id FROM merchant_identity_keys k JOIN manual_merchants m ON m.id=k.merchant_id WHERE k.rule_name=i.name AND k.rule_host=i.host LIMIT 1),(SELECT merchant_id FROM merchant_identity_keys WHERE rule_name=i.name AND rule_host=i.host ORDER BY merchant_id LIMIT 1)) FROM unnest($1::text[],$2::text[]) i(name,host)", &[&names,&hosts])?.iter().map(|r|((r.get(0),r.get(1)),(r.get(2),r.get(3)))).collect();
+    let anchors: HashMap<(String,String),(i64,Option<String>)> = tx.query("SELECT i.name,i.host,(SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k JOIN manual_merchants m ON merchant_key(m.id)=k.merchant_id WHERE k.rule_name=i.name AND k.rule_host=i.host LIMIT 2) manuals),COALESCE((SELECT merchant_public_id(k.merchant_id) FROM merchant_identity_keys k JOIN manual_merchants m ON merchant_key(m.id)=k.merchant_id WHERE k.rule_name=i.name AND k.rule_host=i.host LIMIT 1),(SELECT merchant_public_id(merchant_id) FROM merchant_identity_keys WHERE rule_name=i.name AND rule_host=i.host ORDER BY merchant_public_id(merchant_id) LIMIT 1)) FROM unnest($1::text[],$2::text[]) i(name,host)", &[&names,&hosts])?.iter().map(|r|((r.get(0),r.get(1)),(r.get(2),r.get(3)))).collect();
     let mut owners = Vec::with_capacity(records.len());
     let mut buckets: HashMap<(String, String), String> = HashMap::new();
     for r in records {
@@ -197,10 +197,12 @@ pub(super) fn import(
         }
     }
     import_bulk::write_current_merchants(tx, &changed)?;
-    persist(tx, records, &owners, false)?;
+    let numeric = numeric_ids::keys(tx, &owners)?;
+    let owner_keys: Vec<_> = owners.iter().map(|id| numeric[id]).collect();
+    persist(tx, records, &owner_keys, false)?;
     // Addressed places carry current country coverage. Addressless identities
     // deliberately keep no country evidence, so retain their merchant coverage.
-    let located: Vec<String> = tx.query("SELECT DISTINCT i.id FROM unnest($1::text[]) i(id) WHERE NOT EXISTS(SELECT 1 FROM foursquare_unlocated u WHERE u.merchant_id=i.id)", &[&owners])?.iter().map(|r|r.get(0)).collect();
+    let located: Vec<String> = tx.query("SELECT DISTINCT i.id FROM unnest($1::text[]) i(id) WHERE NOT EXISTS(SELECT 1 FROM foursquare_unlocated u WHERE u.merchant_id=merchant_key(i.id))", &[&owners])?.iter().map(|r|r.get(0)).collect();
     let mut coverage = MarketCountries::default();
     for row in tx.query(
         "SELECT * FROM manual_merchants WHERE id=ANY($1)",

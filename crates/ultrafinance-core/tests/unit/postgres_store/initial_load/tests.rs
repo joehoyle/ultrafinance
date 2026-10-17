@@ -56,7 +56,7 @@ fn initial_load_matches_incremental_evidence_and_supports_refresh() -> Result<()
     assert_eq!(indexes(&initial)?, expected_indexes);
     // Every usable outlet is owned by the same source identity after publication.
     initial.0.run(|client| {
-        let count: i64 = client.query_one("SELECT count(*) FROM location_records l JOIN source_identities s ON (s.source,s.external_id,s.merchant_id)=(l.source,l.external_id,l.merchant_id)", &[])?.get(0);
+        let count: i64 = client.query_one("SELECT count(*) FROM location_records l JOIN source_identities s ON (s.source,s.external_id,s.merchant_id)=(l.source,l.external_id,merchant_public_id(l.merchant_id))", &[])?.get(0);
         assert_eq!(count, 7);
         let words: i64 = client.query_one("SELECT count(*) FROM merchant_search_words", &[])?.get(0);
         assert!(words > 0);
@@ -112,7 +112,7 @@ fn initial_load_validates_foreign_keys_before_publishing() -> Result<()> {
     let store = MerchantStore::temporary()?;
     let before = indexes(&store)?;
     store.0.run(|client| {
-        client.batch_execute("CREATE FUNCTION break_initial_ownership() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.merchant_id='missing'; RETURN NEW; END $$; CREATE TRIGGER break_ownership BEFORE INSERT ON location_records FOR EACH ROW EXECUTE FUNCTION break_initial_ownership()")?;
+        client.batch_execute("CREATE FUNCTION break_initial_ownership() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.merchant_id=-1; RETURN NEW; END $$; CREATE TRIGGER break_ownership BEFORE INSERT ON location_records FOR EACH ROW EXECUTE FUNCTION break_initial_ownership()")?;
         Ok(())
     })?;
     let error = load(&store, vec![records()?.remove(0)], false).unwrap_err();
@@ -151,7 +151,7 @@ fn initial_load_restores_vocabulary_triggers_after_failure_and_commit() -> Resul
     assert_eq!(modes(&store)?, before);
     store.0.run(|client| {
         // The restored trigger must still maintain newly inserted vocabulary.
-        client.batch_execute("INSERT INTO merchants(id,name) VALUES ('word-test','Word test'); INSERT INTO merchant_search(merchant_id,text) VALUES ('word-test','uniquepostloadword')")?;
+        client.batch_execute("INSERT INTO merchants(id,name) VALUES ('word-test','Word test'); INSERT INTO merchant_search(merchant_id,text) VALUES (merchant_key('word-test'),'uniquepostloadword')")?;
         assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM merchant_search_words WHERE word='uniquepostloadword')", &[])?.get::<_, bool>(0));
         Ok(())
     })?;
@@ -162,7 +162,7 @@ fn initial_load_restores_vocabulary_triggers_after_failure_and_commit() -> Resul
 fn initial_load_rejects_wrong_but_existing_location_owner_and_restores_trigger() -> Result<()> {
     let store = MerchantStore::temporary()?;
     store.0.run(|client| {
-        client.batch_execute("ALTER TABLE location_records ENABLE ALWAYS TRIGGER location_merchant; CREATE FUNCTION corrupt_initial_location_owner() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.merchant_id=COALESCE((SELECT id FROM merchants WHERE id<>NEW.merchant_id LIMIT 1),NEW.merchant_id); RETURN NEW; END $$; CREATE TRIGGER corrupt_initial_location_owner BEFORE INSERT ON location_records FOR EACH ROW EXECUTE FUNCTION corrupt_initial_location_owner()")?;
+        client.batch_execute("ALTER TABLE location_records ENABLE ALWAYS TRIGGER location_merchant; CREATE FUNCTION corrupt_initial_location_owner() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.merchant_id=COALESCE((SELECT merchant_key FROM merchants WHERE merchant_key<>NEW.merchant_id LIMIT 1),NEW.merchant_id); RETURN NEW; END $$; CREATE TRIGGER corrupt_initial_location_owner BEFORE INSERT ON location_records FOR EACH ROW EXECUTE FUNCTION corrupt_initial_location_owner()")?;
         Ok(())
     })?;
     let error = load(&store, records()?, false).unwrap_err();
@@ -241,7 +241,7 @@ fn grouped_initial_load_is_independent_of_fetch_boundaries() -> Result<()> {
     }
     let expected = evidence(&regular)?;
     let derived = |store: &MerchantStore| -> Result<Vec<String>> {
-        store.0.run(|client| Ok(client.query("SELECT s.external_id||'|'||q.text||'|'||k.normalized_name||'|'||COALESCE(k.rule_name,'')||'|'||COALESCE(k.rule_host,'')||'|'||(SELECT string_agg(a.normalized,',' ORDER BY a.normalized) FROM aliases a WHERE a.merchant_id=s.merchant_id) FROM source_identities s JOIN merchant_search q ON q.merchant_id=s.merchant_id JOIN merchant_identity_keys k ON k.merchant_id=s.merchant_id ORDER BY s.external_id", &[])?.iter().map(|r|r.get(0)).collect()))
+        store.0.run(|client| Ok(client.query("SELECT s.external_id||'|'||q.text||'|'||k.normalized_name||'|'||COALESCE(k.rule_name,'')||'|'||COALESCE(k.rule_host,'')||'|'||(SELECT string_agg(a.normalized,',' ORDER BY a.normalized) FROM aliases a WHERE a.merchant_id=merchant_key(s.merchant_id)) FROM source_identities s JOIN merchant_search q ON q.merchant_id=merchant_key(s.merchant_id) JOIN merchant_identity_keys k ON k.merchant_id=merchant_key(s.merchant_id) ORDER BY s.external_id", &[])?.iter().map(|r|r.get(0)).collect()))
     };
     let expected_derived = derived(&regular)?;
     for size in [1, 7, 32] {

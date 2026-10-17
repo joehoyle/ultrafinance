@@ -1,4 +1,4 @@
-> Current storage (schema 18): Foursquare keeps current merchants/outlets and
+> Current storage (schema 19): Foursquare keeps current merchants/outlets and
 > provider IDs for idempotent imports, not parallel source-evidence records.
 > Addressless places use a minimal ID-to-merchant mapping. Existing IDs retain
 > their merchant assignment; imports refresh current outlets without replaying
@@ -685,3 +685,30 @@ merchants-only import with `--resume <checkpoint> --merchants-only`; changing
 the mode of a saved application checkpoint is rejected. A later full import
 must read the CSV again, because completed streaming imports delete consumed
 sorted files.
+
+## Numeric internal merchant keys (schema 19)
+
+Public merchant IDs remain unchanged. Numeric ownership keys replace repeated
+public strings in aliases, search, identity matching, outlets and the compact
+Foursquare mapping. See [numeric keys](database-schema.md#numeric-internal-merchant-keys-version-19).
+
+A local PostgreSQL 17 run of the real importer, using the same 600k-row Canada
+CSV and 500k eligible-place limit, produced these results. Both versions used
+fresh preparation and an empty catalog with durable writes.
+
+| Mode | Schema 18 elapsed | Schema 19 elapsed | Schema 18 DB phase | Schema 19 DB phase | Schema 18 DB size | Schema 19 DB size |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Merchants only | 33.40s | 32.92s | 23.75s | 23.01s | 674 MB | 551 MB |
+| Merchants and locations | 42.97s | 39.90s | 33.29s | 29.84s | 858 MB | 723 MB |
+
+Each mode retained 424,925 merchants and all 500,000 provider IDs. The full load
+retained 445,053 outlets and 54,947 unlocated mappings. The merchants-only load
+retained 500,000 mappings and no outlets. Both derived-data digests matched the
+schema-18 baseline: `e7782f043d066c6da4a74e828f33dbaf`.
+
+These are single local runs excluding download time. The merchants-only timing
+difference is small enough to treat as roughly unchanged. Database size falls
+about 18% for merchants-only and 16% for the full import. The earlier isolated
+SQL key experiment excluded preparation/grouping and is not an end-to-end
+speedup forecast. Results describe fresh loads, not the duration or temporary
+disk requirements of migrating an existing large database.

@@ -21,7 +21,7 @@ pub(crate) fn postgres_identity_key(
     let rule_host = key.as_ref().map(|(_, host)| host.as_deref().unwrap_or(""));
     let normalized = crate::store::normalize(&merchant.name);
     let host = crate::dedupe::host(&merchant.website);
-    c.execute("INSERT INTO merchant_identity_keys(merchant_id,normalized_name,website_host,rule_name,rule_host) VALUES($1,$2,$3,$4,$5) ON CONFLICT(merchant_id) DO UPDATE SET normalized_name=excluded.normalized_name,website_host=excluded.website_host,rule_name=excluded.rule_name,rule_host=excluded.rule_host", &[&merchant.id,&normalized,&host,&rule_name,&rule_host])?;
+    c.execute("INSERT INTO merchant_identity_keys(merchant_id,normalized_name,website_host,rule_name,rule_host) VALUES(merchant_key($1),$2,$3,$4,$5) ON CONFLICT(merchant_id) DO UPDATE SET normalized_name=excluded.normalized_name,website_host=excluded.website_host,rule_name=excluded.rule_name,rule_host=excluded.rule_host", &[&merchant.id,&normalized,&host,&rule_name,&rule_host])?;
     Ok(())
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn postgres_location_records(
     let location = &record.location;
     let precision = serde_json::to_value(location.precision)?;
     let precision = precision.as_str();
-    c.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,name,precision,address,city,region,postal_code,country,store_number,latitude,longitude,aliases,place_ids,transaction_pattern,manual_override,source_provenance_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,name=excluded.name,precision=excluded.precision,address=excluded.address,city=excluded.city,region=excluded.region,postal_code=excluded.postal_code,country=excluded.country,store_number=excluded.store_number,latitude=excluded.latitude,longitude=excluded.longitude,aliases=excluded.aliases,place_ids=excluded.place_ids,transaction_pattern=excluded.transaction_pattern,manual_override=excluded.manual_override,source_provenance_id=excluded.source_provenance_id", &[
+    c.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,name,precision,address,city,region,postal_code,country,store_number,latitude,longitude,aliases,place_ids,transaction_pattern,manual_override,source_provenance_id) VALUES($1,$2,$3,merchant_key($4),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,name=excluded.name,precision=excluded.precision,address=excluded.address,city=excluded.city,region=excluded.region,postal_code=excluded.postal_code,country=excluded.country,store_number=excluded.store_number,latitude=excluded.latitude,longitude=excluded.longitude,aliases=excluded.aliases,place_ids=excluded.place_ids,transaction_pattern=excluded.transaction_pattern,manual_override=excluded.manual_override,source_provenance_id=excluded.source_provenance_id", &[
         &id,&source,&external_id,&merchant_id,&merchant_source,&merchant_external_id,
         &location.name,&precision,&location.address,&location.city,&location.region,
         &location.postal_code,&location.country,&location.store_number,

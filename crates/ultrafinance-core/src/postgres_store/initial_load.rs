@@ -61,7 +61,7 @@ where
     }
     // The grouped loader never probes these keys while loading. Rebuild their
     // uniqueness constraints before restoring FKs; duplicate inputs abort then.
-    let unique_keys = tx.query("SELECT format('%I.%I',n.nspname,t.relname),quote_ident(c.conname),pg_get_constraintdef(c.oid) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() AND c.conname=ANY($1) AND c.contype IN ('p','u') ORDER BY t.relname,c.conname", &[&vec!["merchants_pkey","source_records_pkey","location_records_pkey","location_records_source_external_id_key","aliases_pkey","merchant_search_pkey","merchant_identity_keys_pkey"]])?;
+    let unique_keys = tx.query("SELECT format('%I.%I',n.nspname,t.relname),quote_ident(c.conname),pg_get_constraintdef(c.oid) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() AND c.conname=ANY($1) AND c.contype IN ('p','u') ORDER BY t.relname,c.conname", &[&vec!["merchants_pkey","merchants_key_unique","source_records_pkey","location_records_pkey","location_records_source_external_id_key","aliases_pkey","merchant_search_pkey","merchant_identity_keys_pkey"]])?;
     for key in &unique_keys {
         tx.batch_execute(&format!(
             "ALTER TABLE {} DROP CONSTRAINT {}",
@@ -94,7 +94,7 @@ where
         "Import: staging initial Foursquare load; {} secondary indexes deferred",
         indexes.len()
     );
-    tx.batch_execute("CREATE TEMP TABLE initial_identity_owners(external_id TEXT,merchant_id TEXT) ON COMMIT DROP; CREATE TEMP TABLE initial_source_stage(rule_name TEXT,rule_host TEXT,source TEXT,external_id TEXT,data TEXT) ON COMMIT DROP")?;
+    tx.batch_execute("CREATE TEMP TABLE initial_identity_owners(external_id TEXT,merchant_id BIGINT) ON COMMIT DROP; CREATE TEMP TABLE initial_source_stage(rule_name TEXT,rule_host TEXT,source TEXT,external_id TEXT,data TEXT) ON COMMIT DROP")?;
     let mut staged = 0;
     let mut progress =
         crate::import_progress::Progress::new("staging initial Foursquare records", total);
@@ -181,12 +181,12 @@ where
         progress.advance(n + 1);
     }
     progress.finish();
-    let invalid_identity: bool = tx.query_one("SELECT EXISTS(SELECT external_id,merchant_id FROM initial_identity_owners EXCEPT SELECT external_id,merchant_id FROM source_identities WHERE source='foursquare')", &[])?.get(0);
+    let invalid_identity: bool = tx.query_one("SELECT EXISTS(SELECT external_id,merchant_id FROM initial_identity_owners EXCEPT (SELECT external_id,merchant_id FROM location_records WHERE source='foursquare' UNION ALL SELECT external_id,merchant_id FROM foursquare_unlocated))", &[])?.get(0);
     if invalid_identity {
         bail!("Foursquare import identity ownership does not match its merchant");
     }
     eprintln!("Import: validating source-linked location ownership");
-    let invalid_owner: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM location_records l LEFT JOIN source_records s ON (s.source,s.external_id)=(l.merchant_source,l.merchant_external_id) WHERE l.merchant_source IS NOT NULL AND s.merchant_id IS DISTINCT FROM l.merchant_id)", &[])?.get(0);
+    let invalid_owner: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM location_records l LEFT JOIN source_records s ON (s.source,s.external_id)=(l.merchant_source,l.merchant_external_id) WHERE l.merchant_source IS NOT NULL AND merchant_key(s.merchant_id) IS DISTINCT FROM l.merchant_id)", &[])?.get(0);
     if invalid_owner {
         bail!("initial location ownership does not match its source merchant");
     }

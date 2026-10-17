@@ -968,11 +968,11 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 18 before running this application. See
+schema version 19 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
 Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
-against version 18, so application-only rollback across this schema change is unsupported.
+against version 19, so application-only rollback across this schema change is unsupported.
 
 ## Homepage example
 

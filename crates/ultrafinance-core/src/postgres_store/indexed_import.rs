@@ -43,7 +43,7 @@ pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
 }
 
 pub(super) fn write_keys(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Result<()> {
-    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS identity_key_stage (LIKE merchant_identity_keys) ON COMMIT DROP; TRUNCATE identity_key_stage")?;
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS identity_key_stage(merchant_id TEXT,normalized_name TEXT,website_host TEXT,rule_name TEXT,rule_host TEXT) ON COMMIT DROP; TRUNCATE identity_key_stage")?;
     let sink = tx.copy_in("COPY identity_key_stage FROM STDIN BINARY")?;
     let mut writer = BinaryCopyInWriter::new(
         sink,
@@ -62,7 +62,7 @@ pub(super) fn write_keys(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Re
         ])?;
     }
     writer.finish()?;
-    tx.execute("INSERT INTO merchant_identity_keys SELECT * FROM identity_key_stage ON CONFLICT(merchant_id) DO UPDATE SET normalized_name=excluded.normalized_name,website_host=excluded.website_host,rule_name=excluded.rule_name,rule_host=excluded.rule_host WHERE (merchant_identity_keys.normalized_name,merchant_identity_keys.website_host,merchant_identity_keys.rule_name,merchant_identity_keys.rule_host) IS DISTINCT FROM (excluded.normalized_name,excluded.website_host,excluded.rule_name,excluded.rule_host)", &[])?;
+    tx.execute("INSERT INTO merchant_identity_keys SELECT merchant_key(merchant_id),normalized_name,website_host,rule_name,rule_host FROM identity_key_stage ON CONFLICT(merchant_id) DO UPDATE SET normalized_name=excluded.normalized_name,website_host=excluded.website_host,rule_name=excluded.rule_name,rule_host=excluded.rule_host WHERE (merchant_identity_keys.normalized_name,merchant_identity_keys.website_host,merchant_identity_keys.rule_name,merchant_identity_keys.rule_host) IS DISTINCT FROM (excluded.normalized_name,excluded.website_host,excluded.rule_name,excluded.rule_host)", &[])?;
     tx.batch_execute("TRUNCATE identity_key_stage")?;
     Ok(())
 }
@@ -300,9 +300,9 @@ impl<'a, 'b> Import<'a, 'b> {
         // identities veto the entire bucket, including duplicates within a batch.
         let rows=self.tx.query(r#"
 WITH keys AS (SELECT DISTINCT rule_name,rule_host FROM incoming_keys WHERE rule_name IS NOT NULL),
-anchors AS MATERIALIZED (SELECT k.*, (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys x JOIN manual_merchants m ON m.id=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 2) conflict) AS manuals,
-COALESCE((SELECT x.merchant_id FROM manual_merchants m JOIN merchant_identity_keys x ON m.id=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 1),
-(SELECT x.merchant_id FROM merchant_identity_keys x WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host ORDER BY x.merchant_id LIMIT 1)) AS target FROM keys k)
+anchors AS MATERIALIZED (SELECT k.*, (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys x JOIN manual_merchants m ON merchant_key(m.id)=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 2) conflict) AS manuals,
+COALESCE((SELECT merchant_public_id(x.merchant_id) FROM manual_merchants m JOIN merchant_identity_keys x ON merchant_key(m.id)=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 1),
+(SELECT merchant_public_id(x.merchant_id) FROM merchant_identity_keys x WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host ORDER BY merchant_public_id(x.merchant_id) LIMIT 1)) AS target FROM keys k)
 SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE(a.target,min(i.id) OVER(PARTITION BY i.rule_name,i.rule_host)) END,
 (i.rule_name IS NOT NULL AND a.manuals<=1 AND a.target IS NOT NULL) AS stored_target
 FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
@@ -381,18 +381,18 @@ FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
             let current = merchants(self.tx, &unchanged)?;
             write_keys(self.tx, &current)?;
         }
-        self.tx.execute("INSERT INTO touched_keys SELECT DISTINCT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=ANY($1) AND rule_name IS NOT NULL ON CONFLICT DO NOTHING",&[&reconcile_ids])?;
+        self.tx.execute("INSERT INTO touched_keys SELECT DISTINCT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=ANY(merchant_keys($1)) AND rule_name IS NOT NULL ON CONFLICT DO NOTHING",&[&reconcile_ids])?;
         // Only touched indexed buckets are scanned. Fetch retired IDs in bounded
         // pages even if a legacy chain has millions of duplicate merchants.
-        let keys=self.tx.query("SELECT t.rule_name,t.rule_host FROM touched_keys t WHERE (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k WHERE k.rule_name=t.rule_name AND k.rule_host=t.rule_host LIMIT 2) matches)>1 AND (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k JOIN manual_merchants m ON m.id=k.merchant_id WHERE k.rule_name=t.rule_name AND k.rule_host=t.rule_host LIMIT 2) manuals)<2",&[])?;
+        let keys=self.tx.query("SELECT t.rule_name,t.rule_host FROM touched_keys t WHERE (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k WHERE k.rule_name=t.rule_name AND k.rule_host=t.rule_host LIMIT 2) matches)>1 AND (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k JOIN manual_merchants m ON merchant_key(m.id)=k.merchant_id WHERE k.rule_name=t.rule_name AND k.rule_host=t.rule_host LIMIT 2) manuals)<2",&[])?;
         let mut merging =
             crate::import_progress::Progress::new("reconciling merchant groups", keys.len());
         for (index, k) in keys.into_iter().enumerate() {
             let name: String = k.get(0);
             let host: String = k.get(1);
-            let target:String=self.tx.query_one("SELECT COALESCE((SELECT k.merchant_id FROM manual_merchants m JOIN merchant_identity_keys k ON m.id=k.merchant_id WHERE rule_name=$1 AND rule_host=$2 LIMIT 1),(SELECT merchant_id FROM merchant_identity_keys WHERE rule_name=$1 AND rule_host=$2 ORDER BY merchant_id LIMIT 1))",&[&name,&host])?.get(0);
+            let target:String=self.tx.query_one("SELECT COALESCE((SELECT merchant_public_id(k.merchant_id) FROM manual_merchants m JOIN merchant_identity_keys k ON merchant_key(m.id)=k.merchant_id WHERE rule_name=$1 AND rule_host=$2 LIMIT 1),(SELECT merchant_public_id(merchant_id) FROM merchant_identity_keys WHERE rule_name=$1 AND rule_host=$2 ORDER BY merchant_public_id(merchant_id) LIMIT 1))",&[&name,&host])?.get(0);
             loop {
-                let rows=self.tx.query("SELECT merchant_id FROM merchant_identity_keys WHERE rule_name=$1 AND rule_host=$2 AND merchant_id<>$3 ORDER BY merchant_id LIMIT 4999",&[&name,&host,&target])?;
+                let rows=self.tx.query("SELECT merchant_public_id(merchant_id) FROM merchant_identity_keys WHERE rule_name=$1 AND rule_host=$2 AND merchant_id<>merchant_key($3) ORDER BY merchant_public_id(merchant_id) LIMIT 4999",&[&name,&host,&target])?;
                 let group: Vec<String> = std::iter::once(target.clone())
                     .chain(rows.into_iter().map(|r| r.get(0)))
                     .collect();
