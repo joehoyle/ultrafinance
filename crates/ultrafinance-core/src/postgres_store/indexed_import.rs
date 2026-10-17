@@ -97,8 +97,29 @@ impl<'a, 'b> Import<'a, 'b> {
         total: usize,
         chunk_size: usize,
     ) -> Result<Self> {
+        Self::new_with_count(tx, dry_run, total, chunk_size, true)
+    }
+    pub(super) fn new_stream(
+        tx: &'a mut Transaction<'b>,
+        dry_run: bool,
+        total: usize,
+        chunk_size: usize,
+    ) -> Result<Self> {
+        Self::new_with_count(tx, dry_run, total, chunk_size, false)
+    }
+    fn new_with_count(
+        tx: &'a mut Transaction<'b>,
+        dry_run: bool,
+        total: usize,
+        chunk_size: usize,
+        count_catalog: bool,
+    ) -> Result<Self> {
         tx.batch_execute("CREATE TEMP TABLE import_seen(source TEXT,external_id TEXT,PRIMARY KEY(source,external_id)) ON COMMIT DROP; CREATE TEMP TABLE incoming_keys(id TEXT PRIMARY KEY,rule_name TEXT,rule_host TEXT) ON COMMIT DROP; CREATE TEMP TABLE touched_keys(rule_name TEXT,rule_host TEXT,PRIMARY KEY(rule_name,rule_host)) ON COMMIT DROP")?;
-        let count: i64 = tx.query_one("SELECT count(*) FROM merchants", &[])?.get(0);
+        let count: i64 = if count_catalog {
+            tx.query_one("SELECT count(*) FROM merchants", &[])?.get(0)
+        } else {
+            0
+        };
         let revision: i64 = tx
             .query_one("SELECT revision FROM catalog_revision", &[])?
             .get(0);
@@ -196,6 +217,7 @@ impl<'a, 'b> Import<'a, 'b> {
         let mut existing = vec![];
         let mut existing_ids = vec![];
         let mut fresh = vec![];
+        let mut refreshed_keys = HashSet::new();
         for r in records {
             if let Some(id) = previous.get(&(r.source.clone(), r.external_id.clone())) {
                 existing_ids.push(id.clone());
@@ -212,8 +234,10 @@ impl<'a, 'b> Import<'a, 'b> {
         // Refresh persisted source inputs first. Canonical identity includes manual
         // corrections and all retained sources, rather than only this batch.
         if !existing.is_empty() {
-            let delta = import_bulk::import(self.tx, &existing, &existing_ids, &baseline)?;
-            self.add_delta(delta);
+            let applied =
+                import_bulk::import_indexed(self.tx, &existing, &existing_ids, &baseline)?;
+            self.add_delta(applied.delta);
+            refreshed_keys.extend(applied.refreshed_keys);
         }
         let matching =
             crate::import_progress::Progress::new("matching new merchant identities", fresh.len());
@@ -234,20 +258,44 @@ impl<'a, 'b> Import<'a, 'b> {
         // identities veto the entire bucket, including duplicates within a batch.
         let rows=self.tx.query(r#"
 WITH keys AS (SELECT DISTINCT rule_name,rule_host FROM incoming_keys WHERE rule_name IS NOT NULL),
-anchors AS (SELECT k.*, (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys x JOIN manual_merchants m ON m.id=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 2) conflict) AS manuals,
+anchors AS MATERIALIZED (SELECT k.*, (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys x JOIN manual_merchants m ON m.id=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 2) conflict) AS manuals,
 COALESCE((SELECT x.merchant_id FROM manual_merchants m JOIN merchant_identity_keys x ON m.id=x.merchant_id WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host LIMIT 1),
 (SELECT x.merchant_id FROM merchant_identity_keys x WHERE x.rule_name=k.rule_name AND x.rule_host=k.rule_host ORDER BY x.merchant_id LIMIT 1)) AS target FROM keys k)
-SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE(a.target,min(i.id) OVER(PARTITION BY i.rule_name,i.rule_host)) END FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
+SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE(a.target,min(i.id) OVER(PARTITION BY i.rule_name,i.rule_host)) END,
+(i.rule_name IS NOT NULL AND a.manuals<=1 AND a.target IS NOT NULL) AS stored_target
+FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
 "#,&[])?;
+        // The matcher already knows which targets exist. Do not perform random
+        // primary-key probes for thousands of newly generated UUIDs.
+        let mut stored_ids: Vec<String> = rows
+            .iter()
+            .filter(|row| row.get::<_, bool>(2))
+            .map(|row| row.get(1))
+            .collect();
+        stored_ids.sort_unstable();
+        stored_ids.dedup();
         let targets: HashMap<String, String> =
             rows.into_iter().map(|r| (r.get(0), r.get(1))).collect();
         let ids: Vec<String> = provisional.iter().map(|id| targets[id].clone()).collect();
         matching.finish();
         let mut baseline = empty_snapshot();
-        baseline.merchants = merchants(self.tx, &ids)?;
+        baseline.merchants = merchants(self.tx, &stored_ids)?;
+        // Fresh buckets were already matched against stored rule keys and
+        // collapsed within this batch. Only established merchants can change
+        // canonical keys while combining retained evidence or expose legacy
+        // duplicates. New-only buckets cannot introduce an unexamined collision
+        // (and multiple manual anchors continue to veto their entire bucket).
+        let mut reconcile_ids: Vec<_> = existing_ids
+            .iter()
+            .cloned()
+            .chain(baseline.merchants.iter().map(|m| m.id.clone()))
+            .collect();
+        reconcile_ids.sort_unstable();
+        reconcile_ids.dedup();
         if !fresh.is_empty() {
-            let delta = import_bulk::import(self.tx, &fresh, &ids, &baseline)?;
-            self.add_delta(delta);
+            let applied = import_bulk::import_new_sources(self.tx, &fresh, &ids, &baseline)?;
+            self.add_delta(applied.delta);
+            refreshed_keys.extend(applied.refreshed_keys);
             let mut groups: std::collections::BTreeMap<String, Vec<String>> = Default::default();
             for (id, target) in provisional.iter().zip(&ids) {
                 if id != target {
@@ -278,12 +326,21 @@ SELECT i.id,CASE WHEN i.rule_name IS NULL OR a.manuals>1 THEN i.id ELSE COALESCE
             }
         }
         foursquare_locations::import(self.tx, &fresh)?;
-        let touched: Vec<_> = existing_ids.into_iter().chain(ids).collect();
+        let mut touched: Vec<_> = existing_ids.into_iter().chain(ids).collect();
+        touched.sort_unstable();
+        touched.dedup();
         // Refresh rule keys even when source inputs are unchanged: identity
         // rules can improve between imports without changing source metadata.
-        let current = merchants(self.tx, &touched)?;
-        write_keys(self.tx, &current)?;
-        self.tx.execute("INSERT INTO touched_keys SELECT DISTINCT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=ANY($1) AND rule_name IS NOT NULL ON CONFLICT DO NOTHING",&[&touched])?;
+        let unchanged: Vec<_> = touched
+            .iter()
+            .filter(|id| !refreshed_keys.contains(*id))
+            .cloned()
+            .collect();
+        if !unchanged.is_empty() {
+            let current = merchants(self.tx, &unchanged)?;
+            write_keys(self.tx, &current)?;
+        }
+        self.tx.execute("INSERT INTO touched_keys SELECT DISTINCT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=ANY($1) AND rule_name IS NOT NULL ON CONFLICT DO NOTHING",&[&reconcile_ids])?;
         // Only touched indexed buckets are scanned. Fetch retired IDs in bounded
         // pages even if a legacy chain has millions of duplicate merchants.
         let keys=self.tx.query("SELECT t.rule_name,t.rule_host FROM touched_keys t WHERE (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k WHERE k.rule_name=t.rule_name AND k.rule_host=t.rule_host LIMIT 2) matches)>1 AND (SELECT count(*) FROM (SELECT 1 FROM merchant_identity_keys k JOIN manual_merchants m ON m.id=k.merchant_id WHERE k.rule_name=t.rule_name AND k.rule_host=t.rule_host LIMIT 2) manuals)<2",&[])?;

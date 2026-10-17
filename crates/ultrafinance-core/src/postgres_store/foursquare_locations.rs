@@ -59,13 +59,17 @@ fn write(tx: &mut Transaction<'_>, records: &[LocationRecord]) -> Result<()> {
         writer.write(&[&id, &serde_json::to_string(record)?])?;
     }
     writer.finish()?;
+    // Materialize parsed rows: an inlined data::jsonb expression reparses the
+    // same text for every projected field. Each stage is bounded to BATCH rows.
     tx.batch_execute(r#"
+        WITH incoming AS MATERIALIZED (SELECT data::jsonb AS data FROM fsq_location_stage)
         INSERT INTO source_provenance(source,attribution,license,url)
-        SELECT DISTINCT data::jsonb->>'source',data::jsonb->>'attribution',data::jsonb->>'license',data::jsonb->>'url' FROM fsq_location_stage
+        SELECT DISTINCT data->>'source',data->>'attribution',data->>'license',data->>'url' FROM incoming
         ON CONFLICT(source,attribution,license,url) DO NOTHING;
+        WITH incoming AS MATERIALIZED (SELECT id,data::jsonb AS data FROM fsq_location_stage)
         INSERT INTO location_records(id,source,external_id,merchant_source,merchant_external_id,name,precision,address,city,region,postal_code,country,store_number,latitude,longitude,aliases_json,place_ids_json,transaction_pattern,manual_override,source_provenance_id)
         SELECT incoming.id,data->>'source',data->>'external_id',data#>>'{merchant,source}',data#>>'{merchant,external_id}',data#>>'{location,name}',data#>>'{location,precision}',data#>>'{location,address}',data#>>'{location,city}',data#>>'{location,region}',data#>>'{location,postal_code}',data#>>'{location,country}',data#>>'{location,store_number}',(data#>>'{location,latitude}')::double precision,(data#>>'{location,longitude}')::double precision,(data->'aliases')::text,(data->'place_ids')::text,data->>'transaction_pattern',(data->>'manual_override')::boolean,p.id
-        FROM (SELECT id,data::jsonb AS data FROM fsq_location_stage) incoming JOIN source_provenance p ON (p.source,p.attribution,p.license,p.url)=(data->>'source',data->>'attribution',data->>'license',data->>'url')
+        FROM incoming JOIN source_provenance p ON (p.source,p.attribution,p.license,p.url)=(data->>'source',data->>'attribution',data->>'license',data->>'url')
         ON CONFLICT(source,external_id) DO UPDATE SET
             merchant_id=NULL,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,name=excluded.name,precision=excluded.precision,address=excluded.address,city=excluded.city,region=excluded.region,postal_code=excluded.postal_code,country=excluded.country,store_number=excluded.store_number,latitude=excluded.latitude,longitude=excluded.longitude,aliases_json=excluded.aliases_json,place_ids_json=excluded.place_ids_json,transaction_pattern=excluded.transaction_pattern,manual_override=excluded.manual_override,source_provenance_id=excluded.source_provenance_id
         WHERE NOT location_records.manual_override AND

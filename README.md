@@ -26,6 +26,20 @@ Local commands default to the Docker server at `127.0.0.1:55432`; set
 starts PostgreSQL 17 and applies schema migrations. Data persists in the Compose
 volume. `./dev/postgres.sh down` stops the container while retaining its data;
 `./dev/postgres.sh test` starts PostgreSQL and runs the workspace tests.
+The local PostgreSQL container uses a 4 GiB shared cache and a 4 GiB WAL
+checkpoint target for large imports; allow sufficient memory in Docker/OrbStack.
+It defaults to disposable development mode: `fsync`, `full_page_writes`, and
+`synchronous_commit` are off. A host/VM crash can corrupt the database or lose
+chunks already marked complete by an import checkpoint. After such a crash,
+rebuild and re-import from the original download into a fresh checkpoint directory;
+redownload the source if it was deleted. Do not trust the old checkpoint against
+a database that may have lost committed writes. To enable durable local operation,
+set `ULTRAFINANCE_POSTGRES_FSYNC=on`,
+`ULTRAFINANCE_POSTGRES_FULL_PAGE_WRITES=on`, and
+`ULTRAFINANCE_POSTGRES_SYNCHRONOUS_COMMIT=on` when starting Compose. Switching
+an existing non-durable database back requires a clean PostgreSQL shutdown and
+flushing its data to disk before durable operation resumes. AWS production
+configuration is separate and retains its durability settings.
 The local container accepts connections without a password on its loopback port.
 An empty database returns `unresolved` without calling any provider.
 
@@ -566,7 +580,16 @@ Foursquare imports using `--offline` or `--input` do not need DuckDB; other
 source adapters do not need it either. The downloader installs DuckDB's `httpfs`
 and `iceberg` extensions on first use. Downloads include all open places in the
 selected region by default; use `--foursquare-limit X` for an optional download
-cap. Large exports are still loaded into memory during preparation.
+cap. Foursquare import uses bounded external sorting and prepares records in memory
+for direct PostgreSQL insertion, with no prepared JSON bundle. Database chunks
+commit independently, and rerunning the same command resumes from a saved
+sorted-file offset. Completed sorted parts are deleted after their database
+commits succeed and checkpoints are saved. Crash-safe resume requires durable
+PostgreSQL settings. Plain dry runs need no database; reconciliation
+previews roll back. If the downloaded CSV has been deleted after application
+started, use `sources import foursquare --region global --resume CHECKPOINT_DIR`
+to continue from the remaining sorted files. See the Foursquare import
+documentation for resume and limit semantics.
 
 Prepare a local download with a source-specific adapter:
 
@@ -771,9 +794,29 @@ Lambda's `live` alias. The prompt shows `ultrafinance`, the working directory,
 and `$` (or `#` for root), with colors on supported terminals.
 Tasks use the existing private subnets and NAT gateway
 without a public IP. The runner stops the task when the shell closes, including
-on connection failure or interruption; tasks also expire after one hour.
+on connection failure or interruption; tasks also expire after 24 hours.
 During an active shell session, Ctrl-C cancels remote commands without
 interrupting the launcher. Use `exit` to close the shell and stop the task.
+
+Run `cargo run -- infra cli-list` to list active CLI session IDs, statuses,
+start times, and task IDs, including sessions still starting.
+
+Use `cargo run -- infra cli --persistent` for work that should survive a client
+disconnect. It opens tmux automatically and prints a session ID. Detach with
+Ctrl-B then D, reconnect with `cargo run -- infra cli-attach SESSION_ID`, and
+stop the task with `cargo run -- infra cli-stop SESSION_ID`. Persistent sessions
+expire after 24 hours by default; `--lifetime-hours 72` overrides that bound
+(1–168 hours). Reconnecting does not extend it. Files and processes survive
+disconnection until task termination, when the scratch disk is deleted.
+To retain `/scratch` between tasks, finish writes and run `sync` in the remote
+shell, then use `cargo run -- infra cli-stop SESSION_ID --save-data`. This waits
+for an EBS snapshot to complete before stopping. Restore the printed snapshot ID
+with `cargo run -- infra cli --persistent --snapshot SNAPSHOT_ID`. This starts a
+new task with the saved files and the selected image; running processes are not
+restored. Snapshots incur storage charges until deleted, and the original task's
+expiry still applies while saving.
+
+`infra cli-cleanup` also stops persistent tasks. The image must include tmux.
 
 The CLI shell uses the RDS administrator, with credentials injected from the
 RDS-managed secret when a task starts. The launcher constructs its TLS-enabled
@@ -786,7 +829,7 @@ including a release held back by a required database migration. Run
 `ultrafinance database init` in that new administrator shell before completing
 the release. `--latest` selects the highest
 published version, excludes mutable `$LATEST`, and conflicts with `--image`.
-Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a specific immutable image. The shell filesystem is temporary.
+Use `--image ECR_REPOSITORY@sha256:DIGEST` to select a specific immutable image. The task has 8 vCPUs, 32 GiB RAM, and a fresh encrypted 1 TiB gp3 scratch disk at `/scratch`. The shell starts on that disk, and temporary files use `/scratch/tmp`. The disk is deleted when the task stops. Override `cli_scratch_gib` or `cli_lifetime_hours` in the private infrastructure variables if needed.
 
 Imports validate the batch before writing and commit atomically. Writers use a
 transaction advisory lock to serialize imports, corrections, and links across

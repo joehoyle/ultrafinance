@@ -75,6 +75,33 @@ fn conflicting_place_ids_and_invalid_regions_fail() {
     assert!(prepare(&input, "../").is_err());
 }
 #[test]
+fn invalid_countries_skip_only_the_affected_places() {
+    let input = csv(&[
+        ("a", "Before", "CA", "", ""),
+        ("b", "Missing", "", "", ""),
+        ("c", "Long", "CAN", "", ""),
+        ("d", "Nonletter", "C1", "", ""),
+        ("e", "Malformed", "??", "", ""),
+        ("f", "After", " ca ", "", ""),
+    ]);
+    for region in ["global", "ca"] {
+        let (records, skipped) = prepare(&input, region).unwrap();
+        assert_eq!(skipped, 4);
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.external_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["place:a", "place:f"]
+        );
+        for record in records {
+            assert_eq!(record.merchant.markets, vec!["CA"]);
+            crate::store::validate(&record.merchant).unwrap();
+        }
+    }
+}
+
+#[test]
 fn invalid_upstream_websites_preserve_merchants_and_original_evidence() {
     let input = csv(&[
         ("a", "A", "CA", "ftp://example.com", ""),
@@ -122,4 +149,47 @@ fn unmatchable_names_are_skipped() {
     for record in &records {
         crate::store::validate(&record.merchant).unwrap();
     }
+}
+
+#[test]
+fn unusable_generated_outlet_aliases_preserve_merchants_without_aborting() -> Result<()> {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer.write_record([
+        "fsq_place_id",
+        "name",
+        "country",
+        "address",
+        "fsq_category_ids",
+        "date_closed",
+    ])?;
+    // The first case is the upstream row that stopped the global import.
+    for (id, name, address) in [
+        ("a", "+1", "\u{e332}"),
+        ("b", "AB", "---"),
+        ("c", "東京", "☕"),
+        ("d", "A", "1"),
+        ("e", "Cafe", "1 Main St"),
+    ] {
+        writer.write_record([id, name, "SG", address, "[\"restaurant\"]", ""])?;
+    }
+    let (records, skipped) = prepare(&String::from_utf8(writer.into_inner()?)?, "global")?;
+    assert_eq!(records.len(), 5);
+    assert_eq!(skipped, 0);
+    for record in &records[..3] {
+        crate::store::validate(&record.merchant)?;
+        assert!(locations(record)?.is_empty());
+        assert!(
+            !record.raw["places"][0]["address"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for record in &records[3..] {
+        let outlets = locations(record)?;
+        assert_eq!(outlets.len(), 1);
+        outlets[0].validate()?;
+    }
+    assert_eq!(locations(&records[3])?[0].aliases, vec!["A 1"]);
+    Ok(())
 }

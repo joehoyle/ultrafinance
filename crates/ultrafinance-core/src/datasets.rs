@@ -20,6 +20,37 @@ pub fn prepare_foursquare_file(
     foursquare_file::prepare_file(input, output, region)
 }
 
+/// Foursquare can prepare records in memory and commit bounded database chunks.
+pub struct FoursquareImportOptions {
+    pub database_url: Option<String>,
+    pub limit: Option<u32>,
+    pub dry_run: bool,
+    pub dedupe: crate::dedupe::ImportOptions,
+}
+pub async fn import_foursquare_file(
+    input: std::path::PathBuf,
+    output: std::path::PathBuf,
+    region: String,
+    options: FoursquareImportOptions,
+) -> Result<Value> {
+    tokio::task::spawn_blocking(move || {
+        foursquare_file::import_file(&input, &output, &region, options)
+    })
+    .await?
+}
+
+/// Resume committed Foursquare chunks using the remaining sorted files only.
+pub async fn resume_foursquare_import(
+    checkpoint: std::path::PathBuf,
+    region: String,
+    options: FoursquareImportOptions,
+) -> Result<Value> {
+    tokio::task::spawn_blocking(move || {
+        foursquare_file::resume_import(&checkpoint, &region, options)
+    })
+    .await?
+}
+
 #[derive(Clone, Copy)]
 pub enum Source {
     MerchantStudio,

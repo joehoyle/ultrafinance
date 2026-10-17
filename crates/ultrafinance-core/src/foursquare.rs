@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 pub const URL: &str = "https://docs.foursquare.com/data-products/docs/places-os-data-schema";
 pub const CREDIT: &str = "Foursquare OS Places by Foursquare Labs, Inc.";
-pub const NOTICE: &str = include_str!("../../../data/foursquare/NOTICE.txt");
-pub const LICENSE: &str = include_str!("../../../data/foursquare/LICENSE.txt");
+pub const NOTICE: &str = include_str!("../data/foursquare/NOTICE.txt");
+pub const LICENSE: &str = include_str!("../data/foursquare/LICENSE.txt");
 
 // Foursquare's published non-commercial category exclusions. Unknown categories
 // remain eligible; category absence is not evidence that a place is commercial.
@@ -116,7 +116,8 @@ pub fn prepare(contents: &str, region: &str) -> Result<(Vec<SourceRecord>, usize
         }
         let country = row["country"].trim().to_ascii_uppercase();
         if !crate::markets::valid_country(&country) {
-            bail!("invalid Foursquare country for place {id}");
+            skipped += 1;
+            continue;
         }
         let categories = array(&row, "fsq_category_ids")?;
         let flags = array(&row, "unresolved_flags")?;
@@ -226,6 +227,12 @@ pub(crate) fn locations(record: &SourceRecord) -> Result<Vec<crate::location::Lo
         let name = text("name").unwrap_or_else(|| record.merchant.name.clone());
         // A bare brand name is insufficient evidence of this physical outlet.
         let alias = format!("{name} {address}");
+        // Nonblank upstream text can normalize to punctuation or a private-use
+        // symbol. Keep the merchant, but do not invent outlet matching evidence
+        // or reject an entire import chunk for an unusable generated alias.
+        if crate::store::normalize(&alias).chars().count() < 3 || alias.len() > 4096 {
+            continue;
+        }
         // Malformed optional geometry must not discard usable address evidence.
         let coordinate = |field: &str, max: f64| {
             place[field]

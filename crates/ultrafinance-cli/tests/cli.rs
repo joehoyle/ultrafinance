@@ -1139,6 +1139,45 @@ fn infra_cli_latest_is_documented_and_conflicts_with_explicit_image() {
 }
 
 #[test]
+fn infra_persistent_cli_flags_and_commands_are_documented_and_lifetime_is_bounded() {
+    let help = run(&["infra", "cli", "--help"], None);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(
+        text.contains("--persistent")
+            && text.contains("--lifetime-hours")
+            && text.contains("--snapshot")
+    );
+    for hours in ["0", "169"] {
+        let result = run(
+            &["infra", "cli", "--persistent", "--lifetime-hours", hours],
+            None,
+        );
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("invalid value"));
+    }
+    let result = run(&["infra", "cli", "--lifetime-hours", "72"], None);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--persistent"));
+    let list_help = run(&["infra", "cli-list", "--help"], None);
+    assert!(list_help.status.success());
+    assert!(String::from_utf8_lossy(&list_help.stdout).contains("session IDs"));
+    for command in ["cli-attach", "cli-stop"] {
+        let help = run(&["infra", command, "--help"], None);
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("SESSION_ID"));
+        if command == "cli-stop" {
+            let text = String::from_utf8_lossy(&help.stdout);
+            assert!(
+                text.contains("--save-data")
+                    && text.contains("--snapshot")
+                    && text.contains("--wait-hours")
+            );
+        }
+    }
+}
+
+#[test]
 fn dedupe_table_distinguishes_previews_merges_and_survivors() {
     let dir = std::env::temp_dir().join(format!(
         "ultrafinance-dedupe-table-{}",

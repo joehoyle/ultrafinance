@@ -14,6 +14,13 @@ OpenTofu loads it automatically. No wrapper or environment setup is required.
 The root `.env` supplies the local Rust CLI/API; OpenTofu uses
 `typesafe_api_key` in its own ignored variable file.
 
+`foursquare_token` is an optional sensitive Places Portal token in that private
+variable file. OpenTofu sets `ULTRAFINANCE_FOURSQUARE_TOKEN` alongside Lambda's
+other API keys. The same Foursquare and Jev keys are stored in Secrets Manager
+for injection into new CLI tasks; existing tasks retain their environment.
+Token values remain
+private in configuration/state and must never be printed in plans or logs.
+
 ## AWS login
 
 The local `joehoyle-tofu` profile delegates to the existing `joehoyle` AWS CLI
@@ -50,6 +57,13 @@ other existing application costs. A writer running continuously at 1 ACU
 costs $102.20/month for database compute alone. Rates can change; see
 [Aurora pricing](https://aws.amazon.com/rds/aurora/pricing/) and
 [VPC pricing](https://aws.amazon.com/vpc/pricing/).
+
+The current production private configuration overrides `aurora_max_acu` to 32
+for large imports, retaining `aurora_min_acu = 0` and five-minute auto-pause.
+The ceiling permits scaling under demand; it does not reserve 32 ACUs or
+guarantee import throughput. Database compute is billed at actual capacity.
+Reduce the production override after import work if a lower spending ceiling
+is preferred. This database capacity change does not require an image release.
 
 `aurora_min_acu = 0` enables auto-pause after five minutes without user
 connections. The app sets PostgreSQL's server-side `idle_session_timeout` to
@@ -95,21 +109,106 @@ security group, private subnets, and NAT gateway.
 
 Run `cargo run -- infra cli` in a terminal to launch the existing application
 image and open interactive Bash through ECS Exec, with an `ultrafinance` prompt
-showing the working directory. Install the AWS CLI and Session Manager
+showing the working directory. The image includes `tmux` and uses HTTPS APT
+sources for additional package installs. The default temporary mode stops the
+task when its CLI connection closes, even if tmux was started manually.
+Install the AWS CLI and Session Manager
 plugin locally first. The container runs a bounded sleep process with init
 process support while the Exec session is active. The runner waits for the
 ExecuteCommandAgent to be ready and stops the task when the session ends or
-fails. A task also exits after one hour, bounding costs after a lost connection.
+fails. A task also exits after 24 hours, bounding costs after a lost connection.
 During an active session, Ctrl-C is handled by ECS Exec so it can cancel remote
 commands. Use `exit` to close the shell and stop the task; Ctrl-C during startup
 still cancels the launch and cleans up any known task.
 Run `cargo run -- infra cli-cleanup` to stop leftover CLI tasks and wait for
 them to stop. This also closes any active production CLI shells.
 
+For long-running work, use a persistent tmux session:
+
+```sh
+cargo run -- infra cli --persistent
+# Optional: override the persistent mode's default 24-hour lifetime (1–168 hours).
+cargo run -- infra cli --persistent --lifetime-hours 72
+# List active session IDs, statuses, and start times:
+cargo run -- infra cli-list
+# Use the 32-character session ID printed at launch:
+cargo run -- infra cli-attach SESSION_ID
+cargo run -- infra cli-stop SESSION_ID
+```
+
+`cli-list` lists active tasks from the configured CLI task family, newest first,
+including tasks still starting. It shows the session ID, ECS status, start time
+(or creation time while starting), and task ID. It lists temporary and persistent
+sessions; `cli-attach` and `cli-stop` require a persistent session.
+
+Persistent mode starts or attaches to the `ultrafinance` tmux session automatically.
+Mouse mode is enabled in the image: use the scroll wheel to browse pane history
+and click to select panes. Press `q` to leave tmux's scroll/copy mode. The local CLI
+restores terminal settings and disables mouse reporting when ECS Exec returns,
+including after connection errors. If an older CLI leaves mouse coordinates
+appearing at your local prompt, press Ctrl-C and run:
+
+```sh
+printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l'
+```
+
+Detach with Ctrl-B then D. Detaching, closing the last shell, or losing the
+connection leaves the task and its scratch disk running. Reconnecting reaches
+the same task, files, and surviving tmux windows; it never launches another task
+or resets the lifetime. The launcher prints the session ID, reconnect/stop commands,
+and maximum lifetime before launch. `cli-stop` stops that session and waits for
+termination; the scratch disk is configured for deletion when the task stops.
+`cli-cleanup` stops all CLI tasks, including persistent ones. Task and disk charges
+continue while a persistent session runs, including while disconnected.
+
+To save files between tasks, finish any imports/downloads in every tmux window,
+run `sync` in the remote shell, then detach and use:
+
+```sh
+cargo run -- infra cli-stop SESSION_ID --save-data
+# Use the snapshot ID printed by the save command:
+cargo run -- infra cli --persistent --snapshot snap-0123456789abcdef0
+```
+
+`--save-data` finds that session's attached `/scratch` disk, creates an encrypted
+EBS snapshot, prints its ID and progress, and waits up to six hours for completion
+before requesting a stop. Snapshot errors, interrupted waits, or timeouts do not
+send a stop request; the task's existing expiry still applies. An interrupted
+snapshot may finish independently, so check its printed ID before retrying.
+To continue waiting on an existing snapshot without creating another one:
+
+```sh
+cargo run -- infra cli-stop SESSION_ID --save-data --snapshot SNAPSHOT_ID --wait-hours 6
+```
+
+The CLI checks that the snapshot came from this session's scratch disk before
+stopping; `--wait-hours` accepts 1–24 hours and defaults to six. Reusing a snapshot
+preserves only the files captured at its original creation time.
+
+Snapshots capture disk files at creation time, not running processes or tmux
+windows; writes made afterwards are not saved. Without finishing writes and
+running `sync` first, an attached-disk snapshot is only crash-consistent.
+
+Restoring creates a new disk from a completed snapshot in the configured AWS
+region, with at least the snapshot's original volume size, and uses the selected
+image (live by default). Finish saving well before the original task expires.
+Snapshots remain after task deletion and incur storage charges until explicitly
+deleted, for example with `aws ec2 delete-snapshot --snapshot-id SNAPSHOT_ID`
+using the configured profile and region. Neither `cli-stop` nor `cli-cleanup`
+deletes snapshots. Saving uses the local AWS profile's `ec2:CreateSnapshot`,
+`ec2:CreateTags`, and `ec2:DescribeSnapshots` permissions; it does not grant these
+to the container. Restoring also requires the ECS volume role to have access to
+the snapshot's encryption key (the current default EBS key is supported).
+
+Startup failures still clean up known tasks. Once ready, even failure of the first
+ECS Exec connection preserves the persistent task for a reconnect. The image must
+include tmux. Expiry or a task failure still ends its processes and deletes scratch
+files; persistent mode protects against client disconnection, not task failure.
+
 Set `database_url` in the private infrastructure variables to the TLS-enabled
 application URL used by Lambda. CLI tasks instead receive the administrator
 username and password directly from the RDS-managed secret using ECS JSON-key
-secret injection. The execution role can read only that administrator secret and
+secret injection. The execution role can read the administrator and shared API-key secrets and
 the application ECR repository; the task role retains only the ECS Exec channel
 permissions. Password rotation is picked up when a new task starts.
 
@@ -125,14 +224,16 @@ registers a temporary task definition revision for the session. Use
 select the highest published Lambda version, including one awaiting a database
 migration before promotion. Mutable `$LATEST` is excluded. `--image` selects a
 specific immutable digest and cannot be combined with `--latest`. The runner stops
-known tasks and deregisters their temporary revisions on exit. If launching
+known temporary tasks and deregisters temporary revisions on exit. Persistent
+tasks remain running even after their temporary revision is deregistered; ECS
+[continues existing tasks using inactive revisions](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeregisterTaskDefinition.html). If launching
 has an uncertain outcome, inspect ECS tasks using the printed session ID;
-the task's one-hour lifetime still applies. The filesystem is ephemeral.
+the task's configured lifetime still applies. Each session has 8 vCPUs, 32 GiB RAM, and a fresh encrypted 1 TiB gp3 EBS scratch disk mounted at `/scratch`. The shell starts there, so relative download and bundle paths use that disk. `TMPDIR=/scratch/tmp` also places download and sorting temporary files on it. `cli_scratch_gib` and `cli_lifetime_hours` can override the disk size and temporary-mode lifetime in the private variable file; persistent mode uses `--lifetime-hours` (default 24). The disk is deleted when the task stops; committed database imports persist. There are no disk or task compute charges between sessions. Size is conservative headroom, not a measured guarantee for future global exports. Check `df -h /scratch` during preparation.
 
 The operator's AWS profile needs `ecs:DescribeTaskDefinition`,
 `ecs:RegisterTaskDefinition`, `ecs:DeregisterTaskDefinition`, `ecs:RunTask`,
-`ecs:DescribeTasks`, `ecs:ExecuteCommand`, and `ecs:StopTask`, plus
-`iam:PassRole` for the two CLI roles, `lambda:GetFunction`, and
+`ecs:DescribeTasks`, `ecs:ListTasks`, `ecs:ExecuteCommand`, and `ecs:StopTask`, plus
+`iam:PassRole` for the execution, task, and ECS volume infrastructure roles, `lambda:GetFunction`, and
 `lambda:ListVersionsByFunction` for `--latest`. Tasks do not
 inherit the operator's credentials. Fargate compute is charged while the task runs; logs and the
 secret have their normal charges.

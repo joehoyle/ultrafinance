@@ -1,6 +1,20 @@
 services:
   postgres:
     image: postgres:17
+    # Disposable local development database: favor import speed over crash recovery.
+    # Set all three ULTRAFINANCE_POSTGRES_* switches to on for durable commits.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=4GB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - fsync=${ULTRAFINANCE_POSTGRES_FSYNC:-off}
+      - -c
+      - full_page_writes=${ULTRAFINANCE_POSTGRES_FULL_PAGE_WRITES:-off}
+      - -c
+      - synchronous_commit=${ULTRAFINANCE_POSTGRES_SYNCHRONOUS_COMMIT:-off}
     environment:
       POSTGRES_USER: ultrafinance
       POSTGRES_DB: ultrafinance

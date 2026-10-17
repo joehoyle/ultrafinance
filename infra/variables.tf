@@ -42,6 +42,12 @@ variable "typesafe_api_key" {
   sensitive = true
   default   = ""
 }
+variable "foursquare_token" {
+  description = "Places Portal token for authenticated Foursquare downloads."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
 variable "jev_model" {
   type    = string
   default = "jev-latest"
@@ -103,6 +109,26 @@ variable "enable_aurora" {
   description = "Provision private Aurora Serverless v2 and one managed NAT gateway. Set database_url after migration to attach Lambda."
   type        = bool
   default     = false
+}
+
+variable "cli_scratch_gib" {
+  description = "Encrypted gp3 scratch disk per CLI session; deleted when the task stops."
+  type        = number
+  default     = 1024
+  validation {
+    condition     = var.cli_scratch_gib >= 1 && var.cli_scratch_gib <= 16384 && floor(var.cli_scratch_gib) == var.cli_scratch_gib
+    error_message = "CLI scratch storage must be a whole number of GiB between 1 and 16384."
+  }
+}
+
+variable "cli_lifetime_hours" {
+  description = "Maximum CLI task lifetime; closing the shell still stops it immediately."
+  type        = number
+  default     = 24
+  validation {
+    condition     = var.cli_lifetime_hours >= 1 && var.cli_lifetime_hours <= 168 && floor(var.cli_lifetime_hours) == var.cli_lifetime_hours
+    error_message = "CLI lifetime must be a whole number of hours between 1 and 168."
+  }
 }
 
 variable "aurora_engine_version" {

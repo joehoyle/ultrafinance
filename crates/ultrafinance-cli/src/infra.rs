@@ -7,8 +7,11 @@ use std::{
 mod aws;
 mod cleanup;
 mod import_db;
+mod persistent;
 mod release;
+mod sessions;
 mod shell;
+mod terminal;
 
 #[derive(Args)]
 pub struct InfraArgs {
@@ -36,6 +39,32 @@ enum InfraCommand {
         /// Use the newest published Lambda version, even if it has not been promoted to live.
         #[arg(long)]
         latest: bool,
+        /// Keep the task and tmux session running after disconnecting.
+        #[arg(long)]
+        persistent: bool,
+        /// Persistent task lifetime from startup, in hours (default: 24).
+        #[arg(long, requires = "persistent", value_parser = clap::value_parser!(u32).range(1..=168))]
+        lifetime_hours: Option<u32>,
+        /// Restore scratch files from a completed EBS snapshot in this AWS region.
+        #[arg(long)]
+        snapshot: Option<String>,
+    },
+    /// Reconnect to an existing persistent CLI task and its tmux session.
+    CliAttach { session_id: String },
+    /// List active production CLI session IDs, statuses, and start times.
+    CliList,
+    /// Stop one persistent CLI task, optionally saving its scratch data first.
+    CliStop {
+        session_id: String,
+        /// Wait for a scratch disk snapshot to complete before stopping.
+        #[arg(long)]
+        save_data: bool,
+        /// Reuse an existing snapshot of this session's scratch disk.
+        #[arg(long, requires = "save_data")]
+        snapshot: Option<String>,
+        /// Maximum snapshot wait in hours (default: 6); does not extend task lifetime.
+        #[arg(long, requires = "save_data", value_parser = clap::value_parser!(u32).range(1..=24))]
+        wait_hours: Option<u32>,
     },
     /// Copy the full production database into the default local PostgreSQL database.
     ImportDb,
@@ -124,7 +153,13 @@ pub fn run(args: InfraArgs) -> Result<()> {
     let root = workspace(args.workspace)?;
     match args.command {
         InfraCommand::Deploy { image } => release::deploy(&root, image.as_deref()),
-        InfraCommand::Cli { image, latest } => {
+        InfraCommand::Cli {
+            image,
+            latest,
+            persistent,
+            lifetime_hours,
+            snapshot,
+        } => {
             let selection = if latest {
                 shell::ImageSelection::Latest
             } else {
@@ -132,8 +167,29 @@ pub fn run(args: InfraArgs) -> Result<()> {
                     .as_deref()
                     .map_or(shell::ImageSelection::Live, shell::ImageSelection::Digest)
             };
-            shell::open(&root, selection)
+            let mode = if persistent {
+                shell::SessionMode::Persistent {
+                    hours: lifetime_hours.unwrap_or(24),
+                }
+            } else {
+                shell::SessionMode::Temporary
+            };
+            shell::open(&root, selection, mode, snapshot.as_deref())
         }
+        InfraCommand::CliAttach { session_id } => persistent::attach(&root, &session_id),
+        InfraCommand::CliList => sessions::run(&root),
+        InfraCommand::CliStop {
+            session_id,
+            save_data,
+            snapshot,
+            wait_hours,
+        } => persistent::stop(
+            &root,
+            &session_id,
+            save_data,
+            snapshot.as_deref(),
+            wait_hours.unwrap_or(6),
+        ),
         InfraCommand::ImportDb => import_db::run(&root),
         InfraCommand::CliCleanup => cleanup::run(&root),
         InfraCommand::Logs { since, follow } => {

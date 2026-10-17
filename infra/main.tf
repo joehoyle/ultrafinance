@@ -65,7 +65,8 @@ resource "aws_lambda_function" "app" {
       TYPESAFE_API_KEY             = var.typesafe_api_key
       JEV_MODEL                    = var.jev_model
       ULTRAFINANCE_MATCH_THRESHOLD = tostring(var.match_threshold)
-    }, var.database_url == null ? {} : { ULTRAFINANCE_DATABASE_URL = var.database_url })
+      }, var.database_url == null ? {} : { ULTRAFINANCE_DATABASE_URL = var.database_url },
+    nonsensitive(var.foursquare_token != "") ? { ULTRAFINANCE_FOURSQUARE_TOKEN = var.foursquare_token } : {})
   }
   # Release tooling owns image updates; Tofu still owns runtime configuration.
   lifecycle {

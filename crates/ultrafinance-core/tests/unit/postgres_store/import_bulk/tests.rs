@@ -134,7 +134,7 @@ fn fresh_merchants_insert_final_fields_once_across_source_batches() -> Result<()
 }
 
 #[test]
-fn search_index_only_changes_when_searchable_names_change() -> Result<()> {
+fn search_and_alias_indexes_only_change_when_searchable_names_change() -> Result<()> {
     let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
         .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
     let store = PostgresStore::temporary(&base)?;
@@ -146,6 +146,7 @@ fn search_index_only_changes_when_searchable_names_change() -> Result<()> {
     store.reconcile_import(vec![record.clone()], false, 5000)?;
     store.run(|client| {
         client.batch_execute("CREATE TABLE search_writes(operation TEXT); CREATE FUNCTION record_search_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO search_writes VALUES(TG_OP); RETURN NEW; END $$; CREATE TRIGGER search_write AFTER INSERT OR UPDATE OR DELETE ON merchant_search FOR EACH ROW EXECUTE FUNCTION record_search_write()")?;
+        client.batch_execute("CREATE TABLE alias_writes(operation TEXT); CREATE FUNCTION record_alias_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO alias_writes VALUES(TG_OP); RETURN NULL; END $$; CREATE TRIGGER alias_write AFTER INSERT OR UPDATE OR DELETE ON aliases FOR EACH ROW EXECUTE FUNCTION record_alias_write()")?;
         Ok(())
     })?;
     // A changed source input rebuilds coverage/identity, but not unchanged search text.
@@ -161,6 +162,12 @@ fn search_index_only_changes_when_searchable_names_change() -> Result<()> {
         assert_eq!(
             client
                 .query_one("SELECT count(*) FROM search_writes", &[])?
+                .get::<_, i64>(0),
+            0
+        );
+        assert_eq!(
+            client
+                .query_one("SELECT count(*) FROM alias_writes", &[])?
                 .get::<_, i64>(0),
             0
         );
@@ -187,6 +194,12 @@ fn search_index_only_changes_when_searchable_names_change() -> Result<()> {
                 .get::<_, String>(0),
             "beta cafe"
         );
+        let operations: Vec<String> = client
+            .query("SELECT operation FROM alias_writes ORDER BY operation", &[])?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(operations, ["DELETE", "INSERT"]);
         Ok(())
     })?;
     Ok(())
@@ -224,5 +237,522 @@ fn later_search_batch_failure_rolls_back_source_copies_and_indexes() -> Result<(
         }
         Ok(())
     })?;
+    Ok(())
+}
+
+#[test]
+fn indexed_chunks_write_keys_once_and_still_repair_unchanged_sources() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    store.run(|client| {
+        client.batch_execute("CREATE TABLE key_attempts(merchant_id TEXT); CREATE FUNCTION record_key_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO key_attempts VALUES(NEW.merchant_id); RETURN NEW; END $$; CREATE TRIGGER key_attempt BEFORE INSERT ON merchant_identity_keys FOR EACH ROW EXECUTE FUNCTION record_key_attempt()")?;
+        Ok(())
+    })?;
+    let mut record: SourceRecord = serde_json::from_value(serde_json::json!({
+        "source":"key-attempt-test","external_id":"one",
+        "merchant":{"id":"input","name":"Alpha Café","markets":["CA"]},
+        "attribution":"test","license":"test","url":"https://example.test","raw":{}
+    }))?;
+    store.reconcile_import(vec![record.clone()], false, 5000)?;
+    let id = store.resolve_source("key-attempt-test", "one")?.unwrap();
+    store.run(|client| {
+        assert_eq!(
+            client
+                .query_one("SELECT count(*) FROM key_attempts", &[])?
+                .get::<_, i64>(0),
+            1
+        );
+        client.batch_execute("TRUNCATE key_attempts")?;
+        Ok(())
+    })?;
+    record.merchant.website = Some("https://alpha.example".into());
+    assert_eq!(
+        store
+            .reconcile_import(vec![record.clone()], false, 5000)?
+            .delta
+            .updated,
+        1
+    );
+    let expected = crate::dedupe::deterministic_key(&store.get(&id)?.unwrap()).unwrap();
+    let corrupt_id = id.clone();
+    store.run(move |client| {
+        assert_eq!(client.query_one("SELECT count(*) FROM key_attempts", &[])?.get::<_, i64>(0), 1);
+        client.execute("UPDATE merchant_identity_keys SET rule_name='obsolete',rule_host='obsolete' WHERE merchant_id=$1", &[&corrupt_id])?;
+        client.batch_execute("TRUNCATE key_attempts")?;
+        Ok(())
+    })?;
+    assert_eq!(
+        store
+            .reconcile_import(vec![record], false, 5000)?
+            .delta
+            .unchanged,
+        1
+    );
+    store.run(move |client| {
+        assert_eq!(
+            client
+                .query_one("SELECT count(*) FROM key_attempts", &[])?
+                .get::<_, i64>(0),
+            1
+        );
+        let row = client.query_one(
+            "SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=$1",
+            &[&id],
+        )?;
+        assert_eq!(row.get::<_, String>(0), expected.0);
+        assert_eq!(row.get::<_, String>(1), expected.1.unwrap_or_default());
+        Ok(())
+    })
+}
+
+#[test]
+fn changed_existing_identity_is_indexed_before_matching_fresh_sources() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let mut existing: SourceRecord = serde_json::from_value(serde_json::json!({
+        "source":"refresh-match-test","external_id":"old",
+        "merchant":{"id":"old-input","name":"Old Name","website":"https://old.example","markets":["CA"]},
+        "attribution":"test","license":"test","url":"https://example.test","raw":{}
+    }))?;
+    store.reconcile_import(vec![existing.clone()], false, 5000)?;
+    let id = store.resolve_source("refresh-match-test", "old")?.unwrap();
+    existing.merchant.name = "New Brand".into();
+    existing.merchant.website = Some("https://brand.example".into());
+    let mut fresh = existing.clone();
+    fresh.external_id = "fresh".into();
+    fresh.merchant.id = "fresh-input".into();
+    fresh.merchant.markets = vec!["US".into()];
+    let result = store.reconcile_import(vec![existing, fresh], false, 5000)?;
+    assert_eq!(result.delta.updated, 1);
+    assert_eq!(result.delta.added, 1);
+    assert_eq!(
+        store.resolve_source("refresh-match-test", "fresh")?,
+        Some(id.clone())
+    );
+    assert_eq!(store.stats()?.total, 1);
+    let merchant = store.get(&id)?.unwrap();
+    assert_eq!(merchant.name, "New Brand");
+    assert_eq!(merchant.markets, vec!["CA", "US"]);
+    Ok(())
+}
+
+#[test]
+fn append_only_place_reuse_requires_identical_canonical_evidence() -> Result<()> {
+    let record: SourceRecord = serde_json::from_value(serde_json::json!({
+        "source":"foursquare", "external_id":"place:two",
+        "merchant":{"id":"input", "name":"Alpha", "markets":["CA"],
+            "website":"https://alpha.test", "aliases":["Alpha"], "sources":["https://source.test"]},
+        "attribution":"test", "license":"test", "url":"https://source.test", "raw":{}
+    }))?;
+    let mut merchant = record.merchant.clone();
+    merchant.id = "canonical".into();
+    assert!(redundant_place_evidence(&merchant, &record));
+    // A new source sorting first still fills a missing website from retained evidence.
+    let mut without_site = record.clone();
+    without_site.merchant.website = None;
+    assert!(redundant_place_evidence(&merchant, &without_site));
+    let mut cases = Vec::new();
+    let mut changed = record.clone();
+    changed.merchant.name = "Other".into();
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.merchant.website = Some("https://other.test".into());
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.merchant.aliases.push("NEW ALIAS".into());
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.merchant.markets.push("US".into());
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.raw = serde_json::json!({"countryHints":["US"]});
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.raw = serde_json::json!({"places":[{"country":"US"}]});
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.url = "https://new-source.test".into();
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.source = "other".into();
+    cases.push(changed);
+    let mut changed = record.clone();
+    changed.merchant.logo_url = Some("https://alpha.test/logo.png".into());
+    cases.push(changed);
+    for changed in cases {
+        assert!(
+            !redundant_place_evidence(&merchant, &changed),
+            "{changed:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn append_only_place_reuse_matches_full_rebuild_and_refresh() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let optimized = PostgresStore::temporary(&base)?;
+    let reference = PostgresStore::temporary(&base)?;
+    let make =
+        |external: &str, name: &str, country: &str, site: Option<&str>| -> Result<SourceRecord> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "source":"foursquare", "external_id":external,
+                "merchant":{"id":external, "name":name, "markets":[country],"website":site},
+                "attribution":"test", "license":"test", "url":"https://source.test", "raw":{}
+            }))?)
+        };
+    let seed = make("middle", "Alpha", "CA", Some("https://alpha.test"))?;
+    let mut case_only = make("z1-case", "Alpha", "CA", None)?;
+    case_only.merchant.aliases = vec!["ALPHA".into()];
+    let chunks = vec![
+        (vec![seed], false),
+        (
+            vec![make("z1", "Alpha", "CA", Some("https://alpha.test"))?],
+            true,
+        ),
+        (vec![make("a0", "Alpha", "CA", None)?], true),
+        (vec![case_only], true),
+        // One novel contribution must invalidate reuse for this entire merchant.
+        (
+            vec![
+                make("z2", "Alpha", "CA", None)?,
+                make("z3", "Alpha", "US", None)?,
+            ],
+            true,
+        ),
+        // Earlier sources can change the canonical name and first website.
+        (
+            vec![make("000", "New name", "CA", Some("https://new.test"))?],
+            true,
+        ),
+        // Replacements must always rebuild, including removal of country evidence.
+        (vec![make("z3", "Alpha", "CA", None)?], false),
+    ];
+    for (step, (records, append)) in chunks.into_iter().enumerate() {
+        if matches!(step, 1..=3) {
+            optimized.run(|client| {
+                client.batch_execute("CREATE FUNCTION reject_redundant_index_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unchanged canonical fields must retain search and aliases'; END $$; CREATE TRIGGER no_alias_refresh BEFORE INSERT OR UPDATE OR DELETE ON aliases FOR EACH ROW EXECUTE FUNCTION reject_redundant_index_write(); CREATE TRIGGER no_search_refresh BEFORE INSERT OR UPDATE OR DELETE ON merchant_search FOR EACH ROW EXECUTE FUNCTION reject_redundant_index_write()")?;
+                Ok(())
+            })?;
+        }
+        for (store, fast) in [(&optimized, append), (&reference, false)] {
+            let baseline = store.dedupe_snapshot()?;
+            let records = records.clone();
+            let identities = vec!["canonical".to_owned(); records.len()];
+            store.run(move |client| {
+                let mut tx = client.transaction()?;
+                if fast {
+                    import_new_sources(&mut tx, &records, &identities, &baseline)?;
+                } else {
+                    import(&mut tx, &records, &identities, &baseline)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })?;
+        }
+        if matches!(step, 1..=3) {
+            optimized.run(|client| {
+                client.batch_execute("DROP TRIGGER no_alias_refresh ON aliases; DROP TRIGGER no_search_refresh ON merchant_search; DROP FUNCTION reject_redundant_index_write()")?;
+                Ok(())
+            })?;
+        }
+        assert_eq!(
+            serde_json::to_value(optimized.get("canonical")?.unwrap())?,
+            serde_json::to_value(reference.get("canonical")?.unwrap())?
+        );
+        for table in [
+            "aliases",
+            "merchant_search",
+            "merchant_identity_keys",
+            "source_records",
+        ] {
+            let read = |store: &PostgresStore| -> Result<Vec<String>> {
+                let sql = format!("SELECT row_to_json(t)::text FROM {table} t ORDER BY 1");
+                store.run(move |client| {
+                    Ok(client.query(&sql, &[])?.iter().map(|r| r.get(0)).collect())
+                })
+            };
+            assert_eq!(read(&optimized)?, read(&reference)?, "{table}");
+        }
+    }
+    assert_eq!(optimized.get("canonical")?.unwrap().markets, ["CA"]);
+    Ok(())
+}
+
+#[test]
+fn repaired_existing_keys_still_merge_with_new_only_buckets() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let record: SourceRecord = serde_json::from_value(serde_json::json!({
+        "source":"bucket-test", "external_id":"existing",
+        "merchant":{"id":"input", "name":"Alpha Café"},
+        "attribution":"test", "license":"test", "url":"https://source.test", "raw":{}
+    }))?;
+    store.reconcile_import(vec![record.clone()], false, 5000)?;
+    store.run(|client| {
+        client.batch_execute(
+            "UPDATE merchant_identity_keys SET rule_name='obsolete',rule_host='obsolete'",
+        )?;
+        Ok(())
+    })?;
+    let mut fresh = record.clone();
+    fresh.external_id = "new".into();
+    let report = store.reconcile_import(vec![record, fresh], false, 5000)?;
+    assert!(report.dedupe.candidates > 0);
+    assert_eq!(store.stats()?.total, 1);
+    assert_eq!(
+        store.resolve_source("bucket-test", "existing")?,
+        store.resolve_source("bucket-test", "new")?
+    );
+    Ok(())
+}
+
+#[test]
+fn fresh_sources_still_consolidate_legacy_duplicate_buckets() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let make = |external: &str| -> SourceRecord {
+        serde_json::from_value(serde_json::json!({
+            "source":"legacy-bucket-test", "external_id":external,
+            "merchant":{"id":external, "name":"Alpha Café"},
+            "attribution":"test", "license":"test", "url":"https://source.test", "raw":{}
+        }))
+        .unwrap()
+    };
+    let records = vec![make("one"), make("two")];
+    let baseline = store.dedupe_snapshot()?;
+    store.run(move |client| {
+        let mut tx = client.transaction()?;
+        import(
+            &mut tx,
+            &records,
+            &["legacy-one".into(), "legacy-two".into()],
+            &baseline,
+        )?;
+        tx.commit()?;
+        Ok(())
+    })?;
+    assert_eq!(store.stats()?.total, 2);
+    let report = store.reconcile_import(vec![make("three")], false, 5000)?;
+    assert!(report.dedupe.candidates > 0);
+    assert_eq!(store.stats()?.total, 1);
+    let id = store.resolve_source("legacy-bucket-test", "one")?;
+    assert_eq!(id, store.resolve_source("legacy-bucket-test", "two")?);
+    assert_eq!(id, store.resolve_source("legacy-bucket-test", "three")?);
+    Ok(())
+}
+
+#[test]
+fn new_only_buckets_still_respect_multiple_manual_anchors() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let make = |external: &str| -> SourceRecord {
+        serde_json::from_value(serde_json::json!({
+            "source":"manual-veto-test", "external_id":external,
+            "merchant":{"id":external, "name":"Alpha Café"},
+            "attribution":"test", "license":"test", "url":"https://source.test", "raw":{}
+        }))
+        .unwrap()
+    };
+    for id in ["manual-one", "manual-two"] {
+        store.put(&make(id).merchant)?;
+    }
+    let report = store.reconcile_import(vec![make("one"), make("two")], false, 5000)?;
+    assert_eq!(report.dedupe.candidates, 0);
+    assert_eq!(store.stats()?.total, 4);
+    assert_ne!(
+        store.resolve_source("manual-veto-test", "one")?,
+        store.resolve_source("manual-veto-test", "two")?
+    );
+    // Revisiting this now-established bucket must retain the same veto.
+    store.reconcile_import(vec![make("one")], false, 5000)?;
+    assert_eq!(store.stats()?.total, 4);
+    Ok(())
+}
+
+#[test]
+fn ordered_foursquare_append_matches_full_rebuild_for_novel_evidence() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let optimized = PostgresStore::temporary(&base)?;
+    let reference = PostgresStore::temporary(&base)?;
+    let make = |external: &str, name: &str, country: &str, site: Option<&str>| -> SourceRecord {
+        serde_json::from_value(serde_json::json!({
+            "source":"foursquare", "external_id":external,
+            "merchant":{"id":external,"name":name,"markets":[country],"website":site},
+            "attribution":"test","license":"test","url":format!("https://source.test/{external}"),"raw":{}
+        })).unwrap()
+    };
+    let mut first_new = make("z10", "Another name", "CA", Some("https://first-new.test"));
+    first_new.merchant.aliases = vec!["NEW ALIAS".into()];
+    first_new.merchant.logo_url = Some("https://first-new.test/logo.png".into());
+    first_new.merchant.logo_source = Some("first-new".into());
+    first_new.raw = serde_json::json!({"countryHints":["GB"]});
+    let mut replacement = first_new.clone();
+    replacement.merchant.website = Some("https://refreshed.test".into());
+    replacement.merchant.logo_url = None;
+    replacement.merchant.logo_source = None;
+    replacement.raw = serde_json::json!({});
+    let mut other_source = make("other-existing", "Original name", "CA", None);
+    other_source.source = "aaa-other-source".into();
+    let chunks = vec![
+        (
+            vec![
+                other_source,
+                make("m00", "Original name", "CA", None),
+                make(
+                    "zzzz",
+                    "Existing later source",
+                    "CA",
+                    Some("https://old-tail.test"),
+                ),
+            ],
+            false,
+        ),
+        // Deliberately reversed: PostgreSQL source order must choose z10's website/logo.
+        (
+            vec![
+                make("z20", "Other name", "US", Some("https://later.test")),
+                first_new,
+            ],
+            true,
+        ),
+        (
+            vec![
+                make("zz10", "Yet more aliases", "IT", None),
+                make("zz00", "More aliases", "DE", Some("https://another.test")),
+            ],
+            true,
+        ),
+        (vec![replacement], false),
+        // An earlier new identity must fall back and change canonical precedence.
+        (
+            vec![make(
+                "a00",
+                "Earlier name",
+                "FR",
+                Some("https://earlier.test"),
+            )],
+            true,
+        ),
+        (vec![make("zz20", "Last name", "JP", None)], true),
+    ];
+    for (step, (records, append)) in chunks.into_iter().enumerate() {
+        for (store, fast) in [(&optimized, append), (&reference, false)] {
+            let baseline = store.dedupe_snapshot()?;
+            let records = records.clone();
+            store.run(move |client| {
+                let mut tx = client.transaction()?;
+                if fast && step == 1 {
+                    let canonical = baseline
+                        .merchants
+                        .iter()
+                        .map(|m| (m.id.as_str(), m))
+                        .collect();
+                    // The retained website sorts later: a new earlier website
+                    // can replace it, so preserving that canonical value is unsafe.
+                    assert!(ordered_foursquare_append(&mut tx, &records, &canonical)?.is_none());
+                }
+                if fast && step == 2 {
+                    let canonical = baseline
+                        .merchants
+                        .iter()
+                        .map(|m| (m.id.as_str(), m))
+                        .collect();
+                    assert_eq!(
+                        ordered_foursquare_append(&mut tx, &records, &canonical)?.map(|v| v.order),
+                        Some(vec![1, 0])
+                    );
+                }
+                let identities = vec!["canonical".into(); records.len()];
+                if fast {
+                    import_new_sources(&mut tx, &records, &identities, &baseline)?;
+                } else {
+                    import(&mut tx, &records, &identities, &baseline)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })?;
+        }
+        assert_eq!(
+            serde_json::to_value(optimized.get("canonical")?.unwrap())?,
+            serde_json::to_value(reference.get("canonical")?.unwrap())?,
+            "step {step}"
+        );
+        for table in [
+            "aliases",
+            "merchant_search",
+            "merchant_identity_keys",
+            "source_records",
+        ] {
+            let read = |store: &PostgresStore| -> Result<Vec<String>> {
+                let sql = format!("SELECT row_to_json(t)::text FROM {table} t ORDER BY 1");
+                store.run(move |client| {
+                    Ok(client.query(&sql, &[])?.iter().map(|r| r.get(0)).collect())
+                })
+            };
+            assert_eq!(read(&optimized)?, read(&reference)?, "step {step}: {table}");
+        }
+        if step == 1 {
+            let m = optimized.get("canonical")?.unwrap();
+            assert_eq!(m.name, "Original name");
+            assert_eq!(m.website.as_deref(), Some("https://first-new.test"));
+            assert_eq!(m.logo_source.as_deref(), Some("first-new"));
+            assert_eq!(m.markets, ["CA", "GB", "US"]);
+        }
+    }
+    // The retained aaa-other-source still precedes every Foursquare source.
+    assert_eq!(optimized.get("canonical")?.unwrap().name, "Original name");
+    Ok(())
+}
+
+#[test]
+fn ordered_foursquare_append_limits_manual_veto_to_the_target_merchant() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let make = |source: &str, external: &str| -> SourceRecord {
+        serde_json::from_value(serde_json::json!({
+            "source":source,"external_id":external,
+            "merchant":{"id":external,"name":format!("Brand {external}")},
+            "attribution":"test","license":"test","url":"https://source.test","raw":{}
+        }))
+        .unwrap()
+    };
+    for kind in ["manual", "aaa-other-source", "zzz-other-source"] {
+        let store = PostgresStore::temporary(&base)?;
+        store.reconcile_import(vec![make("foursquare", "middle")], false, 5000)?;
+        let pending = vec![make("foursquare", "zz-new")];
+        let probe = |store: &PostgresStore, records: Vec<SourceRecord>| -> Result<bool> {
+            let baseline = store.dedupe_snapshot()?;
+            store.run(move |client| {
+                let mut tx = client.transaction()?;
+                let canonical = baseline
+                    .merchants
+                    .iter()
+                    .map(|m| (m.id.as_str(), m))
+                    .collect();
+                Ok(ordered_foursquare_append(&mut tx, &records, &canonical)?.is_some())
+            })
+        };
+        assert!(probe(&store, pending.clone())?);
+        assert!(!probe(&store, vec![make("foursquare", "a-earlier")])?);
+        assert!(!probe(&store, vec![make("other", "zz-new")])?);
+        if kind == "manual" {
+            let id = store.resolve_source("foursquare", "middle")?.unwrap();
+            let mut manual = store.get(&id)?.unwrap();
+            manual.name = "Manual name".into();
+            store.put(&manual)?;
+            assert!(!probe(&store, pending)?);
+        } else {
+            store.reconcile_import(vec![make(kind, "other-existing")], false, 5000)?;
+            assert!(probe(&store, pending)?);
+        }
+    }
     Ok(())
 }

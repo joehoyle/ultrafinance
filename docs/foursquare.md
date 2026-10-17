@@ -30,6 +30,11 @@ brew install duckdb
 duckdb --version
 ```
 
+The application Docker image includes a pinned ARM64 DuckDB CLI and the signed
+`httpfs` and `iceberg` extensions, so production CLI tasks do not need to install
+them through the VPC. Images built before this support need a new build or a
+temporary manual installation.
+
 DuckDB must be on your `PATH`, or configured through `--duckdb-cli` or
 `ULTRAFINANCE_DUCKDB_CLI`. It is required for `sources download foursquare` and
 `sources import foursquare` when fetching fresh data. Imports using `--offline`
@@ -58,23 +63,157 @@ downloaded places to a positive integer, ordered by place ID. Metadata records
 the country and whether a cap was requested. There is no fixed export size or
 time limit. The importer further excludes unsuitable rows.
 
-Downloads retain DuckDB's CSV on disk. Preparation reads CSV incrementally and sorts 5,000-row runs on disk, merging
-at most 64 runs at once. Applying knowledge streams chunks of 5,000 source
-records by default. `--chunk-size 10000` changes the import bound (positive values
-only); larger chunks use more memory. For example:
+Downloads retain DuckDB's CSV on disk. Foursquare import sorts 5,000-row runs
+on disk and merges at most 64 runs at once. The final merge produces ordered
+parts of at most 100,000 CSV rows. A streaming pass validates duplicates and
+counts eligible places, without writing prepared records. Import then converts
+sorted rows into source records in memory and reconciles them directly into
+PostgreSQL. **No `knowledge.json` or prepared JSON bundle is created by Foursquare
+import, including `--dry-run` and `--dedupe-dry-run`.**
+
+Database imports commit independent chunks of at most 5,000 source records by
+default. `--chunk-size 10000` changes this bound; larger chunks use more memory.
+Each chunk includes merchant reconciliation, source deltas, outlets and indexes
+in one transaction. An error rolls back the current chunk, while earlier chunks
+remain committed. The importer avoids counting the whole merchant catalog on
+every chunk. New merchants reuse the canonical fields computed from the
+incoming records when building aliases, search rows and identity keys, avoiding
+a readback of their newly inserted source rows. Established merchants still
+rebuild from retained source evidence and outlet countries. Keys rebuilt during
+bulk writes are not refreshed again at the end of the same chunk; unchanged
+sources still receive the final key refresh so rule changes can take effect.
+Alias refreshes retain unchanged names instead of deleting and reinserting them.
+When newly added Foursquare sources repeat an established merchant's exact name,
+existing website/logo and already-known aliases, provenance and countries, the
+importer reuses its canonical fields and alias/search rows instead of rereading
+its source/outlet history or refreshing those indexes. Identity rule keys still
+refresh. Every incoming record for that merchant must qualify. Source replacements
+rebuild from retained inputs; source and outlet records are always written normally.
+For newly added Foursquare sources, the importer also checks each established
+merchant without a manual override for retained Foursquare evidence that sorts
+before this batch, including a website/logo when its canonical fields contain
+them. A bounded index probe establishes first-source precedence even when later
+IDs already exist elsewhere. Qualifying merchants combine new aliases,
+provenance and countries in PostgreSQL source order without reading their full
+source/outlet history. Canonical changes stay in the same chunk transaction.
+Append-only alias updates compare normalized names, retain existing index rows
+and submit only new normalized aliases. Variants that normalize identically
+do not rewrite alias or search rows.
+Merchants without this proof, manually overridden merchants and source replacements
+retain the full rebuild path. Identical-evidence reuse remains available when
+the ordering proof fails.
+New merchant buckets are matched and grouped before insertion. The final
+duplicate-bucket reconciliation checks established merchants, including repaired
+keys and legacy duplicates, rather than probing every new identity a second time.
+Only targets found in the stored identity index are read back from the merchant
+table; new UUIDs do not incur primary-key lookups before insertion.
+Import transactions use 64 MiB of PostgreSQL `work_mem` per sort/hash operation
+to reduce disk spills; this setting ends with the transaction. Concurrent
+operations and parallel query workers can each use this allowance.
+
+Crash-safe resume requires durable PostgreSQL commits. The local Compose database
+defaults to disposable development mode (`fsync=off`, `full_page_writes=off`,
+`synchronous_commit=off`) for import throughput. Graceful interruption can resume,
+but after a host/VM crash the database may be corrupt or behind the on-disk cursor.
+Rebuild and re-import from source with a fresh checkpoint in that case; the
+remaining merge files cannot recover already-deleted chunks. Use durable database
+settings when this recovery trade-off is unacceptable.
+
+
+A small checkpoint under `--output` (default `data/datasets/foursquare/*.streaming`)
+records the database target, input fingerprint, completed chunks, sorted-file byte
+offset, and the previous row for duplicate validation. After an error or
+interruption, rerun the same command with the same input, region, output directory
+and database:
+
+```sh
+cargo run -- sources import --offline foursquare
+```
+
+If the original CSV/download cache has been deleted after application began,
+resume directly from the checkpoint directory (or its `checkpoint.json` file):
+
+```sh
+cargo run -- sources import foursquare --region global \
+  --resume data/datasets/foursquare/NAME.streaming --chunk-size 100000
+```
+
+This mode needs no download, token, DuckDB, or CSV fingerprint pass. It requires
+completed sorting and validation plus an application checkpoint matching the
+region, adapter version, and database target. All remaining sorted files must
+exist. The saved cursor and duplicate boundary are retained, and a completed
+checkpoint is a no-op rather than a fresh refresh pass. `--resume` cannot be used
+with `--input`, `--offline`, `--examples`, or either dry-run mode; consumed rows
+are not available for a fresh preview. Use the normal input-based command for
+new snapshots or full refreshes.
+
+The CSV is hashed again, but completed sorting and application are reused. The
+cursor advances only after a chunk commits. If the commit succeeds but saving
+the cursor fails, the next run replays that chunk through delta reconciliation.
+Completed sorted parts are deleted only after the database reports a successful
+commit and the saved cursor is flushed to disk.
+An unfinished part remains, and resume seeks directly to its saved byte offset.
+The original cached CSV is preserved. Once an import completes, a new invocation
+starts a fresh delta/refresh pass from the CSV.
+
+`--limit` is the cumulative number of source records selected for that import;
+rerunning the same limit adds no further records. Increase or remove the limit
+to continue from the saved offset. Reports include `resume.previously_committed`,
+`resume.committed_this_run`, and completion status; `delta` covers this invocation.
+A checkpoint rejects a different database target. Use a separate `--output`
+directory to import the same snapshot into another database.
+
+Plain `--dry-run` validates and counts without connecting to PostgreSQL.
+`--dedupe-dry-run` streams reconciliation through one rollback-only transaction
+so matches across chunks are previewed accurately. Both keep sorted data in a
+separate `*.preview` directory and do not advance an applied import's cursor.
+The report's `bundle` is null; `checkpoint` identifies the working directory.
+License and notice files remain beside the checkpoint.
+
+Sorting can replay up to 64 unsaved runs (320,000 rows). Checkpoints survive
+process exit, but not deletion of their output disk or an ephemeral CLI task's
+scratch volume. Imports failed using the older importer cannot recover its
+deleted temporary work; their CSV can still be reused with `--offline`.
+
+Disk space is required for the original CSV, sorted runs, and PostgreSQL storage.
+Merge replacement files temporarily overlap their inputs. Use
+`--output /path/on/larger/disk` for working files on another disk. The large
+expanded prepared JSON copy is no longer part of the import's space requirement.
+
+Uncapped downloads stream without a global SQL sort; capped downloads still
+order by place ID to select a stable subset. Preparation supplies deterministic
+place ordering and duplicate validation in both cases. DuckDB spill files use
+the export's temporary directory, which follows `TMPDIR`. Its memory budget
+defaults to half the detected Linux container limit, or 4 GiB when no bounded
+container limit is detected. Set `ULTRAFINANCE_DUCKDB_MEMORY_LIMIT` to a DuckDB
+memory size such as `16GiB` to override the budget.
+
+For example:
 
 ```sh
 cargo run -- sources import foursquare --region ca --offline --chunk-size 10000
 ```
 
 Each chunk is reconciled against the database identity index; it never loads the merchant catalog.
-Disk space is still required for downloads, sorting and prepared bundles.
+Disk space is still required for downloads, sorting and database storage.
 Use `--foursquare-limit` for smaller trials. Limited exports have incomplete
 place coverage, so heed the refresh limitations below. Manually exported CSVs
 remain supported through `--input`. Cached downloads work without a token or
 DuckDB using `--offline`.
 The separate `--limit` flag caps records reconciled into the database,
 not places downloaded.
+
+Downloads first count the open places selected by the region and optional
+download cap, then show CSV records written against that total, percentage,
+CSV size, and elapsed time on stderr. Counting handles quoted multiline fields
+and excludes the CSV header. A startup indicator remains visible while the
+catalog and count are loading. Terminal output updates one line; redirected
+logs receive summaries every five seconds. A final CSV scan can briefly show
+`Checking CSV` after DuckDB finishes. `Export complete` marks the end of the
+DuckDB phase; saving, validating and hashing the cached CSV each report their
+own byte progress afterwards. `snapshot saved` confirms the download cache
+and latest pointer are ready. Engine output remains suppressed to
+protect credentials. No percentage is shown until the selected total is known.
 
 Required columns are `fsq_place_id`, `name`, `country`, `fsq_category_ids`, and
 `date_closed`. Array columns must contain JSON arrays of strings (configure the
@@ -83,7 +222,7 @@ Optional fields include `website`, `unresolved_flags`, `fsq_category_labels`,
 address/geography and source refresh dates. Only absolute HTTP(S) URLs without
 credentials are used as merchant websites. Invalid upstream websites are omitted
 from merchant fields, with the original value and validation marker retained in
-the prepared bundle; they do not reject the merchant or abort the import.
+the in-memory place evidence; they do not reject the merchant or abort the import.
 See the [source schema](https://docs.foursquare.com/data-products/docs/places-os-data-schema).
 
 Rows marked closed, rows with known disqualifying quality flags, uncategorized
@@ -92,6 +231,12 @@ Names that normalize to empty (for example, punctuation or symbols only) are als
 skipped and counted. Foursquare adapter version 5 rebuilds prepared bundles
 without manual brand mappings while retaining older bundles intact.
 Country filtering is optional. Missing category data is not treated as commercial.
+Places with missing or malformed country codes are skipped and
+included in `skipped_places`; one such place does not abort preparation of the
+remaining dataset.
+Place names and addresses that cannot form an outlet alias of at least three
+normalized characters do not create an outlet. The merchant source record and
+original place evidence remain eligible; one weak alias does not abort a chunk.
 Duplicate identical place rows are skipped; conflicting rows with one ID fail.
 Historical transactions at closed businesses need a separately designed policy.
 
@@ -101,7 +246,7 @@ cargo run -- sources import foursquare --input places-ca.csv --region ca \
 ```
 
 The report contains retained place counts, skipped place counts, merchant record
-counts and a bundle path. Its empty transaction sample files do not constitute an accuracy benchmark.
+counts and a checkpoint path. Foursquare supplies no transaction accuracy benchmark.
 
 ## Automatic identity reconciliation
 
@@ -128,7 +273,7 @@ identities are retained. A shared website alone does not trigger an automatic me
 ```sh
 # Applies merchant knowledge to the configured database.
 cargo run -- sources import foursquare --region ca --offline
-# Reconcile at most 1,000 prepared merchant source records.
+# Commit up to the first 1,000 eligible source records.
 cargo run -- sources import foursquare --region ca --offline --limit 1000
 # Inspect retained merchant inputs and source metadata.
 cargo run -- sources records foursquare --external-id place:FSQ_ID
@@ -142,18 +287,23 @@ precedence over new IDs; conflicting manual identities remain separate.
 
 Import requires no provider credentials. `--dedupe-dry-run` previews deterministic
 decisions against the database without applying records or merges. Plain
-`--dry-run` still only prepares the bundle and needs neither a database nor Jev.
+`--dry-run` validates and counts sorted places and needs neither a database nor Jev.
 Competing writers are serialized for the import transaction. Each chunk checks
 existing indexed merchant identities and groups its own incoming duplicates.
 Later chunks reuse earlier matches. A preview runs this same pipeline and rolls
-back. Duplicate source keys or malformed JSON discovered late also roll back
-every earlier chunk. Reconciliation details returned in JSON are capped at
+back. Foursquare validates duplicate CSV identities before applying any database chunks.
+A later database failure preserves its already committed chunks. Other source
+imports using prepared bundles retain whole-import atomic transactions. Reconciliation details returned in JSON are capped at
 5,000 records/decisions with `details_truncated`; total counts remain complete,
 and merge decisions are not persisted in the database.
-Import progress on stderr starts with an exact count of the prepared bundle
+Foursquare progress tracks sorted CSV rows and committed source counts.
+Other sources start with an exact count of the prepared bundle
 and the selected total after `--limit`. Counting uses a bounded streaming pass
-before opening the database write transaction, so edited bundles are counted
-correctly. During application, one terminal line tracks progress across all
+before dispatching database work, so edited bundles are counted correctly and
+long reads do not hold an acquired database connection. The database worker
+checks its connection after counting and reconnects if PostgreSQL expired it;
+database write jobs are not retried inside the worker; Foursquare cursor recovery
+explicitly replays unacknowledged chunks through delta reconciliation. During application, one terminal line tracks progress across all
 selected source records, elapsed time, average rate, estimated time remaining,
 and cumulative locations submitted for upsert. The current stage updates this
 same line; chunk percentages and per-chunk summaries are hidden. Redirected
@@ -166,14 +316,38 @@ the transaction has committed. Preparation uses separate phase progress before
 application starts.
 
 Source writes and merchant/search rebuilding use binary COPY and set-based SQL
-in batches of 5,000, within one atomic transaction. Merchants store their operating
+in batches of 5,000, within each import transaction. Merchants store their operating
 countries directly in `markets`; imports do not write or reconcile separate
 country-evidence records. Search rows and identity keys update only when their
 indexed values change. New merchants skip deletion of old alias rows.
 
 Evidence removal changes the fresh schema only; no upgrade migration is provided.
-Recreate an existing database to use this layout. Batches do not commit partial
-imports, and a failure rolls back the entire import.
+Recreate an existing database to use this layout. Foursquare chunks commit independently and resume from their saved sorted-file
+offset; other source imports remain atomic.
+
+## Production sizing benchmark
+
+On 2026-10-13, the production CLI was sized to 8 ARM64 vCPUs, 32 GiB RAM,
+and a fresh encrypted 1 TiB gp3 scratch disk. The shell starts in `/scratch`;
+temporary files use `/scratch/tmp`. The disk is deleted when the task stops.
+The default 24-hour lifetime is a hard stop, not an estimated import duration.
+
+The read-only Foursquare catalog contained 101,805,864 open places. A global
+export capped at 100,000 places downloaded and prepared in 30 seconds, retained
+86,893 records, and used about 111 MiB for the cached CSV and prepared bundle.
+A production reconciliation preview of 10,000 retained records took 161 seconds
+including connection/counting overhead (142 seconds in the application progress
+timer). It completed with rollback and no committed catalog changes. A larger
+preview was cancelled after this result, also without committing.
+
+Applying the sample retention fraction suggests roughly 88 million records;
+linear extrapolation from the preview gives about 15–16 days on the current
+database/import pipeline, well beyond the CLI lifetime. This is a single sample,
+not a reliable full-run forecast: existing identities, catalog growth, caching,
+database I/O, and transaction commit costs can change the rate. The current
+Aurora capacity ceiling is 1 ACU. Database work dominated the preview; increasing
+CLI cores alone does not resolve it. Rebenchmark after tuning the database and
+import pipeline before starting a global production import.
 
 ## Attribution
 
@@ -181,5 +355,5 @@ Prepared bundles include `LICENSE.txt` and `NOTICE.txt`, preserving Foursquare's
 notice and describing our transformations. When serving Foursquare-derived data,
 include the notice prominently in developer documentation as described by
 [Foursquare](https://opensource.foursquare.com/places-notice-txt/). The bundled
-notice is also available at [../data/foursquare/NOTICE.txt](../data/foursquare/NOTICE.txt).
+notice is also available at [../crates/ultrafinance-core/data/foursquare/NOTICE.txt](../crates/ultrafinance-core/data/foursquare/NOTICE.txt).
 No production deployment or production import is performed by preparation.

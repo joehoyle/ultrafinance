@@ -303,6 +303,22 @@ impl MerchantStore {
     ) -> Result<crate::dedupe::ImportReport> {
         self.0.reconcile_import(records, dry_run, chunk_size)
     }
+    pub(crate) fn reconcile_generated<F>(
+        &self,
+        total: usize,
+        dry_run: bool,
+        chunk_size: usize,
+        produce: F,
+    ) -> Result<crate::dedupe::ImportReport>
+    where
+        F: FnOnce(&mut dyn FnMut(Vec<SourceRecord>) -> Result<()>) -> Result<()> + Send + 'static,
+    {
+        self.0
+            .reconcile_generated(total, dry_run, chunk_size, produce)
+    }
+    pub(crate) fn import_database_identity(&self) -> Result<String> {
+        self.0.import_database_identity()
+    }
     pub(crate) fn reconcile_file(
         &self,
         path: std::path::PathBuf,
@@ -478,7 +494,7 @@ impl SourceRecord {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ImportDelta {
     pub added: usize,
     pub updated: usize,

@@ -2,6 +2,33 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
+fn import_working_memory_does_not_leak_to_other_transactions() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    store.run(|client| {
+        client.batch_execute("SET work_mem='8MB'")?;
+        for commit in [true, false] {
+            let mut tx = import_transaction(client)?;
+            assert_eq!(
+                tx.query_one("SHOW work_mem", &[])?.get::<_, String>(0),
+                "64MB"
+            );
+            if commit {
+                tx.commit()?;
+            } else {
+                tx.rollback()?;
+            }
+            assert_eq!(
+                client.query_one("SHOW work_mem", &[])?.get::<_, String>(0),
+                "8MB"
+            );
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn version_eleven_import_host_index_preserves_catalog_and_supports_host_lookup() -> Result<()> {
     let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
@@ -246,9 +273,8 @@ fn version_twelve_locations_backfill_merchants_and_share_provenance() -> Result<
     local.location.address = Some("3 Main St".into());
     lease.import_locations(&[outlet.clone(), second, local])?;
     let local_before = lease.location_sources("manual-anchor")?;
-    let work_mem_before: String = lease.run(|client| {
-        Ok(client.query_one("SHOW work_mem", &[])?.get(0))
-    })?;
+    let work_mem_before: String =
+        lease.run(|client| Ok(client.query_one("SHOW work_mem", &[])?.get(0)))?;
     let before = lease.location_sources(&original)?;
     lease.run(|client| {
         client.batch_execute(include_str!("version_12_locations.sql"))?;
@@ -448,9 +474,24 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
     let upgraded = PostgresStore::connect(&url, true);
     blocker.join().expect("reader thread panicked")?;
     upgraded?.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 14);
-        assert_eq!(client.query_one("SHOW lock_timeout", &[])?.get::<_, String>(0), "10s");
-        assert_eq!(client.query_one("SHOW statement_timeout", &[])?.get::<_, String>(0), "15s");
+        assert_eq!(
+            client
+                .query_one("SELECT version FROM ultrafinance_schema", &[])?
+                .get::<_, i32>(0),
+            14
+        );
+        assert_eq!(
+            client
+                .query_one("SHOW lock_timeout", &[])?
+                .get::<_, String>(0),
+            "10s"
+        );
+        assert_eq!(
+            client
+                .query_one("SHOW statement_timeout", &[])?
+                .get::<_, String>(0),
+            "15s"
+        );
         Ok(())
     })
 }
@@ -474,5 +515,61 @@ fn document_view_migration_preserves_custom_dependencies_on_failure() -> Result<
         Ok(())
     })?;
     PostgresStore::connect(lease.temporary_url().unwrap(), true)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn file_import_reconnects_after_idle_timeout_during_slow_counting() -> Result<()> {
+    use std::io::Write;
+
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let first_pid: i32 = store.run(|client| {
+        client.batch_execute("SET idle_session_timeout = '1s'")?;
+        Ok(client.query_one("SELECT pg_backend_pid()", &[])?.get(0))
+    })?;
+    let directory = std::env::temp_dir().join(format!("ultra-slow-count-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory)?;
+    let path = directory.join("knowledge.json");
+    let created = std::process::Command::new("mkfifo").arg(&path).status()?;
+    assert!(created.success(), "could not create slow input pipe");
+    let records = crate::import::merchant_studio(
+        r#"{"schemaVersion":"1.0","merchants":[{"id":"slow-count","canonicalName":"Slow Count Fixture","website":"https://slow-count.test"}]}"#,
+    )?;
+    let payload = serde_json::to_vec(&records)?;
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || -> Result<()> {
+        let mut pipe = std::fs::OpenOptions::new().write(true).open(&writer_path)?;
+        pipe.write_all(b"[")?;
+        // The importer is now counting, with no SQL activity. Let the server
+        // expire the original connection before releasing the remaining JSON.
+        std::thread::sleep(Duration::from_secs(2));
+        // Keep the first reader on the pipe, but supply a stable regular file
+        // for the subsequent import pass. Both contain exactly the same JSON.
+        std::fs::remove_file(&writer_path)?;
+        std::fs::write(&writer_path, &payload)?;
+        pipe.write_all(&payload[1..])?;
+        Ok(())
+    });
+    let result = store.reconcile_file(path, None, false, 100);
+    let written = writer.join().expect("slow input writer panicked");
+    std::fs::remove_dir_all(directory)?;
+    written?;
+    let (report, available, selected) = result?;
+    assert_eq!((available, selected), (1, 1));
+    assert_eq!(report.delta.added, 1);
+    let second_pid: i32 =
+        store.run(|client| Ok(client.query_one("SELECT pg_backend_pid()", &[])?.get(0)))?;
+    assert_ne!(
+        first_pid, second_pid,
+        "import should use a fresh backend after counting"
+    );
+    assert!(
+        store
+            .resolve_source("merchant-studio", "slow-count")?
+            .is_some()
+    );
     Ok(())
 }

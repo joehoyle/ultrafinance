@@ -685,6 +685,38 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
             Ok(result)
         })
     }
+    pub(super) fn import_database_identity(&self) -> Result<String> {
+        self.run(|client| {
+            let row = client.query_one("SELECT current_database(),oid::text FROM pg_database WHERE datname=current_database()", &[])?;
+            Ok(crate::eval::fingerprint(format!("{}:{}", row.get::<_, String>(0), row.get::<_, String>(1)).as_bytes()))
+        })
+    }
+    pub(super) fn reconcile_generated<F>(
+        &self,
+        total: usize,
+        dry_run: bool,
+        chunk_size: usize,
+        produce: F,
+    ) -> Result<crate::dedupe::ImportReport>
+    where
+        F: FnOnce(&mut dyn FnMut(Vec<SourceRecord>) -> Result<()>) -> Result<()> + Send + 'static,
+    {
+        if chunk_size == 0 {
+            bail!("import chunk size must be greater than zero");
+        }
+        self.run(move |client| {
+            let _quiet = (!dry_run && !crate::import_progress::verbose()).then(crate::import_progress::quiet);
+            let mut tx = import_transaction(client)?;
+            write_lock(&mut tx)?;
+            tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
+            // Counting the entire catalog once per committed chunk would be quadratic.
+            let mut importer = indexed_import::Import::new_stream(&mut tx, dry_run, total, chunk_size)?;
+            produce(&mut |chunk| importer.chunk(chunk))?;
+            let report = importer.finish()?;
+            if dry_run { tx.rollback()?; } else { tx.commit()?; }
+            Ok(report)
+        })
+    }
     pub fn reconcile_file(
         &self,
         path: std::path::PathBuf,
@@ -695,11 +727,14 @@ SELECT c.left_id,c.right_id,c.exact,a.normalized_name,b.normalized_name FROM can
         if chunk_size == 0 {
             bail!("import chunk size must be greater than zero");
         }
+        // Counting a global bundle can take many minutes. Do this before
+        // dispatching the database job so its health probe reconnects any
+        // connection that expired while we were reading the file.
+        let total = crate::datasets::count_records(&path)?;
+        let selected_total = limit.map_or(total, |n| total.min(n as usize));
+        eprintln!("Import: {total} available source records; {selected_total} selected");
+        eprintln!("Import: waiting for database write lock");
         self.run(move |client| {
-            let total = crate::datasets::count_records(&path)?;
-            let selected_total = limit.map_or(total, |n| total.min(n as usize));
-            eprintln!("Import: {total} available source records; {selected_total} selected");
-            eprintln!("Import: waiting for database write lock");
             let mut tx=import_transaction(client)?;
             write_lock(&mut tx)?;
             tx.batch_execute("LOCK TABLE merchants,manual_merchants,source_records,location_records,descriptor_resolutions,merchant_redirects IN SHARE ROW EXCLUSIVE MODE")?;
@@ -1155,9 +1190,10 @@ fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> 
 fn import_transaction(client: &mut Client) -> Result<Transaction<'_>> {
     let mut tx = client.transaction()?;
     // CPU-heavy plan validation can leave an otherwise active import idle.
-    // Limit the exemption to this transaction, preserving web-request defaults.
+    // Bounded bulk lookups/sorts also need more than the default 4MB to avoid
+    // spilling to disk. Keep these settings local to the import transaction.
     tx.batch_execute(
-        "SET LOCAL idle_in_transaction_session_timeout = '0'; SET LOCAL statement_timeout = '0'",
+        "SET LOCAL idle_in_transaction_session_timeout = '0'; SET LOCAL statement_timeout = '0'; SET LOCAL work_mem = '64MB'",
     )?;
     Ok(tx)
 }

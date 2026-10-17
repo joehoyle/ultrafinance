@@ -10,6 +10,7 @@ fn image() -> String {
 
 struct Fake {
     calls: RefCell<Vec<Vec<String>>>,
+    registered: RefCell<Option<Value>>,
     launch_error: bool,
     rejected: bool,
     ready: bool,
@@ -35,13 +36,21 @@ impl Api for Fake {
                     request["containerDefinitions"][0]["secrets"][0]["valueFrom"],
                     "secret:username::"
                 );
+                *self.registered.borrow_mut() = Some(request);
                 json!({"taskDefinition":{"taskDefinitionArn":"revision"}})
+            }
+            "describe-snapshots" => {
+                json!({"Snapshots":[{"SnapshotId":"snap-0123456789abcdef0","State":"completed","VolumeSize":1024}]})
             }
             "run-task" => {
                 if self.launch_error {
                     bail!("uncertain launch");
                 }
-                let network: Value = serde_json::from_str(args.last().unwrap())?;
+                let position = args
+                    .iter()
+                    .position(|arg| *arg == "--network-configuration")
+                    .unwrap();
+                let network: Value = serde_json::from_str(args[position + 1])?;
                 assert_eq!(network["awsvpcConfiguration"]["assignPublicIp"], "DISABLED");
                 assert!(args.contains(&"--enable-execute-command"));
                 if self.rejected {
@@ -62,15 +71,152 @@ impl Api for Fake {
 fn fake() -> Fake {
     Fake {
         calls: RefCell::new(vec![]),
+        registered: RefCell::new(None),
         launch_error: false,
         rejected: false,
         ready: true,
     }
 }
 
+#[test]
+fn persistent_session_exit_and_disconnect_keep_task_with_bounded_lifetime() {
+    for fail in [false, true] {
+        let aws = fake();
+        let result = run_shell_mode(
+            &aws,
+            &config(),
+            ImageSelection::Live,
+            SessionMode::Persistent { hours: 72 },
+            Duration::ZERO,
+            || Ok(()),
+            |_| if fail { bail!("disconnected") } else { Ok(()) },
+        );
+        assert_eq!(result.is_err(), fail);
+        let calls = aws.calls.borrow();
+        assert!(!calls.iter().any(|call| call[1] == "stop-task"));
+        assert_eq!(calls.last().unwrap()[1], "deregister-task-definition");
+        let request = aws.registered.borrow();
+        let cli = &request.as_ref().unwrap()["containerDefinitions"][0];
+        assert_eq!(
+            cli["command"],
+            json!(["mkdir -p /scratch/tmp && exec sleep 259200"])
+        );
+        assert!(
+            cli["environment"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |value| value["name"] == "ULTRAFINANCE_CLI_PERSISTENT" && value["value"] == "1"
+                )
+        );
+    }
+}
+
+#[test]
+fn persistent_startup_failure_still_cleans_up_known_task() {
+    let mut aws = fake();
+    aws.ready = false;
+    assert!(
+        run_shell_mode(
+            &aws,
+            &config(),
+            ImageSelection::Live,
+            SessionMode::Persistent { hours: 24 },
+            Duration::ZERO,
+            || Ok(()),
+            |_| panic!("must not connect"),
+        )
+        .is_err()
+    );
+    let calls = aws.calls.borrow();
+    assert_eq!(calls[calls.len() - 2][1], "stop-task");
+    assert_eq!(calls.last().unwrap()[1], "deregister-task-definition");
+}
+
+#[test]
+fn persistent_lifetime_is_validated_before_any_aws_calls() {
+    for hours in [0, 169] {
+        let aws = fake();
+        assert!(
+            run_shell_mode(
+                &aws,
+                &config(),
+                ImageSelection::Live,
+                SessionMode::Persistent { hours },
+                Duration::ZERO,
+                || Ok(()),
+                |_| panic!("must not connect"),
+            )
+            .is_err()
+        );
+        assert!(aws.calls.borrow().is_empty());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn persistent_bootstrap_passes_encoded_database_url_to_tmux_without_credentials_in_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let tmux = dir.path().join("tmux");
+    std::fs::write(&tmux, "#!/bin/bash\n[[ $ULTRAFINANCE_DATABASE_URL == 'postgresql://admin:p%40ss@database.example:5432/finance?sslmode=require' ]] || exit 1\n[[ -z ${ULTRAFINANCE_ADMIN_PASSWORD+x} ]] || exit 2\nprintf '%s\\n' \"$@\"\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let result = std::process::Command::new("/bin/sh")
+        .args(["-c", &persistent_command()])
+        .env("PATH", path)
+        .env("ULTRAFINANCE_ADMIN_USERNAME", "admin")
+        .env("ULTRAFINANCE_ADMIN_PASSWORD", "p@ss")
+        .env("ULTRAFINANCE_DATABASE_HOST", "database.example")
+        .env("ULTRAFINANCE_DATABASE_NAME", "finance")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = String::from_utf8(result.stdout).unwrap();
+    assert!(output.starts_with("-L\nultrafinance\nnew-session\n-A\n-s\nultrafinance\n"));
+    assert!(!output.contains("postgresql") && !output.contains("p@ss"));
+}
+
 fn config() -> Value {
     json!({"cluster":"cluster","task_definition":"definition","function_name":"function",
         "subnets":["private"],"security_groups":["database"]})
+}
+
+#[test]
+fn scratch_volume_configuration_reaches_fargate_launch() {
+    let aws = fake();
+    let mut config = config();
+    config["volume_configurations"] = json!([{"name":"scratch","managedEBSVolume":{
+        "roleArn":"volumes-role","volumeType":"gp3","sizeInGiB":1024,
+        "encrypted":true,"filesystemType":"ext4",
+        "terminationPolicy":{"deleteOnTermination":true}
+    }}]);
+    run_shell(
+        &aws,
+        &config,
+        ImageSelection::Live,
+        Duration::ZERO,
+        || Ok(()),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let calls = aws.calls.borrow();
+    let launch = calls.iter().find(|args| args[1] == "run-task").unwrap();
+    let position = launch
+        .iter()
+        .position(|arg| arg == "--volume-configurations")
+        .unwrap();
+    let volumes: Value = serde_json::from_str(&launch[position + 1]).unwrap();
+    assert_eq!(volumes, config["volume_configurations"]);
 }
 
 #[test]
@@ -281,4 +427,38 @@ fn startup_interrupt_cleans_up_known_task() {
         aws.calls.borrow().last().unwrap()[1],
         "deregister-task-definition"
     );
+}
+
+#[test]
+fn restored_snapshot_reaches_launch_using_the_selected_live_image() {
+    let aws = fake();
+    let mut config = config();
+    config["volume_configurations"] = json!([{"name":"scratch","managedEBSVolume":{
+        "roleArn":"volume-role","sizeInGiB":1024,"volumeType":"gp3",
+        "encrypted":true,"filesystemType":"ext4","terminationPolicy":{"deleteOnTermination":true}
+    }}]);
+    super::super::persistent::restore_snapshot(&aws, &mut config, "snap-0123456789abcdef0")
+        .unwrap();
+    run_shell_mode(
+        &aws,
+        &config,
+        ImageSelection::Live,
+        SessionMode::Persistent { hours: 24 },
+        Duration::ZERO,
+        || Ok(()),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let calls = aws.calls.borrow();
+    let launch = calls.iter().find(|c| c[1] == "run-task").unwrap();
+    let index = launch
+        .iter()
+        .position(|c| c == "--volume-configurations")
+        .unwrap();
+    let volumes: Value = serde_json::from_str(&launch[index + 1]).unwrap();
+    assert_eq!(
+        volumes[0]["managedEBSVolume"]["snapshotId"],
+        "snap-0123456789abcdef0"
+    );
+    assert!(!calls.iter().any(|c| c[1] == "stop-task"));
 }

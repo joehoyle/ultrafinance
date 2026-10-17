@@ -2,6 +2,26 @@ mock_provider "aws" {
   alias = "us_east_1"
 }
 
+run "foursquare_credentials" {
+  command = plan
+  variables {
+    domain_name       = null
+    image_uri         = "123456789012.dkr.ecr.ca-central-1.amazonaws.com/ultrafinance@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    enable_aurora     = true
+    database_url      = null
+    github_repository = null
+    foursquare_token  = "test-portal-token"
+  }
+  assert {
+    condition     = aws_lambda_function.app[0].environment[0].variables["ULTRAFINANCE_FOURSQUARE_TOKEN"] == var.foursquare_token
+    error_message = "The configured Foursquare token must be available alongside Lambda's other API keys."
+  }
+  assert {
+    condition     = jsondecode(aws_secretsmanager_secret_version.cli_api_keys[0].secret_string).ULTRAFINANCE_FOURSQUARE_TOKEN == var.foursquare_token && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].secrets[3].valueFrom == "${aws_secretsmanager_secret.cli_api_keys[0].arn}:ULTRAFINANCE_FOURSQUARE_TOKEN::"
+    error_message = "CLI tasks must receive the same Foursquare token through secret injection."
+  }
+}
+
 run "aurora_bootstrap" {
   command = plan
   variables {
@@ -36,8 +56,8 @@ run "aurora_cutover" {
     aurora_min_acu    = 0
   }
   assert {
-    condition     = aws_secretsmanager_secret_version.cli_database_url[0].secret_string == var.database_url && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].secrets[0].valueFrom == aws_secretsmanager_secret.cli_database_url[0].arn
-    error_message = "Lambda and Fargate must share the configured application URL via ECS secret injection."
+    condition     = aws_secretsmanager_secret_version.cli_database_url[0].secret_string == var.database_url && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].secrets[0].valueFrom == "${aws_rds_cluster.database[0].master_user_secret[0].secret_arn}:username::"
+    error_message = "The application URL must be preserved while Fargate injects RDS administrator credentials."
   }
   assert {
     condition     = aws_lambda_function.app[0].vpc_config[0].subnet_ids == toset(aws_subnet.database[*].id) && aws_lambda_function.app[0].vpc_config[0].security_group_ids == toset([aws_security_group.database_client[0].id])
@@ -71,8 +91,16 @@ run "cli_tasks" {
     error_message = "The shell must reuse only the application image and bypass the Lambda entrypoint."
   }
   assert {
-    condition     = jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].linuxParameters.initProcessEnabled && !jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].readonlyRootFilesystem && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].command == ["exec sleep 3600"]
+    condition     = jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].linuxParameters.initProcessEnabled && !jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].readonlyRootFilesystem && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].command == ["mkdir -p /scratch/tmp && exec sleep 86400"]
     error_message = "ECS Exec needs init support, a writable filesystem, and a bounded task lifetime."
+  }
+  assert {
+    condition     = aws_ecs_task_definition.cli[0].cpu == "8192" && aws_ecs_task_definition.cli[0].memory == "32768" && one(aws_ecs_task_definition.cli[0].volume).configure_at_launch && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].workingDirectory == "/scratch" && jsondecode(aws_ecs_task_definition.cli[0].container_definitions)[0].environment[0].value == "/scratch/tmp"
+    error_message = "Large CLI jobs must have 8 vCPUs, 32 GiB RAM, and use the scratch mount for working files and temporary files."
+  }
+  assert {
+    condition     = output.cli_runner.volume_configurations[0].managedEBSVolume.sizeInGiB == 1024 && output.cli_runner.volume_configurations[0].managedEBSVolume.encrypted && output.cli_runner.volume_configurations[0].managedEBSVolume.terminationPolicy.deleteOnTermination
+    error_message = "Each CLI launch must receive an encrypted 1 TiB scratch volume that is deleted on termination."
   }
   assert {
     condition     = toset(jsondecode(aws_iam_role_policy.cli_task[0].policy).Statement[0].Action) == toset(["ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel", "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel"])

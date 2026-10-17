@@ -1,6 +1,6 @@
 //! Throttled import progress on stderr; stdout remains machine-readable.
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     io::{IsTerminal, Write},
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
@@ -16,6 +16,17 @@ pub(crate) fn verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 thread_local! { static OVERALL: RefCell<Option<Rc<RefCell<Summary>>>> = const { RefCell::new(None) }; }
+
+thread_local! { static QUIET: Cell<bool> = const { Cell::new(false) }; }
+pub(crate) struct Quiet(bool);
+pub(crate) fn quiet() -> Quiet {
+    Quiet(QUIET.with(|slot| slot.replace(true)))
+}
+impl Drop for Quiet {
+    fn drop(&mut self) {
+        QUIET.with(|slot| slot.set(self.0));
+    }
+}
 
 struct Summary {
     total: usize,
@@ -50,6 +61,9 @@ fn duration(seconds: f64) -> String {
 }
 impl Summary {
     fn render(&mut self, force: bool, complete: bool) {
+        if QUIET.with(Cell::get) {
+            return;
+        }
         let interval = if self.terminal {
             Duration::from_millis(150)
         } else {
@@ -227,6 +241,9 @@ impl Progress {
     }
     fn render(&mut self, complete: bool) {
         self.finished = complete;
+        if QUIET.with(Cell::get) {
+            return;
+        }
         if self.prefix == "Import" && !verbose() {
             let forwarded = OVERALL.with(|slot| {
                 if let Some(state) = slot.borrow().as_ref() {
@@ -276,7 +293,7 @@ impl Progress {
 }
 impl Drop for Progress {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished && !QUIET.with(Cell::get) {
             if !verbose() && OVERALL.with(|slot| slot.borrow().is_some()) {
                 return;
             }

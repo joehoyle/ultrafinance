@@ -110,6 +110,9 @@ enum Command {
         examples: Option<PathBuf>,
         #[arg(long, default_value = "data/datasets")]
         output: PathBuf,
+        /// Resume a Foursquare import checkpoint directory without the original CSV.
+        #[arg(long, conflicts_with_all = ["input", "examples", "offline", "dry_run", "dedupe_dry_run"])]
+        resume: Option<PathBuf>,
         /// Prepare a bundle and report its size without changing the database.
         #[arg(long)]
         dry_run: bool,
@@ -440,6 +443,78 @@ fn save_snapshot(
     atomic_write(&parent.join("latest"), snapshot.as_bytes())?;
     Ok(path)
 }
+struct SnapshotReader {
+    file: std::fs::File,
+    label: &'static str,
+    bytes: u64,
+    total: u64,
+    started: std::time::Instant,
+    last: std::time::Instant,
+    terminal: bool,
+}
+impl SnapshotReader {
+    fn open(path: &Path, label: &'static str) -> Result<Self> {
+        use std::io::IsTerminal;
+        let file = std::fs::File::open(path)?;
+        let total = file.metadata()?.len();
+        let now = std::time::Instant::now();
+        let mut reader = Self {
+            file,
+            label,
+            bytes: 0,
+            total,
+            started: now,
+            last: now,
+            terminal: std::io::stderr().is_terminal(),
+        };
+        reader.render(true);
+        Ok(reader)
+    }
+    fn render(&mut self, force: bool) {
+        let interval = if self.terminal {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(5)
+        };
+        if !force && self.last.elapsed() < interval {
+            return;
+        }
+        let percent = if self.total == 0 {
+            100.0
+        } else {
+            self.bytes as f64 * 100.0 / self.total as f64
+        };
+        let prefix = if self.terminal { "\r\x1b[2K" } else { "" };
+        let end = if self.terminal { "" } else { "\n" };
+        let mut stderr = std::io::stderr().lock();
+        let _ = write!(
+            stderr,
+            "{prefix}Foursquare snapshot: {} · {percent:.1}% · {:.1}/{:.1} MiB · {}s{end}",
+            self.label,
+            self.bytes as f64 / 1048576.0,
+            self.total as f64 / 1048576.0,
+            self.started.elapsed().as_secs()
+        );
+        let _ = stderr.flush();
+        self.last = std::time::Instant::now();
+    }
+}
+impl std::io::Read for SnapshotReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = std::io::Read::read(&mut self.file, buffer)?;
+        self.bytes += count as u64;
+        self.render(count == 0);
+        Ok(count)
+    }
+}
+impl Drop for SnapshotReader {
+    fn drop(&mut self) {
+        if self.terminal {
+            let _ = writeln!(std::io::stderr());
+        }
+    }
+}
+
 fn save_foursquare_snapshot(
     root: &Path,
     r: &Registration,
@@ -451,15 +526,28 @@ fn save_foursquare_snapshot(
     std::fs::create_dir_all(&parent)?;
     let staging = tempfile::tempdir_in(&parent)?;
     let copied = staging.path().join("input.csv");
-    std::fs::copy(input, &copied)?;
-    let mut reader = csv::Reader::from_path(&copied)?;
+    {
+        let mut reader = SnapshotReader::open(input, "Saving CSV")?;
+        let mut writer = std::fs::File::create(&copied)?;
+        let mut buffer = [0; 65536];
+        loop {
+            let count = std::io::Read::read(&mut reader, &mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..count])?;
+        }
+    }
+    let mut reader = csv::Reader::from_reader(SnapshotReader::open(&copied, "Validating CSV")?);
     if !reader.headers()?.iter().any(|h| h == "fsq_place_id") {
         bail!("download is missing CSV column fsq_place_id");
     }
     for row in reader.records() {
         row?;
     }
-    let fingerprint = ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&copied)?)?;
+    drop(reader);
+    let fingerprint =
+        ultrafinance_core::eval::fingerprint_reader(SnapshotReader::open(&copied, "Hashing CSV")?)?;
     let entries = json!([{"file":"input.csv","url":url,"bytes":std::fs::metadata(&copied)?.len(),"fingerprint":fingerprint}]);
     let snapshot = format!(
         "snapshot-{}",
@@ -468,8 +556,9 @@ fn save_foursquare_snapshot(
     );
     let path = parent.join(&snapshot);
     if path.exists() {
-        if ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(
-            path.join("input.csv"),
+        if ultrafinance_core::eval::fingerprint_reader(SnapshotReader::open(
+            &path.join("input.csv"),
+            "Checking cached CSV",
         )?)? != fingerprint
         {
             bail!("cached snapshot differs from downloaded contents: input.csv");
@@ -484,6 +573,7 @@ fn save_foursquare_snapshot(
         std::fs::rename(staging.path(), &path)?;
     }
     atomic_write(&parent.join("latest"), snapshot.as_bytes())?;
+    eprintln!("Foursquare download: snapshot saved");
     Ok(path)
 }
 
@@ -756,12 +846,31 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
             input,
             examples,
             output,
+            resume,
             dry_run,
             evaluation,
             dedupe,
         } => {
             let r = registry(source);
             urls(r.source, &region)?;
+            if let Some(checkpoint) = resume {
+                if !matches!(r.source, Source::Foursquare) {
+                    bail!("--resume is supported only for Foursquare imports");
+                }
+                let report = datasets::resume_foursquare_import(
+                    checkpoint,
+                    region,
+                    datasets::FoursquareImportOptions {
+                        database_url: database_url.map(str::to_owned),
+                        limit: dedupe.limit,
+                        dry_run,
+                        dedupe: dedupe.options(),
+                    },
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
             if matches!(r.source, Source::BusinessTransactions) && !dry_run && !evaluation {
                 bail!(
                     "BusinessTransactions is a synthetic reference catalog; use --dry-run to prepare it, or --evaluation with a separate evaluation database"
@@ -818,9 +927,23 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 };
                 snapshot_files(&path)?
             };
-            let (path, manifest) = if matches!(r.source, Source::Foursquare) {
-                datasets::prepare_foursquare_file(&input, &output, &region)?
-            } else {
+            if matches!(r.source, Source::Foursquare) {
+                let report = datasets::import_foursquare_file(
+                    input,
+                    output,
+                    region,
+                    datasets::FoursquareImportOptions {
+                        database_url: database_url.map(str::to_owned),
+                        limit: dedupe.limit,
+                        dry_run,
+                        dedupe: dedupe.options(),
+                    },
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            let (path, manifest) = {
                 let contents = std::fs::read_to_string(input)?;
                 let examples = examples.map(std::fs::read_to_string).transpose()?;
                 let (path, manifest) = if let Some(cached) = datasets::cached_bundle(

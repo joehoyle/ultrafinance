@@ -15,7 +15,6 @@ RUN cargo chef cook --locked --release --recipe-path recipe.json -p ultrafinance
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY website ./website
-COPY data/foursquare/NOTICE.txt data/foursquare/LICENSE.txt ./data/foursquare/
 ARG ULTRAFINANCE_BUILD_TAG=""
 ARG ULTRAFINANCE_BUILD_REVISION=""
 ARG ULTRAFINANCE_BUILD_DIRTY="false"
@@ -40,9 +39,33 @@ RUN set -eu; \
     ULTRAFINANCE_TEST_DATABASE_URL='postgresql://ultrafinance@127.0.0.1:5432/ultrafinance_test?sslmode=disable' cargo test --locked --release --workspace; \
     cargo clippy --locked --release --workspace --all-targets -- -D warnings
 
+FROM debian:bookworm-slim AS duckdb
+# The production CLI needs DuckDB and cached extensions in its HTTPS-only VPC.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip && rm -rf /var/lib/apt/lists/*
+RUN curl -fLsS https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-arm64.zip -o /tmp/duckdb.zip \
+    && echo 'c544e92c9b7c31fc53c2139802cabd8e2d1b2b3e3f933117f31611239c1402db  /tmp/duckdb.zip' | sha256sum -c - \
+    && unzip -q /tmp/duckdb.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/duckdb \
+    && rm /tmp/duckdb.zip
+# Fetch signed extension files over HTTPS; DuckDB's HTTPS bootstrap otherwise
+# tries to install httpfs over HTTP before it can use HTTPS repositories.
+RUN set -eu; for extension in httpfs iceberg; do \
+    curl -fLsS "https://extensions.duckdb.org/v1.5.6/linux_arm64/$extension.duckdb_extension.gz" -o "/tmp/$extension.duckdb_extension.gz"; \
+    gzip -d "/tmp/$extension.duckdb_extension.gz"; \
+    duckdb -batch :memory: -c "INSTALL '/tmp/$extension.duckdb_extension';"; \
+    rm "/tmp/$extension.duckdb_extension"; \
+    done
+RUN duckdb -batch :memory: -c 'LOAD httpfs; LOAD iceberg; SELECT 1;'
+
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash ca-certificates libssl3 tmux \
+    && sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
+    && rm -rf /var/lib/apt/lists/*
 COPY deploy/bashrc /etc/bash.bashrc
+COPY deploy/tmux.conf /etc/tmux.conf
+COPY --from=duckdb /usr/local/bin/duckdb /usr/local/bin/duckdb
+COPY --from=duckdb /root/.duckdb/ /root/.duckdb/
 ENV SHELL=/bin/bash
 COPY deploy/rds-ca/ /usr/local/share/ca-certificates/ultrafinance-rds/
 RUN update-ca-certificates

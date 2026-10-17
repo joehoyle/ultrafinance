@@ -47,5 +47,17 @@ output "cli_runner" {
     security_groups = [aws_security_group.database_client[0].id]
     log_group       = aws_cloudwatch_log_group.cli[0].name
     function_name   = aws_lambda_function.app[0].function_name
+    volume_configurations = [{
+      name = "scratch"
+      managedEBSVolume = {
+        roleArn           = aws_iam_role.cli_volumes[0].arn
+        volumeType        = "gp3"
+        sizeInGiB         = var.cli_scratch_gib
+        encrypted         = true
+        filesystemType    = "ext4"
+        terminationPolicy = { deleteOnTermination = true }
+      }
+    }]
   } : null
+  depends_on = [aws_iam_role_policy_attachment.cli_volumes]
 }

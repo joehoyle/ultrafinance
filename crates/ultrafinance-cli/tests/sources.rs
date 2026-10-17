@@ -60,13 +60,11 @@ fn foursquare_prepares_place_identities_without_manual_review_or_transaction_lab
     assert_eq!(report["manifest"]["merchant_records"], 4);
     assert_eq!(report["manifest"]["retained_places"], 4);
     assert_eq!(report["manifest"]["holdout_samples"], 0);
-    let bundle = std::path::Path::new(report["bundle"].as_str().unwrap());
-    assert!(bundle.join("NOTICE.txt").is_file());
-    assert!(bundle.join("LICENSE.txt").is_file());
-    let knowledge: Value =
-        serde_json::from_slice(&std::fs::read(bundle.join("knowledge.json")).unwrap()).unwrap();
-    assert_eq!(knowledge[0]["merchant"]["name"], "Starbucks Bromont");
-    assert_eq!(knowledge[0]["raw"]["places"].as_array().unwrap().len(), 1);
+    assert!(report["bundle"].is_null());
+    let checkpoint = std::path::Path::new(report["checkpoint"].as_str().unwrap());
+    assert!(checkpoint.join("NOTICE.txt").is_file());
+    assert!(checkpoint.join("LICENSE.txt").is_file());
+    assert!(!checkpoint.join("knowledge.json").exists());
     let offline = json(run(
         root.path(),
         &[
@@ -80,7 +78,7 @@ fn foursquare_prepares_place_identities_without_manual_review_or_transaction_lab
             "--dry-run",
         ],
     ));
-    assert_eq!(offline["bundle"], report["bundle"]);
+    assert_eq!(offline["checkpoint"], report["checkpoint"]);
     let rejected = run(
         root.path(),
         &[
@@ -499,8 +497,14 @@ sql = sys.stdin.read()
 assert "TOKEN 'secret-token'" in sql
 assert "upper(country) = 'CA'" in sql
 assert ('LIMIT 3' in sql) if os.environ.get('EXPECT_LIMIT', '3') == '3' else (' LIMIT ' not in sql)
+assert ('ORDER BY fsq_place_id' in sql) if os.environ.get('EXPECT_LIMIT', '3') == '3' else ('ORDER BY' not in sql)
+assert "SET memory_limit = '512MiB'" in sql
+assert "SET temp_directory = '" in sql and 'duckdb-spill' in sql
+assert 'SET preserve_insertion_order = false' in sql
 assert 'to_json(fsq_category_ids)' in sql
-path = re.search(r"TO '([^']+)' \(FORMAT CSV", sql).group(1)
+total = re.search(r"TO '([^']+)' \(FORMAT CSV, HEADER FALSE", sql).group(1)
+open(total, 'w').write('1\n')
+path = re.search(r"TO '([^']+)' \(FORMAT CSV, HEADER TRUE", sql).group(1)
 open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np1,Cafe,CA,"[""4bf58dd8d48988d16d941735""]",\n')
 "#).unwrap();
     std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -519,11 +523,25 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
                 "ca",
             ])
             .env("ULTRAFINANCE_FOURSQUARE_TOKEN", "secret-token")
+            .env("ULTRAFINANCE_DUCKDB_MEMORY_LIMIT", "512MiB")
             .output()
             .unwrap()
     };
     let result = execute();
     assert!(!String::from_utf8_lossy(&result.stderr).contains("secret-token"));
+    let progress = String::from_utf8_lossy(&result.stderr);
+    assert!(progress.contains("Preparing export"));
+    assert!(progress.contains("1/1 rows (100.0%)"));
+    assert!(progress.contains("MiB") && progress.contains("Export complete"));
+    for stage in [
+        "Saving CSV",
+        "Validating CSV",
+        "Hashing CSV",
+        "snapshot saved",
+    ] {
+        assert!(progress.contains(stage), "{progress}");
+    }
+    assert!(!progress.contains('\u{1b}'));
     let result = json(result);
     let snapshot = std::path::Path::new(result["snapshot"].as_str().unwrap());
     let metadata = std::fs::read_to_string(snapshot.join("download.json")).unwrap();
@@ -539,6 +557,7 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
             .args(["download", "foursquare", "--region", "ca"])
             .env("ULTRAFINANCE_FOURSQUARE_TOKEN", "secret-token")
             .env("EXPECT_LIMIT", "all")
+            .env("ULTRAFINANCE_DUCKDB_MEMORY_LIMIT", "512MiB")
             .output()
             .unwrap(),
     );
@@ -565,15 +584,14 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
             .arg("--output")
             .arg(root.path().join("bundles"))
             .env("ULTRAFINANCE_FOURSQUARE_TOKEN", "secret-token")
+            .env("ULTRAFINANCE_DUCKDB_MEMORY_LIMIT", "512MiB")
             .output()
             .unwrap(),
     );
-    let bundle = std::path::Path::new(prepared["bundle"].as_str().unwrap());
-    assert!(
-        std::fs::read_to_string(bundle.join("knowledge.json"))
-            .unwrap()
-            .contains("place:p1")
-    );
+    assert!(prepared["bundle"].is_null());
+    assert_eq!(prepared["manifest"]["retained_places"], 1);
+    let checkpoint = std::path::Path::new(prepared["checkpoint"].as_str().unwrap());
+    assert!(!checkpoint.join("knowledge.json").exists());
     let offline = json(run(
         root.path(),
         &[
@@ -597,6 +615,64 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
         latest,
         std::fs::read(root.path().join("cache/foursquare/ca/latest")).unwrap()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn foursquare_download_reports_progress_while_csv_grows() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().join("duckdb");
+    std::fs::write(&engine, r#"#!/usr/bin/env python3
+import sys, re, time, os
+sql = sys.stdin.read()
+print('secret-token', file=sys.stderr)
+print('secret-token')
+total = re.search(r"TO '([^']+)' \(FORMAT CSV, HEADER FALSE", sql).group(1)
+path = re.search(r"TO '([^']+)' \(FORMAT CSV, HEADER TRUE", sql).group(1)
+open(total, 'w').write('2\n')
+with open(path, 'w') as csv:
+    csv.write('fsq_place_id,name,country,fsq_category_ids,date_closed\np1,"Cafe\nNorth",CA,"[""restaurant""]",\n')
+    csv.flush()
+    deadline = time.monotonic() + 30
+    while not os.path.exists(os.environ['PROGRESS_ACK']):
+        if time.monotonic() > deadline:
+            sys.exit('progress acknowledgement timed out')
+        time.sleep(0.02)
+    csv.write('p2,Cafe South,CA,"[""restaurant""]",\n')
+"#).unwrap();
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let acknowledgement = root.path().join("progress-ack");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+        .args(["sources", "--cache-dir"])
+        .arg(root.path().join("cache"))
+        .arg("--duckdb-cli")
+        .arg(&engine)
+        .args(["download", "foursquare", "--region", "global"])
+        .env("ULTRAFINANCE_FOURSQUARE_TOKEN", "secret-token")
+        .env("PROGRESS_ACK", &acknowledgement)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut progress = String::new();
+    for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+        let line = line.unwrap();
+        if line.contains("1/2 rows (50.0%)") {
+            std::fs::write(&acknowledgement, "observed").unwrap();
+        }
+        progress.push_str(&line);
+        progress.push('\n');
+    }
+    let result = child.wait_with_output().unwrap();
+    assert!(progress.contains("1/2 rows (50.0%)"), "{progress}");
+    assert!(progress.contains("2/2 rows (100.0%)"), "{progress}");
+    assert!(!progress.contains("secret-token"));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("secret-token"));
+    assert!(!progress.contains('\u{1b}'));
+    json(result);
 }
 
 #[test]
@@ -703,8 +779,7 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
                 .map_or("3", |pair| pair[1]);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains(&format!("3 available source records; {expected} selected")));
-            assert!(stderr.contains(&format!("100.0% · {expected}/{expected}")));
-            assert!(stderr.contains("committing merchant and location changes"));
+            assert!(stderr.contains("Import: committed"));
             assert!(!stderr.contains("looking up existing source identities"));
             assert!(!stderr.contains("matching new merchant identities"));
             assert!(!stderr.contains("reconciling merchant groups"));
@@ -722,16 +797,9 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
     assert_eq!(preview["selection"]["available_records"], 3);
     assert_eq!(preview["selection"]["selected_records"], 2);
     assert_eq!(preview["manifest"]["merchant_records"], 3);
-    let knowledge =
-        std::path::Path::new(preview["bundle"].as_str().unwrap()).join("knowledge.json");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&std::fs::read(knowledge).unwrap())
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
+    assert!(preview["bundle"].is_null());
+    let checkpoint = std::path::Path::new(preview["checkpoint"].as_str().unwrap());
+    assert!(!checkpoint.join("knowledge.json").exists());
     assert_eq!(store.stats().unwrap().total, 0);
     assert_eq!(execute(&["--offline", "--limit", "1"])["delta"]["added"], 1);
     assert!(
@@ -742,7 +810,8 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
     );
     let larger = execute(&["--offline", "--limit", "2"]);
     assert_eq!(larger["delta"]["added"], 1);
-    assert_eq!(larger["delta"]["unchanged"], 1);
+    assert_eq!(larger["delta"]["unchanged"], 0);
+    assert_eq!(larger["resume"]["previously_committed"], 1);
     assert!(
         store
             .resolve_source("foursquare", "place:c")
@@ -751,6 +820,89 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
     );
     let complete = execute(&["--offline"]);
     assert_eq!(complete["delta"]["added"], 1);
-    assert_eq!(complete["delta"]["unchanged"], 2);
+    assert_eq!(complete["delta"]["unchanged"], 0);
+    assert_eq!(complete["resume"]["previously_committed"], 2);
     assert_eq!(store.stats().unwrap().total, 3);
+}
+
+#[test]
+fn foursquare_checkpoint_resume_needs_no_download_cache_or_original_csv() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let input = root.path().join("input.csv");
+    std::fs::write(&input, "fsq_place_id,name,country,fsq_category_ids,date_closed\na,Cafe A,CA,\"[\"\"restaurant\"\"]\",\nb,Cafe B,CA,\"[\"\"restaurant\"\"]\",\nc,Cafe C,CA,\"[\"\"restaurant\"\"]\",\n").unwrap();
+    let output = root.path().join("out");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .args(["sources", "--cache-dir"])
+            .arg(root.path().join("cache"))
+            .args(args)
+            .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url())
+            .env_remove("ULTRAFINANCE_FOURSQUARE_TOKEN")
+            .output()
+            .unwrap()
+    };
+    let first = json(invoke(&[
+        "import",
+        "foursquare",
+        "--region",
+        "ca",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--limit",
+        "1",
+        "--chunk-size",
+        "1",
+    ]));
+    std::fs::remove_file(&input).unwrap();
+    std::fs::remove_dir_all(root.path().join("cache")).unwrap();
+    let resumed = invoke(&[
+        "import",
+        "foursquare",
+        "--region",
+        "ca",
+        "--resume",
+        first["checkpoint"].as_str().unwrap(),
+        "--chunk-size",
+        "1",
+    ]);
+    let stderr = String::from_utf8_lossy(&resumed.stderr);
+    assert!(stderr.contains("resuming at 1 committed source records"));
+    assert!(!stderr.contains("hashing input CSV") && !stderr.contains("Downloading Foursquare"));
+    let report = json(resumed);
+    assert_eq!(report["resume"]["previously_committed"], 1);
+    assert_eq!(report["resume"]["committed_this_run"], 2);
+    assert_eq!(report["resume"]["complete"], true);
+    assert_eq!(
+        store
+            .source_records("foursquare", None, 100, 0)
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn foursquare_checkpoint_resume_flags_reject_incompatible_modes() {
+    let root = tempfile::tempdir().unwrap();
+    for extra in [
+        vec!["--offline"],
+        vec!["--input", "input.csv"],
+        vec!["--dry-run"],
+        vec!["--dedupe-dry-run"],
+    ] {
+        let mut args = vec!["import", "foursquare", "--resume", "checkpoint"];
+        args.extend(extra);
+        let result = run(root.path(), &args);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be used with"));
+    }
+    let result = run(
+        root.path(),
+        &["import", "merchant-studio", "--resume", "checkpoint"],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("only for Foursquare"));
 }

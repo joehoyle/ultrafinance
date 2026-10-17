@@ -134,6 +134,57 @@ fn session_command() -> String {
     format!("/bin/bash -c '{}'", script.replace('\'', "'\"'\"'"))
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum SessionMode {
+    Temporary,
+    Persistent { hours: u32 },
+}
+
+pub(super) fn preflight() -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        bail!("run infra cli or cli-attach in an interactive terminal");
+    }
+    if !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|path| path.join("session-manager-plugin").is_file())
+    {
+        bail!("install the AWS Session Manager plugin before opening a shell");
+    }
+    Ok(())
+}
+
+fn persistent_command() -> String {
+    let script = include_str!("admin-shell.sh");
+    let tmux = include_str!("persistent-shell.sh");
+    format!(
+        "/bin/bash -c '{}' admin-shell /bin/bash -c '{}'",
+        script.replace('\'', "'\"'\"'"),
+        tmux.replace('\'', "'\"'\"'")
+    )
+}
+
+pub(super) fn execute(aws: &Aws, config: &Value, task: &str, persistent: bool) -> Result<()> {
+    let _interrupts = Interrupts::install()?;
+    let _terminal = super::terminal::TerminalState::capture();
+    let command = if persistent {
+        persistent_command()
+    } else {
+        session_command()
+    };
+    super::checked(aws.command().args([
+        "ecs",
+        "execute-command",
+        "--cluster",
+        text(config, "cluster")?,
+        "--task",
+        task,
+        "--container",
+        "cli",
+        "--interactive",
+        "--command",
+        &command,
+    ]))
+}
+
 fn registration(definition: &Value, image: &str) -> Result<Value> {
     validate_image(image)?;
     let mut request = serde_json::Map::new();
@@ -220,42 +271,43 @@ fn resolve_image(aws: &impl Api, function: &str, selection: ImageSelection<'_>) 
     .map(str::to_owned)
 }
 
-pub fn open(root: &Path, image: ImageSelection<'_>) -> Result<()> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("run infra cli in an interactive terminal");
-    }
-    if !std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .any(|path| path.join("session-manager-plugin").is_file())
-    {
-        bail!("install the AWS Session Manager plugin before opening a shell");
-    }
-    let config = config(root)?;
+pub(super) fn open(
+    root: &Path,
+    image: ImageSelection<'_>,
+    mode: SessionMode,
+    snapshot: Option<&str>,
+) -> Result<()> {
+    preflight()?;
+    let mut config = config(root)?;
     let aws = Aws::configured(root)?;
+    if let Some(snapshot) = snapshot {
+        super::persistent::restore_snapshot(&aws, &mut config, snapshot)?;
+    }
     let interrupts = Interrupts::install()?;
-    run_shell(
+    run_shell_mode(
         &aws,
         &config,
         image,
+        mode,
         Duration::from_secs(300),
         || interrupts.check(),
         |task| {
-            println!(
-                "Opening database administrator shell. Ctrl-C cancels remote commands; use exit to stop the task. The task expires after one hour."
-            );
+            if matches!(mode, SessionMode::Temporary) {
+                println!(
+                    "Opening database administrator shell. Ctrl-C cancels remote commands; use exit to stop the task. The task expires at its configured lifetime; scratch files are deleted when it stops."
+                );
+            } else {
+                println!(
+                    "Opening persistent tmux administrator shell. Detach with Ctrl-B then D. Disconnecting keeps the task and disk until expiry or cli-stop."
+                );
+            }
             io::stdout().flush()?;
-            super::checked(aws.command().args([
-                "ecs",
-                "execute-command",
-                "--cluster",
-                text(&config, "cluster")?,
-                "--task",
+            execute(
+                &aws,
+                &config,
                 task,
-                "--container",
-                "cli",
-                "--interactive",
-                "--command",
-                &session_command(),
-            ]))
+                matches!(mode, SessionMode::Persistent { .. }),
+            )
         },
     )
 }
@@ -283,11 +335,37 @@ pub(super) fn run_shell(
     interrupt: impl Fn() -> Result<()>,
     session: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
+    run_shell_mode(
+        aws,
+        config,
+        image,
+        SessionMode::Temporary,
+        timeout,
+        interrupt,
+        session,
+    )
+}
+
+pub(super) fn run_shell_mode(
+    aws: &impl Api,
+    config: &Value,
+    image: ImageSelection<'_>,
+    mode: SessionMode,
+    timeout: Duration,
+    interrupt: impl Fn() -> Result<()>,
+    session: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    if let SessionMode::Persistent { hours } = mode
+        && !(1..=168).contains(&hours)
+    {
+        bail!("persistent task lifetime must be between 1 and 168 hours");
+    }
     let cluster = text(config, "cluster")?;
     let job = uuid::Uuid::new_v4().simple().to_string();
     let mut task: Option<String> = None;
     let mut revision: Option<String> = None;
     let mut launch_attempted = false;
+    let mut retain = false;
     let outcome = (|| -> Result<()> {
         interrupt()?;
         let definition = aws.call(&[
@@ -297,7 +375,27 @@ pub(super) fn run_shell(
             text(config, "task_definition")?,
         ])?;
         let chosen = resolve_image(aws, text(config, "function_name")?, image)?;
-        let request = registration(&definition["taskDefinition"], &chosen)?;
+        let mut request = registration(&definition["taskDefinition"], &chosen)?;
+        if let SessionMode::Persistent { hours } = mode {
+            let cli = request["containerDefinitions"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|container| container["name"] == "cli")
+                .unwrap();
+            cli["command"] = json!([format!(
+                "mkdir -p /scratch/tmp && exec sleep {}",
+                hours * 3600
+            )]);
+            if cli["environment"].is_null() {
+                cli["environment"] = json!([]);
+            }
+            let environment = cli["environment"]
+                .as_array_mut()
+                .context("invalid CLI environment")?;
+            environment.retain(|value| value["name"] != "ULTRAFINANCE_CLI_PERSISTENT");
+            environment.push(json!({"name":"ULTRAFINANCE_CLI_PERSISTENT","value":"1"}));
+        }
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("task.json");
         std::fs::write(&path, serde_json::to_vec(&request)?)?;
@@ -313,29 +411,46 @@ pub(super) fn run_shell(
             "securityGroups":config["security_groups"],"assignPublicIp":"DISABLED"}})
         .to_string();
         println!("Session: {job}");
+        if let SessionMode::Persistent { hours } = mode {
+            println!(
+                "Maximum lifetime: {hours} hours from task startup; reconnecting does not extend it.\nReconnect: cargo run -- infra cli-attach {job}\nStop and delete scratch disk: cargo run -- infra cli-stop {job}"
+            );
+            io::stdout().flush()?;
+        }
+        let volumes = config.get("volume_configurations").map(Value::to_string);
+        let mut volume_args = Vec::new();
+        if let Some(volumes) = &volumes {
+            volume_args.extend(["--volume-configurations", volumes.as_str()]);
+        }
         launch_attempted = true;
         let result = aws
-            .call(&[
-                "ecs",
-                "run-task",
-                "--cluster",
-                cluster,
-                "--task-definition",
-                revision.as_deref().context("missing task revision")?,
-                "--launch-type",
-                "FARGATE",
-                "--platform-version",
-                "1.4.0",
-                "--count",
-                "1",
-                "--client-token",
-                &job,
-                "--started-by",
-                &job,
-                "--enable-execute-command",
-                "--network-configuration",
-                &network,
-            ])
+            .call(
+                &[
+                    &[
+                        "ecs",
+                        "run-task",
+                        "--cluster",
+                        cluster,
+                        "--task-definition",
+                        revision.as_deref().context("missing task revision")?,
+                        "--launch-type",
+                        "FARGATE",
+                        "--platform-version",
+                        "1.4.0",
+                        "--count",
+                        "1",
+                        "--client-token",
+                        &job,
+                        "--started-by",
+                        &job,
+                        "--enable-execute-command",
+                        "--network-configuration",
+                        &network,
+                    ][..],
+                    volume_args.as_slice(),
+                ]
+                .concat(),
+            )
             .with_context(|| {
                 format!("launch outcome uncertain; check ECS tasks started by {job}")
             })?;
@@ -393,11 +508,18 @@ pub(super) fn run_shell(
         }
         drop(indicator);
         interrupt()?;
+        retain = matches!(mode, SessionMode::Persistent { .. });
         session(task)
     })();
     // Attempt both cleanup steps even if one fails. Do not deregister after an
-    // uncertain launch: the task can still reference this revision for an hour.
-    let stop = if let Some(task) = &task {
+    // uncertain launch: the task can still reference this revision until expiry.
+    // Once ready, persistent tasks survive even a failed initial Exec connection.
+    if retain {
+        println!("Persistent session {job} remains available until expiry or cli-stop.");
+    }
+    let stop = if let Some(task) = &task
+        && !retain
+    {
         aws.call(&[
             "ecs",
             "stop-task",
