@@ -27,12 +27,23 @@ fn packaged_homepage_renders_the_saved_request_and_full_response() {
         serde_json::from_str(include_str!("../../../../../website/example.json")).unwrap();
     let html = homepage();
     assert!(!html.contains("{{EXAMPLE_"));
-    assert!(html.contains(&escape(
-        &serde_json::to_string_pretty(&saved.response).unwrap()
-    )));
+    assert!(html.contains(&highlight_json(&display_json(&saved.response, 0))));
     assert!(html.contains(&escape(saved.request["description"].as_str().unwrap())));
     assert!(html.contains(&saved.captured_at));
     assert!(!html.contains("NORTHSTAR"));
+}
+
+#[test]
+fn compact_json_preserves_payload_and_puts_merchant_before_attributions() {
+    let value = json!({
+        "attributions":["A long source with a URL: https://example.com/credits"],
+        "location":{"status":"unresolved","data":null},
+        "merchant":{"status":"matched","data":{"id":"brand","name":"Café \"Brand\"","markets":["CA","US"]}}
+    });
+    let formatted = display_json(&value, 0);
+    assert_eq!(serde_json::from_str::<Value>(&formatted).unwrap(), value);
+    assert!(formatted.find("\"merchant\"").unwrap() < formatted.find("\"attributions\"").unwrap());
+    assert!(formatted.contains("[\"CA\", \"US\"]"));
 }
 
 #[tokio::test]

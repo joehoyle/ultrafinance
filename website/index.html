@@ -71,31 +71,36 @@
     .github { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; }
     .github svg { width: 19px; height: 19px; }
     .arrow { margin-left: 5px; font-size: 17px; }
-    main { padding: 86px 0 72px; }
-    .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 52px; align-items: center; }
+    main { padding: 64px 0 72px; }
+    .hero { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 52px; align-items: start; }
+    .hero-copy { padding-top: 38px; }
     .eyebrow { display: flex; align-items: center; gap: 9px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1.2px; text-transform: uppercase; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: #66872c; box-shadow: 0 0 0 4px #eaf0df; }
     h1 { font-size: clamp(48px, 5.5vw, 72px); line-height: 1.04; font-weight: 650; letter-spacing: -4px; margin: 27px 0 25px; }
     h1 span { display: inline-block; background: var(--lime); padding: 0 7px 5px; margin-left: -7px; transform: rotate(-1.5deg); }
     .intro { max-width: 390px; color: #646b5c; font-size: 17px; line-height: 1.7; margin: 0; }
-    .actions { display: flex; gap: 23px; align-items: center; margin-top: 31px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 18px 23px; align-items: center; margin-top: 31px; }
     .primary { background: var(--ink); color: #fff; padding: 15px 19px; border-radius: 7px; transition: background .15s, transform .15s; }
     .primary:hover { background: #3a452c; transform: translateY(-2px); }
     .secondary { font-size: 13px; border-bottom: 1px solid #a7ad9b; padding: 5px 0; }
     .meta { margin-top: 24px; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); }
-    .demo { background: #fff; border: 1px solid var(--line); border-radius: 13px; overflow: hidden; box-shadow: 0 12px 40px #27321a08; }
-    .demo-head { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 15px 20px; }
+    .demo { min-width: 0; background: #fff; border: 1px solid var(--line); border-radius: 13px; overflow: hidden; box-shadow: 0 12px 40px #27321a08; }
+    .demo-head { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 12px 16px; }
     .tabs { display: flex; gap: 5px; }
     .tab { border: 0; background: transparent; color: #626957; padding: 7px 11px; border-radius: 5px; cursor: pointer; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
     .tab[aria-selected="true"] { background: #edf1e6; color: var(--ink); font-weight: 600; }
     .copy { border: 0; background: transparent; color: #626957; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 11px; padding: 7px; }
     .copy svg { width: 14px; height: 14px; }
-    .code-area { padding: 25px 24px 28px; min-height: 236px; }
+    .code-area { padding: 20px 22px; min-height: 200px; }
+    .demo pre { font-size: 12px; line-height: 1.65; }
+    .demo .label { margin-bottom: 14px; }
     .label { color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 17px; }
     pre { margin: 0; font: 12px/1.9 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; overflow-x: auto; tab-size: 2; }
     .cmd { color: #6b822f; } .string { color: #7e583d; } .key { color: #52617e; } .dim { color: #747d69; }
-    .response { background: #f0f3e9; border-top: 1px solid var(--line); padding: 21px 24px 23px; }
-    .response pre { max-height: 360px; overflow-y: auto; }
+    .response { background: #f0f3e9; border-top: 1px solid var(--line); padding: 20px 22px; }
+    .response pre { max-height: 276px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: #bdc6ad transparent; }
+    .demo-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; border-top: 1px solid var(--line); padding: 13px 22px; color: #657058; font-size: 10px; line-height: 1.5; }
+    .demo-foot time { font-variant-numeric: tabular-nums; }
     .response .label { display: flex; justify-content: space-between; margin-bottom: 13px; }
     .status { color: #58712e; letter-spacing: 0; }
     .note { font-size: 11px; line-height: 1.6; color: #657058; margin: 13px 0 0; }
@@ -152,10 +157,10 @@
     footer a:hover, .secondary:hover { color: var(--ink); }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
     [hidden] { display: none !important; }
-    @media (min-width: 1400px) { main { padding-top: 110px; } }
+    @media (min-width: 1400px) { main { padding-top: 78px; } }
     @media (max-width: 900px) { .wrap { padding: 0 28px; } .hero { gap: 28px; } h1 { font-size: 56px; letter-spacing: -3px; } pre { font-size: 11px; } .code-area, .response { padding-left: 18px; padding-right: 18px; } }
-    @media (max-width: 720px) { nav { height: 85px; } main { padding: 52px 0 46px; } .hero { grid-template-columns: 1fr; gap: 40px; } h1 { font-size: clamp(49px, 9vw, 66px); } .intro { max-width: 440px; } .details { margin-top: 45px; gap: 22px; } pre { font-size: 12px; } }
-    @media (max-width: 460px) { .wrap { padding: 0 22px; } .brand { font-size: 19px; } .nav-links { gap: 16px; } nav .github .nav-label { display: none; } .details { grid-template-columns: 1fr; gap: 24px; } .details p { max-width: none; } .details h2 { margin-top: 7px; } footer { font-size: 10px; } .actions { gap: 18px; } pre { font-size: 11px; } }
+    @media (max-width: 720px) { nav { height: 85px; } main { padding: 52px 0 46px; } .hero { grid-template-columns: 1fr; gap: 32px; } .hero-copy { padding-top: 0; } h1 { font-size: clamp(49px, 9vw, 66px); } .intro { max-width: 440px; } .details { margin-top: 45px; gap: 22px; } pre { font-size: 12px; } }
+    @media (max-width: 460px) { .wrap { padding: 0 22px; } .brand { font-size: 19px; } .nav-links { gap: 16px; } nav .github .nav-label { display: none; } .details { grid-template-columns: 1fr; gap: 24px; } .details p { max-width: none; } .details h2 { margin-top: 7px; } footer { font-size: 10px; } .actions { gap: 14px 18px; } .demo pre { font-size: 11px; } .demo-head { padding: 12px; } .code-area, .response { padding: 18px 16px; } .demo-foot { padding: 12px 16px; } pre { font-size: 11px; } }
     @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .primary { transition: none; } }
   </style>
 </head>
@@ -168,7 +173,7 @@
     </nav>
     <main>
       <section class="hero" aria-labelledby="headline">
-        <div>
+        <div class="hero-copy">
           <div class="eyebrow"><span class="dot" aria-hidden="true"></span>Merchant enrichment for developers</div>
           <h1 id="headline">Make sense<br>of the <span>spend.</span></h1>
           <p class="intro">Messy transaction descriptions in. Structured merchant data out. One simple API for your app, with open source at its core.</p>
@@ -195,8 +200,8 @@
           <div class="response">
             <div class="label"><span>02 / Example response</span><span class="status">200 OK</span></div>
             <pre tabindex="0" aria-label="Saved API response"><code>{{EXAMPLE_RESPONSE}}</code></pre>
-            <p class="note">Actual API response · captured <time datetime="{{EXAMPLE_CAPTURED_AT}}">{{EXAMPLE_CAPTURED_AT}}</time>. Refreshed with each release; run a lookup below for a live result.</p>
           </div>
+          <div class="demo-foot"><span>Actual API response</span><time datetime="{{EXAMPLE_CAPTURED_AT}}">{{EXAMPLE_CAPTURED_LABEL}}</time></div>
         </div>
       </section>
       <section class="lookup" id="try-it" aria-labelledby="lookup-heading">
