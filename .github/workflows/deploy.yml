@@ -69,6 +69,8 @@ jobs:
           printf 'revision=%s\n' "$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
           printf 'dirty=%s\n' "$build_dirty" >> "$GITHUB_OUTPUT"
           printf 'time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Capture homepage example
+        run: cargo +1.98 run --locked -- infra refresh-example
       - name: Build and push
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7

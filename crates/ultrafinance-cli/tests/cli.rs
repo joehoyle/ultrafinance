@@ -315,6 +315,12 @@ fn infra_routes_logs_and_stops_deploy_before_build_on_config_failure() {
     std::fs::create_dir_all(directory.join("deploy")).unwrap();
     std::fs::create_dir_all(directory.join("infra")).unwrap();
     std::fs::create_dir_all(directory.join("bin")).unwrap();
+    std::fs::create_dir_all(directory.join("website")).unwrap();
+    std::fs::write(
+        directory.join("website/example.json"),
+        include_str!("../../../website/example.json"),
+    )
+    .unwrap();
     std::fs::write(directory.join("infra/outputs.tf"), "").unwrap();
     std::fs::write(directory.join("Cargo.toml"), "").unwrap();
     for (file, body) in [

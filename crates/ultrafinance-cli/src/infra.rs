@@ -6,6 +6,7 @@ use std::{
 };
 mod aws;
 mod cleanup;
+mod example;
 mod import_db;
 mod persistent;
 mod release;
@@ -29,6 +30,11 @@ enum InfraCommand {
         /// Release an already-pushed immutable ECR digest without rebuilding.
         #[arg(long)]
         image: Option<String>,
+    },
+    /// Capture a real API response for the static homepage example.
+    RefreshExample {
+        #[arg(long, default_value = "https://ultrafinance.app")]
+        site_url: String,
     },
     /// Open the interactive production CLI shell using ECS Exec.
     #[command(alias = "shell")]
@@ -153,6 +159,7 @@ pub fn run(args: InfraArgs) -> Result<()> {
     let root = workspace(args.workspace)?;
     match args.command {
         InfraCommand::Deploy { image } => release::deploy(&root, image.as_deref()),
+        InfraCommand::RefreshExample { site_url } => example::refresh(&root, &site_url),
         InfraCommand::Cli {
             image,
             latest,

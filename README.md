@@ -47,8 +47,10 @@ Open `http://127.0.0.1:3000/` for the project website, copyable HTTP/CLI example
 an interactive merchant lookup, and a searchable merchant explorer. The form calls `/v1/enrich` on the same
 origin. Static hosting needs a same-origin proxy for `/v1/enrich` to support
 live lookups.
-The standalone page lives in `website/index.html` and can also be hosted by any
-static web server, without a frontend build step. The `/sources` page
+The page template lives in `website/index.html`; the API fills its example
+placeholders from the embedded `website/example.json` snapshot without database
+access or a frontend build step. To host the homepage separately, save the HTML
+served by `/` rather than serving the template directly. The `/sources` page
 (`website/sources.html`) documents supported catalog and evaluation datasets,
 credits, licenses, transformations, and coverage limitations. Static hosts need
 to map `/sources` to that file.
@@ -972,6 +974,33 @@ Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
 against version 12, so application-only rollback across this schema change is unsupported.
 
+## Homepage example
+
+The homepage displays a saved, complete production API response, with its UTC
+capture time. `website/example.json` holds the request, response, and source URL;
+the API embeds it and renders the example commands from that same request. Serving
+the homepage does not query the database. The merchant explorer loads only after
+someone clicks Browse or submits a search; submitting a lookup calls the live API.
+
+Local deployments and GitHub Actions refresh the snapshot **before building the
+image**, so the capture is included in the immutable release. A failed request,
+unresolved result, or changed merchant ID stops the release and preserves the
+previous snapshot. The candidate and live Lambda checks also run the example
+request and verify the expected merchant. The capture reflects the production API
+at build time; its timestamp distinguishes it from a live lookup.
+
+After catalog changes, refresh manually and include the updated snapshot in the
+next release:
+
+```sh
+cargo run --locked -- infra refresh-example
+```
+
+To change the example, edit its request in `website/example.json` and review the
+expected merchant ID in its response before refreshing. The example uses a public
+brand descriptor without personal transaction details. Do not hand-edit the saved
+response to add fields or logos absent from the API result.
+
 ## Merchant logos
 
 Merchants optionally include `logo_url` and `logo_source`. Add a verified brand
@@ -986,10 +1015,12 @@ The source defaults to `manual`. Native imports accept the same optional fields,
 with the import namespace as the default logo source. Manual records and imported
 source records keep their logo fields independently, so an import refresh cannot
 overwrite a manually set logo. Existing records without logos remain valid.
-Logos appear in JSON records and enrichment responses, not as images in the
-terminal table. URLs are validated as HTTP(S); the service does not download or
-verify the image. Merchant Studio's `iconSlug` remains source evidence and does
-not become a guessed logo URL. Automatic discovery is not implemented yet.
+Logos appear in catalog and enrichment API responses. The website shows HTTPS
+logos in the merchant explorer and matched lookup result, with a letter fallback
+when no image is available or it fails to load. The terminal table stays text-only.
+URLs are validated as HTTP(S); the service does not download or verify the image.
+Merchant Studio's `iconSlug` remains source evidence and does not become a guessed
+logo URL. Automatic discovery is not implemented yet.
 
 ## External datasets
 

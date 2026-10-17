@@ -1,0 +1,33 @@
+{
+  "captured_at": "2026-10-17T11:53:26Z",
+  "endpoint": "https://ultrafinance.app/v1/enrich",
+  "request": {
+    "amount": "6.50",
+    "country": "CA",
+    "currency": "CAD",
+    "description": "STARBUCKS"
+  },
+  "response": {
+    "attributions": [
+      "Foursquare OS Places by Foursquare Labs, Inc. (Apache-2.0, https://docs.foursquare.com/data-products/docs/places-os-data-schema)",
+      "Enrichment from Merchant Studio by Jonathan Taveras (CC-BY-4.0, https://github.com/jtvargas/merchant-studio)",
+      "Open Enrichment by Steve Harrison (CC0-1.0, https://github.com/steveharrison/openenrichment)"
+    ],
+    "location": {
+      "data": null,
+      "status": "unresolved"
+    },
+    "merchant": {
+      "data": {
+        "id": "mer_d1feb5eb95f1415ea7cd5df9c9f428f5",
+        "markets": [
+          "CA",
+          "US"
+        ],
+        "name": "Starbucks",
+        "website": "https://www.starbucks.com/store-locator/store/1022254"
+      },
+      "status": "matched"
+    }
+  }
+}

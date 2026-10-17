@@ -102,6 +102,8 @@
                       "merchant": {
                         "data": {
                           "id": "mer_example",
+                          "logo_source": "official website",
+                          "logo_url": "https://example.com/logo.png",
                           "markets": [
                             "CA"
                           ],
@@ -801,13 +803,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Attribution for the logo URL, such as an official website or import source."
           },
           "logo_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Verified public image URL for the merchant brand, when available."
           },
           "markets": {
             "type": "array",

@@ -13,6 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{env, sync::Arc, time::Duration};
 mod response;
+mod website;
 
 use response::{BatchEnrichResponse, BatchItemResult, EnrichResponse, MerchantPage};
 use ultrafinance_core::batch::BatchEnrichRequest;
@@ -111,27 +112,24 @@ fn router(enricher: Enricher) -> Router {
             get(move || async move { site_asset(content_type, content) }),
         );
     }
-    site.route(
-        "/",
-        get(|| async { Html(include_str!("../../../website/index.html")) }),
-    )
-    .route(
-        "/sources",
-        get(|| async { Html(include_str!("../../../website/sources.html")) }),
-    )
-    .route(
-        "/privacy",
-        get(|| async { Html(include_str!("../../../website/privacy.html")) }),
-    )
-    .route(
-        "/terms",
-        get(|| async { Html(include_str!("../../../website/terms.html")) }),
-    )
-    .merge(api)
-    .merge(Scalar::with_url("/docs", spec.clone()).title("Ultrafinance API documentation"))
-    .route("/openapi.json", get(move || async move { Json(spec) }))
-    .layer(DefaultBodyLimit::max(64 * 1024))
-    .with_state(Arc::new(enricher))
+    site.route("/", get(|| async { Html(website::homepage()) }))
+        .route(
+            "/sources",
+            get(|| async { Html(include_str!("../../../website/sources.html")) }),
+        )
+        .route(
+            "/privacy",
+            get(|| async { Html(include_str!("../../../website/privacy.html")) }),
+        )
+        .route(
+            "/terms",
+            get(|| async { Html(include_str!("../../../website/terms.html")) }),
+        )
+        .merge(api)
+        .merge(Scalar::with_url("/docs", spec.clone()).title("Ultrafinance API documentation"))
+        .route("/openapi.json", get(move || async move { Json(spec) }))
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .with_state(Arc::new(enricher))
 }
 
 fn site_asset(content_type: &'static str, content: &'static [u8]) -> Response {
@@ -261,7 +259,7 @@ async fn merchants(
             examples(
                 ("extracted_location" = (value = json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"extracted","data":{"id":null,"precision":"city","address":null,"city":"Hialeah","region":"FL","postal_code":null,"country":"US","store_number":"10241"}}}))),
                 ("unresolved" = (value = json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}}))),
-                ("matched" = (value = json!({"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","markets":["CA"]}},"location":{"status":"unresolved","data":null}})))
+                ("matched" = (value = json!({"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png","logo_source":"official website"}},"location":{"status":"unresolved","data":null}})))
             )),
         (status = 400, description = "Malformed JSON", body = ApiError),
         (status = 413, description = "Request body exceeds 64 KiB", body = ApiError),

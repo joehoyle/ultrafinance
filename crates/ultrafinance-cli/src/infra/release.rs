@@ -16,6 +16,7 @@ trait Lambda {
 struct Client<'a> {
     aws: &'a Aws,
     function: &'a str,
+    example: &'a Value,
 }
 
 impl Lambda for Client<'_> {
@@ -35,6 +36,12 @@ impl Lambda for Client<'_> {
             ("GET", "/openapi.json", Value::Null, 200),
             ("GET", "/v1/merchants", Value::Null, 200),
             ("POST", "/v1/enrich", json!("{\"description\":\"\"}"), 422),
+            (
+                "POST",
+                "/v1/enrich",
+                Value::String(serde_json::to_string(&self.example["request"])?),
+                200,
+            ),
         ] {
             let directory = tempfile::tempdir()?;
             let payload = directory.path().join("event.json");
@@ -75,6 +82,10 @@ impl Lambda for Client<'_> {
                 body.as_bytes().to_vec()
             };
             verify_body(path, &decoded)?;
+            if path == "/v1/enrich" && expected == 200 {
+                super::example::verify_response(self.example, &serde_json::from_slice(&decoded)?)
+                    .context("released API failed the homepage example check")?;
+            }
         }
         Ok(())
     }
@@ -261,6 +272,8 @@ fn build(root: &Path, aws: &Aws) -> Result<String> {
         "Building CLI version {}",
         metadata.version(env!("CARGO_PKG_VERSION"))
     );
+    // Capture before compiling: the snapshot is embedded in the immutable image.
+    super::example::refresh(root, &super::output(root, "site_url")?)?;
     let mut command = Command::new("docker");
     command.current_dir(root).args([
         "buildx",
@@ -311,7 +324,15 @@ fn build(root: &Path, aws: &Aws) -> Result<String> {
 }
 
 fn promote(root: &Path, aws: &Aws, function: &str, image: &str) -> Result<()> {
-    let (version, previous) = release(&Client { aws, function }, image)?;
+    let example = serde_json::from_slice(&std::fs::read(root.join("website/example.json"))?)?;
+    let (version, previous) = release(
+        &Client {
+            aws,
+            function,
+            example: &example,
+        },
+        image,
+    )?;
     println!("Deployed version {version}; previous version {previous}");
     let site = super::output(root, "site_url")?;
     for path in ["/health", "/docs", "/openapi.json"] {

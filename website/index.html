@@ -95,6 +95,7 @@
     pre { margin: 0; font: 12px/1.9 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; overflow-x: auto; tab-size: 2; }
     .cmd { color: #6b822f; } .string { color: #7e583d; } .key { color: #52617e; } .dim { color: #747d69; }
     .response { background: #f0f3e9; border-top: 1px solid var(--line); padding: 21px 24px 23px; }
+    .response pre { max-height: 360px; overflow-y: auto; }
     .response .label { display: flex; justify-content: space-between; margin-bottom: 13px; }
     .status { color: #58712e; letter-spacing: 0; }
     .note { font-size: 11px; line-height: 1.6; color: #657058; margin: 13px 0 0; }
@@ -118,7 +119,8 @@
     .lookup-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; }
     .lookup-result[data-state="error"] { background: #fff4ef; border-color: #e7cbbd; }
     .lookup-result[data-state="matched"] { background: #edf5df; }
-    #lookup-status { font-size: 16px; font-weight: 600; margin: 16px 0 10px; }
+    .lookup-summary { display: flex; align-items: center; gap: 12px; margin: 16px 0 10px; }
+    #lookup-status { font-size: 16px; font-weight: 600; margin: 0; }
     #lookup-message { color: #657058; font-size: 13px; line-height: 1.6; margin: 0 0 18px; }
     .explorer { margin-top: 64px; scroll-margin-top: 24px; }
     .catalog-form { display: grid; grid-template-columns: 1fr 145px auto auto; align-items: end; gap: 12px; margin-bottom: 21px; }
@@ -128,7 +130,11 @@
     #catalog-status { font-size: 13px; color: #646b5c; min-height: 20px; }
     .merchant-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
     .merchant-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 21px; min-width: 0; }
-    .merchant-card h3 { font-size: 17px; letter-spacing: -.3px; margin: 0 0 7px; overflow-wrap: anywhere; }
+    .merchant-identity { display: flex; align-items: center; gap: 12px; min-width: 0; margin-bottom: 12px; }
+    .merchant-card h3 { font-size: 17px; letter-spacing: -.3px; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .merchant-logo { width: 46px; height: 46px; flex: none; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: #f2f5ea; color: #58712e; font: 700 18px/1 ui-sans-serif, system-ui, sans-serif; }
+    .merchant-logo > * { grid-area: 1 / 1; }
+    .merchant-logo img { width: 100%; height: 100%; box-sizing: border-box; padding: 5px; object-fit: contain; background: #fff; }
     .merchant-card .merchant-id { display: block; font: 10px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; margin: 12px 0; }
     .merchant-markets { display: inline-block; font-size: 10px; background: #edf1e6; padding: 4px 7px; border-radius: 4px; }
     .merchant-link { display: block; color: #58712e; font-size: 12px; overflow-wrap: anywhere; margin: 13px 0; }
@@ -183,34 +189,13 @@
           </div>
           <div class="code-area">
             <div class="label">01 / Example request</div>
-            <pre id="api-example" role="tabpanel" aria-labelledby="api-tab" tabindex="0"><code><span class="cmd">curl</span> https://ultrafinance.app/v1/enrich \
-  -H <span class="string">'Content-Type: application/json'</span> \
-  -d <span class="string">'{
-    "description": "NORTHSTAR*COFFEE #042",
-    "amount": "6.50",
-    "currency": "CAD",
-    "country": "CA"
-  }'</span></code></pre>
-            <pre id="cli-example" role="tabpanel" aria-labelledby="cli-tab" tabindex="0" hidden><code><span class="dim"># No HTTP server needed</span>
-<span class="cmd">cargo run</span> -- enrich <span class="string">'NORTHSTAR*COFFEE #042'</span> \
-  --amount <span class="string">6.50</span> \
-  --currency <span class="string">CAD</span> \
-  --country <span class="string">CA</span></code></pre>
+            <pre id="api-example" role="tabpanel" aria-labelledby="api-tab" tabindex="0"><code>{{EXAMPLE_API_REQUEST}}</code></pre>
+            <pre id="cli-example" role="tabpanel" aria-labelledby="cli-tab" tabindex="0" hidden><code>{{EXAMPLE_CLI_REQUEST}}</code></pre>
           </div>
           <div class="response">
             <div class="label"><span>02 / Example response</span><span class="status">200 OK</span></div>
-            <pre><code>{
-  <span class="key">"merchant"</span>: {
-    <span class="key">"status"</span>: <span class="string">"matched"</span>,
-    <span class="key">"data"</span>: {
-      <span class="key">"id"</span>: <span class="string">"mer_northstar_coffee"</span>,
-      <span class="key">"name"</span>: <span class="string">"Northstar Coffee"</span>,
-      <span class="key">"markets"</span>: <span class="string">["CA"]</span>,
-      <span class="key">"website"</span>: <span class="string">"https://northstar.example"</span>
-    }
-  }
-}</code></pre>
-            <p class="note">Illustrative merchant and response. A messy descriptor becomes a merchant name, stable ID, known markets, and website.</p>
+            <pre tabindex="0" aria-label="Saved API response"><code>{{EXAMPLE_RESPONSE}}</code></pre>
+            <p class="note">Actual API response · captured <time datetime="{{EXAMPLE_CAPTURED_AT}}">{{EXAMPLE_CAPTURED_AT}}</time>. Refreshed with each release; run a lookup below for a live result.</p>
           </div>
         </div>
       </section>
@@ -220,7 +205,7 @@
         <p class="lookup-intro">Enter a transaction description. Add a little context, and see what the API returns.</p>
         <div class="lookup-grid">
           <form class="lookup-form" id="lookup-form">
-            <label class="field" for="description"><span>Transaction description</span><input id="description" name="description" placeholder="e.g. NORTHSTAR*COFFEE #042" required maxlength="4096" autocomplete="off" aria-describedby="lookup-privacy"></label>
+            <label class="field" for="description"><span>Transaction description</span><input id="description" name="description" placeholder="e.g. STARBUCKS" required maxlength="4096" autocomplete="off" aria-describedby="lookup-privacy"></label>
             <div class="context-fields">
               <label class="field" for="amount"><span>Amount <span class="optional">optional</span></span><input id="amount" name="amount" placeholder="6.50" inputmode="decimal" pattern="-?[0-9]+([.][0-9]+)?" title="Enter a decimal amount, such as 6.50."></label>
               <label class="field" for="currency"><span>Currency <span class="optional">optional</span></span><input id="currency" name="currency" placeholder="CAD" maxlength="3" pattern="[A-Za-z]{3}" title="Use a three-letter currency code, such as CAD."></label>
@@ -232,7 +217,7 @@
           </form>
           <div class="lookup-result" id="lookup-result" data-state="idle" aria-busy="false">
             <div class="label">Live API response</div>
-            <div role="status" aria-live="polite" aria-atomic="true"><p id="lookup-status">Ready when you are.</p><p id="lookup-message">Your lookup result will appear here. Uncertain matches can stay unresolved.</p></div>
+            <div role="status" aria-live="polite" aria-atomic="true"><div class="lookup-summary"><span class="merchant-logo" id="lookup-logo" hidden></span><p id="lookup-status">Ready when you are.</p></div><p id="lookup-message">Your lookup result will appear here. Uncertain matches can stay unresolved.</p></div>
             <pre id="lookup-json" tabindex="0" aria-label="Lookup response JSON" hidden></pre>
           </div>
         </div>
@@ -247,7 +232,7 @@
           <button type="submit" class="primary">Search</button>
           <button type="button" id="catalog-reset">Browse all</button>
         </form>
-        <p id="catalog-status" role="status" aria-live="polite">Loading merchants…</p>
+        <p id="catalog-status" role="status" aria-live="polite">Browse or search to load merchants.</p>
         <div class="merchant-grid" id="merchant-grid" aria-busy="true"></div>
         <div class="pagination" id="catalog-pagination" hidden>
           <span id="catalog-range"></span>
@@ -280,18 +265,45 @@
         return ['https:', 'http:'].includes(url.protocol) ? url : null;
       } catch { return null; }
     }
+    function merchantLogo(merchant, lazy = true) {
+      const logo = document.createElement('span');
+      logo.className = 'merchant-logo';
+      const fallback = document.createElement('span');
+      fallback.textContent = merchant.name.trim().charAt(0).toUpperCase() || '?';
+      logo.append(fallback);
+      const url = safeWebsite(merchant.logo_url);
+      if (url?.protocol === 'https:' && !url.username && !url.password) {
+        const image = document.createElement('img');
+        image.alt = '';
+        image.style.visibility = 'hidden';
+        image.loading = lazy ? 'lazy' : 'eager';
+        image.decoding = 'async';
+        image.referrerPolicy = 'no-referrer';
+        image.addEventListener('load', () => {
+          fallback.hidden = true;
+          image.style.visibility = '';
+        });
+        image.addEventListener('error', () => image.remove());
+        image.src = url.href;
+        logo.append(image);
+      }
+      return logo;
+    }
     function merchantCard(merchant) {
       const card = document.createElement('article');
       card.className = 'merchant-card';
+      const identity = document.createElement('div');
+      identity.className = 'merchant-identity';
       const title = document.createElement('h3');
       title.textContent = merchant.name;
+      identity.append(merchantLogo(merchant), title);
       const markets = document.createElement('span');
       markets.className = 'merchant-markets';
       markets.textContent = (merchant.markets || []).join(', ') || 'No market evidence';
       const id = document.createElement('code');
       id.className = 'merchant-id';
       id.textContent = merchant.id;
-      card.append(title, markets, id);
+      card.append(identity, markets, id);
       const website = safeWebsite(merchant.website);
       if (website) {
         const link = document.createElement('a');
@@ -385,13 +397,13 @@
     });
     catalogPrev.addEventListener('click', () => loadMerchants(Math.max(0, catalogOffset - catalogPageSize)));
     catalogNext.addEventListener('click', () => loadMerchants(catalogOffset + catalogPageSize));
-    loadMerchants();
     const lookupForm = document.getElementById('lookup-form');
     const lookupResult = document.getElementById('lookup-result');
     const lookupSubmit = document.getElementById('lookup-submit');
     const lookupJson = document.getElementById('lookup-json');
     const lookupStatus = document.getElementById('lookup-status');
     const lookupMessage = document.getElementById('lookup-message');
+    const lookupLogo = document.getElementById('lookup-logo');
     document.getElementById('description').addEventListener('input', event => event.target.setCustomValidity(''));
     lookupForm.addEventListener('submit', async event => {
       event.preventDefault();
@@ -414,6 +426,8 @@
       lookupResult.setAttribute('aria-busy', 'true');
       lookupStatus.textContent = 'Finding the merchant…';
       lookupMessage.textContent = 'Evaluating the description and available evidence.';
+      lookupLogo.hidden = true;
+      lookupLogo.replaceChildren();
       lookupJson.hidden = true;
       lookupJson.textContent = '';
       const controller = new AbortController();
@@ -435,6 +449,8 @@
         } else if (result?.merchant?.status === 'matched' && typeof result.merchant.data?.name === 'string') {
           lookupResult.dataset.state = 'matched';
           lookupStatus.textContent = result.merchant.data.name;
+          lookupLogo.replaceChildren(...merchantLogo(result.merchant.data, false).childNodes);
+          lookupLogo.hidden = false;
           lookupMessage.textContent = 'Merchant matched. The complete response is below.';
         } else if (result?.merchant?.status === 'unresolved') {
           lookupResult.dataset.state = 'unresolved';

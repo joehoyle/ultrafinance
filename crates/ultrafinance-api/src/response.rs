@@ -13,8 +13,10 @@ pub struct Merchant {
     markets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     website: Option<String>,
+    /// Verified public image URL for the merchant brand, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo_url: Option<String>,
+    /// Attribution for the logo URL, such as an official website or import source.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo_source: Option<String>,
 }

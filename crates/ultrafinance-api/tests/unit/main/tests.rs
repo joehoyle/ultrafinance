@@ -9,7 +9,8 @@ use tower::ServiceExt;
 async fn enrichment_responses_hide_aliases_but_still_match_them() {
     let merchants = serde_json::from_value(json!([
         {"id":"beta","name":"Beta Shop","markets":["US"],
-         "website":"https://beta.example","aliases":["BETA BILL"],
+         "website":"https://beta.example","logo_url":"https://beta.example/logo.png",
+         "logo_source":"official website","aliases":["BETA BILL"],
          "sources":["https://source.example"]}
     ]))
     .unwrap();
@@ -46,6 +47,14 @@ async fn enrichment_responses_hide_aliases_but_still_match_them() {
         assert_eq!(
             result["merchant"]["data"]["website"],
             "https://beta.example"
+        );
+        assert_eq!(
+            result["merchant"]["data"]["logo_url"],
+            "https://beta.example/logo.png"
+        );
+        assert_eq!(
+            result["merchant"]["data"]["logo_source"],
+            "official website"
         );
         assert!(result["merchant"]["data"].get("aliases").is_none());
         assert!(result["merchant"]["data"].get("sources").is_none());
@@ -134,7 +143,7 @@ async fn bulk_results_preserve_order_and_errors_and_use_their_own_body_limit() {
 #[tokio::test]
 async fn catalog_browsing_search_and_validation_work_without_provider_calls() {
     let merchants = serde_json::from_value(json!([
-        {"id":"alpha","name":"Alpha Cafe","markets":["CA"],"website":"https://alpha.example"},
+        {"id":"alpha","name":"Alpha Cafe","markets":["CA"],"website":"https://alpha.example","logo_url":"https://alpha.example/logo.svg","logo_source":"official website"},
         {"id":"beta","name":"Beta Shop","markets":["US"],"aliases":["BETA BILL"],"sources":["https://source.example"]},
         {"id":"gamma","name":"Gamma Market","markets":["CA"]}
     ]))
@@ -164,6 +173,13 @@ async fn catalog_browsing_search_and_validation_work_without_provider_calls() {
             .map(|merchant| merchant["id"].as_str().unwrap())
             .collect();
         assert_eq!(found, ids, "{url}");
+        if url == "/v1/merchants?market=CA" {
+            assert_eq!(
+                page["merchants"][0]["logo_url"],
+                "https://alpha.example/logo.svg"
+            );
+            assert_eq!(page["merchants"][0]["logo_source"], "official website");
+        }
         assert!(
             page["merchants"]
                 .as_array()
