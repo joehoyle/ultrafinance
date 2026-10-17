@@ -598,7 +598,7 @@ fn blank_websites_merge_only_complete_normalized_names() {
 #[tokio::test]
 async fn blank_website_import_merges_existing_places_and_survives_refresh() -> Result<()> {
     let db = MerchantStore::temporary()?;
-    let mut records: Vec<_> = (0..200)
+    let records: Vec<_> = (0..200)
         .map(|i| {
             let mut r = record(&format!("place:{i}"), "Starbucks", "https://unused.test");
             r.source = "foursquare".into();
@@ -609,16 +609,11 @@ async fn blank_website_import_merges_existing_places_and_survives_refresh() -> R
             r
         })
         .collect();
-    // Simulate a legacy import that created separate merchant identities.
+    // All import paths now use provider IDs and the current merchant state.
     db.import(&records[..2])?;
-    let old_ids: Vec<_> = records[..2]
-        .iter()
-        .map(|r| {
-            db.resolve_source(&r.source, &r.external_id)
-                .unwrap()
-                .unwrap()
-        })
-        .collect();
+    let survivor = db
+        .resolve_source("foursquare", &records[0].external_id)?
+        .unwrap();
     let preview = import(
         db.clone(),
         records.clone(),
@@ -628,55 +623,20 @@ async fn blank_website_import_merges_existing_places_and_survives_refresh() -> R
         },
     )
     .await?;
-    // The report retains separate ordered events for new identities and
-    // legacy identities, including their shared surviving merchant.
-    assert_eq!(preview.dedupe.groups.len(), 2);
-    assert_eq!(
-        preview
-            .dedupe
-            .groups
-            .iter()
-            .map(|g| g.len() - 1)
-            .sum::<usize>(),
-        199
-    );
-    assert_eq!(
-        preview
-            .dedupe
-            .groups
-            .iter()
-            .flatten()
-            .collect::<BTreeSet<_>>()
-            .len(),
-        200
-    );
-    assert_eq!(preview.dedupe.decisions.len(), 199);
-    assert_eq!(db.stats()?.total, 2);
-    let result = import(db.clone(), records.clone(), ImportOptions::default()).await?;
-    let survivor = &result.dedupe.groups[0][0];
-    assert!(old_ids.contains(survivor));
+    assert_eq!(preview.dedupe.candidates, 198);
+    assert_eq!(db.source_records("foursquare", None, 1000, 0)?.len(), 2);
+    import(db.clone(), records.clone(), ImportOptions::default()).await?;
     assert_eq!(db.stats()?.total, 1);
-    assert_eq!(db.get(survivor)?.unwrap().markets, ["CA", "US"]);
-    let snapshot = db.dedupe_snapshot()?;
-    assert_eq!(snapshot.sources.len(), 200);
     for r in &records {
         assert_eq!(
-            db.resolve_source(&r.source, &r.external_id)?.as_ref(),
-            Some(survivor)
-        );
-        assert!(
-            snapshot
-                .sources
-                .iter()
-                .any(|(_, saved)| saved.external_id == r.external_id
-                    && saved.raw == r.matching_raw())
+            db.resolve_source("foursquare", &r.external_id)?.as_ref(),
+            Some(&survivor)
         );
     }
-    records[0].merchant.aliases.push("STARBUCKS COFFEE".into());
     let refresh = import(db.clone(), records, ImportOptions::default()).await?;
-    assert_eq!(refresh.delta.updated, 1);
+    assert_eq!(refresh.delta.unchanged, 200);
     assert!(refresh.dedupe.groups.is_empty());
-    assert_eq!(db.stats()?.total, 1);
+    assert!(db.dedupe_snapshot()?.sources.is_empty());
     Ok(())
 }
 

@@ -26,7 +26,7 @@ fn postgres_source_columns_retain_matching_fields_without_raw_payloads() -> Resu
         }))?;
         lease.import(std::slice::from_ref(&record))?;
         let row = client.query_one(
-            "SELECT * FROM source_records WHERE source='column-fixture' AND external_id=$1",
+            "SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source='column-fixture' AND external_id=$1",
             &[&n.to_string()],
         )?;
         let restored = postgres_store::rows::source(&row)?;
@@ -198,7 +198,7 @@ fn exercise_market_migration(url: &str) -> Result<()> {
         client
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get::<_, i32>(0),
-        15
+        18
     );
     let has_country: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='merchants' AND column_name='country')", &[])?.get(0);
     assert!(!has_country);

@@ -466,8 +466,8 @@ pub struct MerchantRegionStats {
 }
 
 // Aggregate queries for PostgreSQL catalog statistics.
-const STATS_TOTALS: &str = "SELECT (SELECT COUNT(*) FROM merchants), (SELECT COUNT(*) FROM manual_merchants), (SELECT COUNT(*) FROM merchants m WHERE NOT EXISTS (SELECT 1 FROM source_records s WHERE s.merchant_id=m.id))";
-const STATS_SOURCES: &str = "SELECT source,COUNT(DISTINCT merchant_id),COUNT(*) FROM source_records GROUP BY source ORDER BY COUNT(DISTINCT merchant_id) DESC,source";
+const STATS_TOTALS: &str = "SELECT (SELECT COUNT(*) FROM merchants), (SELECT COUNT(*) FROM manual_merchants), (SELECT COUNT(*) FROM merchants m WHERE NOT EXISTS (SELECT 1 FROM source_identities s WHERE s.merchant_id=m.id))";
+const STATS_SOURCES: &str = "SELECT source,COUNT(DISTINCT merchant_id),COUNT(*) FROM source_identities GROUP BY source ORDER BY COUNT(DISTINCT merchant_id) DESC,source";
 
 /// An external record retained independently from manual merchant corrections.
 #[derive(Debug, Clone, Serialize, Deserialize)]

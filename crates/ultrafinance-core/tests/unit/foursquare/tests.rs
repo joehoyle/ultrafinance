@@ -193,3 +193,17 @@ fn unusable_generated_outlet_aliases_preserve_merchants_without_aborting() -> Re
     assert_eq!(locations(&records[3])?[0].aliases, vec!["A 1"]);
     Ok(())
 }
+
+#[test]
+fn parsed_rows_reject_missing_or_extra_fields() -> Result<()> {
+    let input = csv(&[("place", "Cafe", "CA", "", "")]);
+    let mut reader = csv::Reader::from_reader(input.as_bytes());
+    let headers = reader.headers()?.clone();
+    for row in [
+        csv::StringRecord::from(vec!["place"]),
+        csv::StringRecord::from(vec!["place"; headers.len() + 1]),
+    ] {
+        assert!(prepare_rows(&headers, [Ok(row)], "ca").is_err());
+    }
+    Ok(())
+}

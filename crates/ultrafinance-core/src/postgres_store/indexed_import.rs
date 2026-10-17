@@ -9,7 +9,7 @@ const DETAILS: usize = 5000;
 // the entire catalog to be cheaper. OFFSET 0 prevents flattening these lateral
 // probes; each incoming key uses the existing primary key. Do not replace with
 // an unrestricted join: it repeatedly scanned source_records in the Canada run.
-const SOURCE_LOOKUP: &str = "SELECT s.* FROM unnest($1::text[],$2::text[]) AS i(source,external_id) CROSS JOIN LATERAL (SELECT * FROM source_records s WHERE s.source=i.source AND s.external_id=i.external_id OFFSET 0) s ORDER BY s.source,s.external_id";
+const SOURCE_LOOKUP: &str = "SELECT s.*,p.attribution,p.license,p.url FROM unnest($1::text[],$2::text[]) AS i(source,external_id) CROSS JOIN LATERAL (SELECT * FROM source_records s WHERE s.source=i.source AND s.external_id=i.external_id OFFSET 0) s JOIN source_provenance p ON p.id=s.source_provenance_id ORDER BY s.source,s.external_id";
 const MERCHANT_LOOKUP: &str = "SELECT m.* FROM (SELECT DISTINCT unnest($1::text[]) AS id) i CROSS JOIN LATERAL (SELECT * FROM merchants m WHERE m.id=i.id OFFSET 0) m ORDER BY m.id";
 
 pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
@@ -194,6 +194,35 @@ impl<'a, 'b> Import<'a, 'b> {
         if records.len() > self.chunk_size {
             bail!("import chunk exceeds {} records", self.chunk_size);
         }
+        if records.iter().any(|r| r.source == "foursquare") {
+            let (fsq, other): (Vec<_>, Vec<_>) =
+                records.into_iter().partition(|r| r.source == "foursquare");
+            let keys: Vec<_> = fsq.iter().map(|r| r.external_id.clone()).collect();
+            self.tx.execute(
+                "INSERT INTO import_seen SELECT 'foursquare',unnest($1::text[])",
+                &[&keys],
+            )?;
+            let (delta, merges) = foursquare_identity::import(self.tx, &fsq)?;
+            for (target, incoming) in merges {
+                if self.report.groups.len() >= DETAILS {
+                    self.report.candidates += 1;
+                    self.report.details_truncated = true;
+                    continue;
+                }
+                self.details(
+                    vec![target.id.clone(), incoming.id.clone()],
+                    vec![target, incoming],
+                )?;
+            }
+            self.report.merchants_scanned += fsq.len();
+            self.selected += fsq.len();
+            self.add_delta(delta);
+            self.progress.report(self.selected);
+            if !other.is_empty() {
+                self.chunk(other)?;
+            }
+            return Ok(());
+        }
         self.tx
             .batch_execute("TRUNCATE incoming_keys,touched_keys")?;
         for r in &records {
@@ -206,21 +235,23 @@ impl<'a, 'b> Import<'a, 'b> {
             "looking up existing source identities",
             records.len(),
         );
-        let sources: Vec<_> = records.iter().map(|r| r.source.clone()).collect();
-        let external: Vec<_> = records.iter().map(|r| r.external_id.clone()).collect();
-        self.tx
-            .execute(
-                "INSERT INTO import_seen SELECT * FROM unnest($1::text[],$2::text[])",
-                &[&sources, &external],
-            )
-            .context("source records must have unique nonblank source/external ID pairs")?;
         let mut baseline = empty_snapshot();
-        baseline.sources = self
-            .tx
-            .query(SOURCE_LOOKUP, &[&sources, &external])?
-            .into_iter()
-            .map(|r| Ok((r.get("merchant_id"), rows::source(&r)?)))
-            .collect::<Result<_>>()?;
+        {
+            let sources: Vec<_> = records.iter().map(|r| r.source.clone()).collect();
+            let external: Vec<_> = records.iter().map(|r| r.external_id.clone()).collect();
+            self.tx
+                .execute(
+                    "INSERT INTO import_seen SELECT * FROM unnest($1::text[],$2::text[])",
+                    &[&sources, &external],
+                )
+                .context("source records must have unique nonblank source/external ID pairs")?;
+            baseline.sources = self
+                .tx
+                .query(SOURCE_LOOKUP, &[&sources, &external])?
+                .into_iter()
+                .map(|r| Ok((r.get("merchant_id"), rows::source(&r)?)))
+                .collect::<Result<_>>()?;
+        }
         let previous: HashMap<_, _> = baseline
             .sources
             .iter()
@@ -241,7 +272,6 @@ impl<'a, 'b> Import<'a, 'b> {
         matching.finish();
         // Persist refreshed outlet countries before rebuilding stored markets,
         // so obsolete countries from this source do not survive the refresh.
-        foursquare_locations::import(self.tx, &existing)?;
         baseline.merchants = merchants(self.tx, &existing_ids)?;
         // Refresh persisted source inputs first. Canonical identity includes manual
         // corrections and all retained sources, rather than only this batch.
@@ -337,7 +367,6 @@ FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
                 self.details(group, members)?;
             }
         }
-        foursquare_locations::import(self.tx, &fresh)?;
         let mut touched: Vec<_> = existing_ids.into_iter().chain(ids).collect();
         touched.sort_unstable();
         touched.dedup();
@@ -380,32 +409,6 @@ FROM incoming_keys i LEFT JOIN anchors a USING(rule_name,rule_host)
         self.report.merchants_scanned += fresh.len();
         self.selected += fresh.len() + existing.len();
         self.progress.report(self.selected);
-        Ok(())
-    }
-    /// The initial loader has staged and grouped all input on disk. Fetch only
-    /// one chunk at a time, including for chains larger than memory.
-    pub(super) fn staged(&mut self) -> Result<()> {
-        loop {
-            let rows = self.tx.query(
-                &format!("FETCH {} FROM initial_records", self.chunk_size),
-                &[],
-            )?;
-            if rows.is_empty() {
-                break;
-            }
-            let records = rows
-                .iter()
-                .map(|row| serde_json::from_str(row.get::<_, &str>(0)))
-                .collect::<std::result::Result<Vec<SourceRecord>, _>>()?;
-            self.chunk(records)?;
-            // Initial loads can collapse millions of records. Counts are exact;
-            // keep diagnostic groups bounded just like decisions and merchants.
-            if self.report.groups.len() > DETAILS {
-                self.report.groups.truncate(DETAILS);
-                self.report.details_truncated = true;
-            }
-        }
-        self.tx.batch_execute("CLOSE initial_records")?;
         Ok(())
     }
     fn add_delta(&mut self, delta: super::super::ImportDelta) {

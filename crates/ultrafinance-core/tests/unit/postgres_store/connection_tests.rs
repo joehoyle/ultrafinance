@@ -85,7 +85,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
     // Reinitialization must not recreate either audit table.
     let initialized = PostgresStore::connect(&url, true)?;
     initialized.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 15);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 18);
         assert!(client.query_one(
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
@@ -155,7 +155,7 @@ fn version_eight_legacy_views_are_migrated_before_import() -> Result<()> {
         for table in ["merchants", "manual_merchants", "source_records"] {
             assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name=$1 AND grantee='PUBLIC' AND privilege_type='SELECT')", &[&table])?.get::<_, bool>(0));
         }
-        let row = client.query_one("SELECT * FROM source_records", &[])?;
+        let row = client.query_one("SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id", &[])?;
         let record = rows::source(&row)?;
         assert_eq!(record.raw["countryHints"], serde_json::json!(["CA"]));
         Ok(())
@@ -215,7 +215,7 @@ fn postgres_idle_session_reconnects_before_work_without_replaying_jobs() -> Resu
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get(0);
         assert_eq!(
-            version, 15,
+            version, 18,
             "market migration must run before application use"
         );
         let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
@@ -313,7 +313,7 @@ fn version_twelve_locations_backfill_merchants_and_share_provenance() -> Result<
     upgraded.run(move |client| {
         assert_eq!(client.query_one("SHOW work_mem", &[])?.get::<_, String>(0), work_mem_before);
         assert_eq!(client.query_one("SELECT count(*) FROM location_records WHERE merchant_id=$1", &[&original])?.get::<_, i64>(0), 2);
-        assert_eq!(client.query_one("SELECT count(*) FROM source_provenance", &[])?.get::<_, i64>(0), 1);
+        assert_eq!(client.query_one("SELECT count(DISTINCT source_provenance_id) FROM location_records", &[])?.get::<_, i64>(0), 1);
         assert_eq!(client.query_one("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='location_records' AND column_name IN ('attribution','license','url')", &[])?.get::<_, i64>(0), 0);
         assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name='location_records' AND grantee='PUBLIC' AND privilege_type='SELECT')", &[])?.get::<_, bool>(0));
         assert!(client.execute("UPDATE location_records SET merchant_id=NULL,merchant_source=NULL,merchant_external_id=NULL", &[]).is_err());
@@ -425,8 +425,13 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
         Ok((expected, resolutions, exports, revision))
     })?;
     let upgraded = PostgresStore::connect(lease.temporary_url().unwrap(), true)?;
+    let actual = upgraded.dedupe_snapshot()?;
+    let mut expected = expected;
+    // Physical source backfills advance the catalog revision; evidence and IDs
+    // must remain identical. Monotonic revision is checked separately below.
+    expected.revision = actual.revision;
     assert_eq!(
-        serde_json::to_value(upgraded.dedupe_snapshot()?)?,
+        serde_json::to_value(actual)?,
         serde_json::to_value(expected)?
     );
     assert_eq!(
@@ -435,8 +440,8 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
     );
     assert_eq!(upgraded.source_records("fixture", None, 100, 0)?, exports);
     upgraded.run(move |client| {
-        assert_eq!(client.query_one("SELECT revision FROM catalog_revision", &[])?.get::<_, i64>(0), revision);
-        assert_eq!(client.query_one("SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='v'", &[])?.get::<_, i64>(0), 0);
+        assert!(client.query_one("SELECT revision FROM catalog_revision", &[])?.get::<_, i64>(0) >= revision);
+        assert_eq!(client.query_one("SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='v' AND relname<>'source_identities'", &[])?.get::<_, i64>(0), 0);
         for table in ["merchants","manual_merchants","source_records","location_records","descriptor_resolutions","source_provenance"] {
             assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name=$1 AND grantee='PUBLIC' AND privilege_type='SELECT')", &[&table])?.get::<_, bool>(0));
         }
@@ -455,7 +460,7 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
     );
     // Reinitialization cannot recreate the projections.
     PostgresStore::connect(lease.temporary_url().unwrap(), true)?.run(|client| {
-        assert_eq!(client.query_one("SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='v'", &[])?.get::<_, i64>(0), 0);
+        assert_eq!(client.query_one("SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='v' AND relname<>'source_identities'", &[])?.get::<_, i64>(0), 0);
         Ok(())
     })
 }
@@ -491,7 +496,7 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
             client
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            15
+            18
         );
         assert_eq!(
             client
@@ -629,5 +634,114 @@ fn version_fourteen_json_lists_migrate_without_changing_api_values() -> Result<(
     })?;
     assert_eq!(migrated.list(Some("JP"), 10, 0)?.total, 1);
     PostgresStore::connect(lease.temporary_url().unwrap(), true)?;
+    Ok(())
+}
+
+#[test]
+fn version_fifteen_removes_unused_indexes_without_changing_evidence() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    let url = lease.temporary_url().unwrap().to_owned();
+    let records = crate::import::merchant_studio(
+        r#"{"schemaVersion":"1.0","merchants":[{"id":"alpha","canonicalName":"Alpha","website":"https://alpha.test"}]}"#,
+    )?;
+    lease.import(&records)?;
+    let id = lease.resolve_source("merchant-studio", "alpha")?;
+    let revision: i64 = lease.run(|client| {
+        client.batch_execute(include_str!("version_16_source_metadata.sql"))?;
+        client.batch_execute("CREATE INDEX merchant_search_trigrams ON merchant_search USING GIN(text gin_trgm_ops); CREATE INDEX merchant_identity_name ON merchant_identity_keys(normalized_name); UPDATE ultrafinance_schema SET version=15")?;
+        Ok(client.query_one("SELECT revision FROM catalog_revision", &[])?.get(0))
+    })?;
+    assert!(PostgresStore::connect(&url, false).is_err());
+    let upgraded = PostgresStore::connect(&url, true)?;
+    assert_eq!(upgraded.resolve_source("merchant-studio", "alpha")?, id);
+    upgraded.run(move |client| {
+        assert!(client.query_one("SELECT revision FROM catalog_revision", &[])?.get::<_, i64>(0) >= revision);
+        assert!(client.query_one("SELECT to_regclass('merchant_search_trigrams') IS NULL AND to_regclass('merchant_identity_name') IS NULL", &[])?.get::<_, bool>(0));
+        assert_eq!(client.query_one("SELECT count(*) FROM merchants", &[])?.get::<_, i64>(0), 1);
+        assert!(client.query_one("SELECT tokens @@ plainto_tsquery('simple','alpha') FROM merchant_search", &[])?.get::<_, bool>(0));
+        Ok(())
+    })?;
+    PostgresStore::connect(&url, true)?;
+    Ok(())
+}
+
+#[test]
+fn shared_source_provenance_migrates_variants_and_refreshes_independently() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    let mut records = crate::import::merchant_studio(
+        r#"{"schemaVersion":"1.0","merchants":[{"id":"one","canonicalName":"One"},{"id":"two","canonicalName":"Two"},{"id":"three","canonicalName":"Three"}]}"#,
+    )?;
+    records[2].attribution = "Café 東京's dataset".into();
+    records[2].license = "Separate licence".into();
+    records[2].url = "https://example.test/second".into();
+    lease.import(&records)?;
+    let before = lease.source_records("merchant-studio", None, 10, 0)?;
+    lease.run(|client| {
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT count(DISTINCT source_provenance_id) FROM source_records",
+                    &[]
+                )?
+                .get::<_, i64>(0),
+            2
+        );
+        client.batch_execute(include_str!("version_16_source_metadata.sql"))?;
+        client.batch_execute("DELETE FROM source_provenance; GRANT SELECT ON source_records TO PUBLIC; REVOKE ALL ON source_provenance FROM PUBLIC; CREATE VIEW custom_source_urls AS SELECT url FROM source_records")?;
+        Ok(())
+    })?;
+    let url = lease.temporary_url().unwrap();
+    assert!(PostgresStore::connect(url, true).is_err());
+    lease.run(|client| {
+        assert_eq!(
+            client
+                .query_one("SELECT version FROM ultrafinance_schema", &[])?
+                .get::<_, i32>(0),
+            16
+        );
+        assert_eq!(
+            client
+                .query_one("SELECT count(*) FROM custom_source_urls", &[])?
+                .get::<_, i64>(0),
+            3
+        );
+        client.batch_execute("DROP VIEW custom_source_urls")?;
+        Ok(())
+    })?;
+    let upgraded = PostgresStore::connect(url, true)?;
+    assert_eq!(
+        upgraded.source_records("merchant-studio", None, 10, 0)?,
+        before
+    );
+    records[0].license = "Updated licence for only one record".into();
+    let delta = upgraded.import(&records)?;
+    assert_eq!(delta.updated, 1);
+    assert_eq!(delta.unchanged, 2);
+    let refreshed = upgraded.source_records("merchant-studio", None, 10, 0)?;
+    for previous in before {
+        let current = refreshed
+            .iter()
+            .find(|r| r["record"]["external_id"] == previous["record"]["external_id"])
+            .unwrap();
+        if previous["record"]["external_id"] == records[0].external_id {
+            assert_eq!(current["record"]["license"], records[0].license);
+        } else {
+            assert_eq!(*current, previous);
+        }
+    }
+    upgraded.run(|client| {
+        assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name='source_provenance' AND grantee='PUBLIC' AND privilege_type='SELECT')", &[])?.get::<_, bool>(0));
+        assert_eq!(client.query_one("SELECT count(DISTINCT source_provenance_id) FROM source_records", &[])?.get::<_, i64>(0), 3);
+        assert_eq!(client.query_one("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='source_records' AND column_name IN ('attribution','license','url')", &[])?.get::<_, i64>(0), 0);
+        let mut tx = client.transaction()?;
+        let other: i64 = tx.query_one("INSERT INTO source_provenance(source,attribution,license,url) VALUES('other','a','b','c') RETURNING id", &[])?.get(0);
+        assert!(tx.execute("UPDATE source_records SET source_provenance_id=$1", &[&other]).is_err());
+        tx.rollback()?;
+        Ok(())
+    })?;
     Ok(())
 }

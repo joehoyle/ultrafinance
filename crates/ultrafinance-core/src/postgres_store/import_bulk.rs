@@ -26,10 +26,13 @@ fn copy_rows(
     Ok(())
 }
 fn copy_merchants(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Result<()> {
+    copy_merchants_to(tx, merchants, COPY_MERCHANTS)
+}
+fn copy_merchants_to(tx: &mut Transaction<'_>, merchants: &[Merchant], sql: &str) -> Result<()> {
     if merchants.is_empty() {
         return Ok(());
     }
-    let sink = tx.copy_in(COPY_MERCHANTS)?;
+    let sink = tx.copy_in(sql)?;
     let mut writer = BinaryCopyInWriter::new(
         sink,
         &[
@@ -104,7 +107,7 @@ fn apply(
     baseline: &crate::dedupe::Snapshot,
     append_only: bool,
 ) -> Result<Applied> {
-    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_source_stage (LIKE source_records INCLUDING DEFAULTS) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage (LIKE merchants) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_input_stage ON COMMIT DROP AS SELECT source,external_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases FROM source_records WITH NO DATA")?;
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_source_stage(source TEXT,external_id TEXT,merchant_id TEXT,version TEXT,attribution TEXT,license TEXT,url TEXT,transaction_pattern TEXT,parent_id TEXT,input_id TEXT,input_name TEXT) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage (LIKE merchants) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_input_stage ON COMMIT DROP AS SELECT source,external_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases FROM source_records WITH NO DATA")?;
     let previous: HashMap<_, _> = baseline
         .sources
         .iter()
@@ -116,65 +119,7 @@ fn apply(
         .iter()
         .map(|m| (m.id.as_str(), m))
         .collect();
-    let mut prepared_merchants = insert_new_merchants(tx, records, identities, &known)?;
-    if append_only && !known.is_empty() {
-        if let Some(ordered) = ordered_foursquare_append(tx, records, &canonical)? {
-            let mut appended = HashMap::new();
-            let mut countries = MarketCountries::default();
-            for index in ordered.order {
-                let record = &records[index];
-                let id = &identities[index];
-                if !ordered.eligible.contains(id) {
-                    continue;
-                }
-                let Some(before) = canonical.get(id.as_str()) else {
-                    continue;
-                };
-                let merchant = appended.entry(id.clone()).or_insert_with(|| {
-                    countries.declaration(id, before);
-                    (*before).clone()
-                });
-                combine_source(merchant, &record.merchant, &record.url);
-                let hints: Vec<_> = record.raw["countryHints"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.as_str().map(str::to_owned))
-                    .collect();
-                countries.source_fields(id, &record.merchant, &hints, None);
-            }
-            eprintln!(
-                "Import: incrementally combining ordered Foursquare evidence for {} established merchants",
-                appended.len()
-            );
-            prepared_merchants.extend(appended.into_iter().map(|(id, mut merchant)| {
-                finish_merchant(&mut merchant, &id);
-                (id, countries.hydrate(merchant))
-            }));
-        }
-        {
-            let mut reusable = known.clone();
-            reusable.retain(|id| !prepared_merchants.contains_key(*id));
-            for (record, id) in records.iter().zip(identities) {
-                if let Some(merchant) = canonical.get(id.as_str())
-                    && !redundant_place_evidence(merchant, record)
-                {
-                    reusable.remove(id.as_str());
-                }
-            }
-            if !reusable.is_empty() {
-                eprintln!(
-                    "Import: reusing canonical evidence for {} established merchants",
-                    reusable.len()
-                );
-            }
-            prepared_merchants.extend(
-                reusable
-                    .into_iter()
-                    .map(|id| (id.to_owned(), canonical[id].clone())),
-            );
-        }
-    }
+    let prepared_merchants = insert_new_merchants(tx, records, identities, &known)?;
     let mut changed = HashSet::new();
     let mut delta = super::super::ImportDelta::default();
     let mut progress =
@@ -236,7 +181,8 @@ fn apply(
                 &rows,
             )?;
             copy_input_fields(tx, &updates)?;
-            tx.execute("INSERT INTO source_records(source,external_id,merchant_id,version,attribution,license,url,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) SELECT s.source,s.external_id,s.merchant_id,s.version,s.attribution,s.license,s.url,s.transaction_pattern,s.parent_id,i.input_id,i.input_name,i.input_website,i.input_logo_url,i.input_logo_source,i.input_markets,i.input_aliases,i.input_sources,i.country_hints,i.dataset_region,i.negative_aliases FROM import_source_stage s JOIN import_input_stage i USING(source,external_id) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,attribution=excluded.attribution,license=excluded.license,url=excluded.url,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases",&[])?;
+            tx.batch_execute("INSERT INTO source_provenance(source,attribution,license,url) SELECT DISTINCT source,attribution,license,url FROM import_source_stage ON CONFLICT(source,attribution,license,url) DO NOTHING")?;
+            tx.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) SELECT s.source,s.external_id,s.merchant_id,s.version,p.id,s.transaction_pattern,s.parent_id,i.input_id,i.input_name,i.input_website,i.input_logo_url,i.input_logo_source,i.input_markets,i.input_aliases,i.input_sources,i.country_hints,i.dataset_region,i.negative_aliases FROM import_source_stage s JOIN import_input_stage i USING(source,external_id) JOIN source_provenance p ON (p.source,p.attribution,p.license,p.url)=(s.source,s.attribution,s.license,s.url) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases",&[])?;
             tx.batch_execute(
                 "TRUNCATE import_source_stage,import_merchant_stage,import_input_stage",
             )?;
@@ -253,87 +199,6 @@ fn apply(
     })
 }
 
-struct OrderedAppend {
-    order: Vec<usize>,
-    eligible: HashSet<String>,
-}
-
-// Fence the merchant lookup before filtering source/order. Otherwise PostgreSQL
-// can BitmapAnd the merchant index with the entire imported source-key prefix
-// once per merchant. On Canada this read ~426k index entries 500 times per batch.
-// OFFSET 0 keeps the probe restricted to this merchant; LIMIT still stops at
-// the first supporting row without reading the rest of a chain's history.
-const ORDERED_APPEND_PROOF: &str = r#"
-SELECT e.id FROM unnest($1::text[],$2::bool[],$3::bool[]) e(id,needs_website,needs_logo)
-CROSS JOIN LATERAL (
-    SELECT 1 FROM (
-        SELECT source,external_id,input_website,input_logo_url
-        FROM source_records WHERE merchant_id=e.id OFFSET 0
-    ) s
-    WHERE s.source='foursquare' AND s.external_id<$4
-      AND (NOT e.needs_website OR s.input_website IS NOT NULL)
-      AND (NOT e.needs_logo OR s.input_logo_url IS NOT NULL)
-    LIMIT 1
-) prior
-WHERE NOT EXISTS (SELECT 1 FROM manual_merchants m WHERE m.id=e.id)
-"#;
-
-/// Prove that each reused merchant has retained evidence preceding this batch,
-/// including a website/logo when its canonical fields contain them. This keeps
-/// first-source precedence even if unrelated later IDs already exist. Limit each
-/// index probe to one supporting row rather than reading the merchant's history.
-fn ordered_foursquare_append(
-    tx: &mut Transaction<'_>,
-    records: &[SourceRecord],
-    canonical: &HashMap<&str, &Merchant>,
-) -> Result<Option<OrderedAppend>> {
-    if records.is_empty()
-        || records.iter().any(|r| {
-            r.source != "foursquare"
-                || (r.merchant.logo_url.is_none() && r.merchant.logo_source.is_some())
-        })
-    {
-        return Ok(None);
-    }
-    let progress = crate::import_progress::Progress::new(
-        "checking ordered Foursquare evidence",
-        canonical.len(),
-    );
-    let external: Vec<_> = records.iter().map(|r| r.external_id.clone()).collect();
-    let rows = tx.query(
-        r#"
-WITH incoming AS MATERIALIZED (
-    SELECT external_id,ordinality FROM unnest($1::text[]) WITH ORDINALITY i(external_id,ordinality)
-)
-SELECT ordinality FROM incoming
-ORDER BY external_id
-"#,
-        &[&external],
-    )?;
-    if rows.len() != records.len() {
-        return Ok(None);
-    }
-    let order: Vec<usize> = rows
-        .iter()
-        .map(|row| usize::try_from(row.get::<_, i64>(0) - 1).map_err(Into::into))
-        .collect::<Result<_>>()?;
-    let before: Vec<_> = canonical
-        .values()
-        .filter(|m| m.logo_url.is_some() || m.logo_source.is_none())
-        .collect();
-    let ids: Vec<_> = before.iter().map(|m| m.id.clone()).collect();
-    let websites: Vec<_> = before.iter().map(|m| m.website.is_some()).collect();
-    let logos: Vec<_> = before.iter().map(|m| m.logo_url.is_some()).collect();
-    let minimum = &external[order[0]];
-    let eligible: HashSet<String> = tx
-        .query(ORDERED_APPEND_PROOF, &[&ids, &websites, &logos, &minimum])?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    progress.finish();
-    Ok((!eligible.is_empty()).then_some(OrderedAppend { order, eligible }))
-}
-
 fn same_canonical_fields(a: &Merchant, b: &Merchant) -> bool {
     a.name == b.name
         && a.website == b.website
@@ -348,42 +213,13 @@ fn same_canonical_fields(a: &Merchant, b: &Merchant) -> bool {
 /// regardless of where this new source sorts among retained sources or manual
 /// fields. Reject anything that could change first-source precedence or expand
 /// aliases, provenance or coverage. This is never used for source replacement.
-fn redundant_place_evidence(merchant: &Merchant, record: &SourceRecord) -> bool {
-    let input = &record.merchant;
-    let covered = |country: &str| {
-        !crate::markets::valid_country(country) || merchant.markets.iter().any(|c| c == country)
-    };
-    record.source == "foursquare"
-        && input.name == merchant.name
-        && merchant.aliases.contains(&input.name)
-        && (input.website.is_none() || input.website == merchant.website)
-        && ((input.logo_url == merchant.logo_url && input.logo_source == merchant.logo_source)
-            || (input.logo_url.is_none() && merchant.logo_url.is_some()))
-        && input.aliases.iter().all(|a| merchant.aliases.contains(a))
-        && input.sources.iter().all(|s| merchant.sources.contains(s))
-        && (record.url.is_empty() || merchant.sources.contains(&record.url))
-        && input.markets.iter().all(|c| covered(c))
-        && record.raw["countryHints"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|c| c.as_str())
-            .all(covered)
-        && record.raw["places"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p["country"].as_str())
-            .all(|c| covered(&c.trim().to_ascii_uppercase()))
-}
-
-fn combine_source(merchant: &mut Merchant, input: &Merchant, url: &str) {
+pub(super) fn combine_source(merchant: &mut Merchant, input: &Merchant, url: &str) {
     crate::dedupe::combine(merchant, input);
     if !url.is_empty() {
         merchant.sources.push(url.into());
     }
 }
-fn finish_merchant(merchant: &mut Merchant, id: &str) {
+pub(super) fn finish_merchant(merchant: &mut Merchant, id: &str) {
     merchant.id = id.into();
     merchant.aliases.sort();
     merchant.aliases.dedup();
@@ -449,9 +285,14 @@ fn insert_new_merchants(
         rows.push(merchant.clone());
         prepared.insert(id.clone(), merchant);
         if rows.len() == BATCH || end == order.len() {
-            copy_merchants(tx, &rows)?;
-            tx.execute(UPSERT_MERCHANTS, &[])?;
-            tx.batch_execute("TRUNCATE import_merchant_stage")?;
+            // These identities were generated for new buckets under the writer
+            // lock. COPY directly; an unexpected ID collision must abort rather
+            // than overwrite an unrelated canonical merchant.
+            copy_merchants_to(
+                tx,
+                &rows,
+                "COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) FROM STDIN BINARY",
+            )?;
             inserted += rows.len();
             rows.clear();
             progress.advance(inserted);
@@ -462,7 +303,7 @@ fn insert_new_merchants(
     Ok(prepared)
 }
 
-fn copy_new_sources(
+pub(super) fn copy_new_sources(
     tx: &mut Transaction<'_>,
     records: &[SourceRecord],
     identities: &[String],
@@ -473,10 +314,12 @@ fn copy_new_sources(
     if records.is_empty() {
         return Ok(());
     }
-    let sink = tx.copy_in("COPY source_records(source,external_id,merchant_id,version,attribution,license,url,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) FROM STDIN BINARY")?;
-    let mut types = vec![Type::TEXT; 20];
-    types[14..18].fill(Type::TEXT_ARRAY);
-    types[19] = Type::TEXT_ARRAY;
+    let provenance = source_provenance(tx, records)?;
+    let sink = tx.copy_in("COPY source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) FROM STDIN BINARY")?;
+    let mut types = vec![Type::TEXT; 18];
+    types[4] = Type::INT8;
+    types[12..16].fill(Type::TEXT_ARRAY);
+    types[17] = Type::TEXT_ARRAY;
     let mut writer = BinaryCopyInWriter::new(sink, &types);
     for (r, id) in records.iter().zip(identities) {
         let m = &r.merchant;
@@ -493,9 +336,12 @@ fn copy_new_sources(
             &r.external_id,
             id,
             &r.version,
-            &r.attribution,
-            &r.license,
-            &r.url,
+            &provenance[&(
+                r.source.clone(),
+                r.attribution.clone(),
+                r.license.clone(),
+                r.url.clone(),
+            )],
             &r.raw["transaction_text_regexp"].as_str(),
             &r.raw["parent_id"].as_str(),
             &m.id,
@@ -513,6 +359,39 @@ fn copy_new_sources(
     }
     writer.finish()?;
     Ok(())
+}
+
+type ProvenanceKey = (String, String, String, String);
+fn source_provenance(
+    tx: &mut Transaction<'_>,
+    records: &[SourceRecord],
+) -> Result<HashMap<ProvenanceKey, i64>> {
+    let keys: std::collections::BTreeSet<_> = records
+        .iter()
+        .map(|r| {
+            (
+                r.source.clone(),
+                r.attribution.clone(),
+                r.license.clone(),
+                r.url.clone(),
+            )
+        })
+        .collect();
+    let sources: Vec<_> = keys.iter().map(|k| k.0.clone()).collect();
+    let attributions: Vec<_> = keys.iter().map(|k| k.1.clone()).collect();
+    let licenses: Vec<_> = keys.iter().map(|k| k.2.clone()).collect();
+    let urls: Vec<_> = keys.iter().map(|k| k.3.clone()).collect();
+    let parameters: &[&(dyn postgres::types::ToSql + Sync)] =
+        &[&sources, &attributions, &licenses, &urls];
+    tx.execute("INSERT INTO source_provenance(source,attribution,license,url) SELECT * FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) ON CONFLICT(source,attribution,license,url) DO NOTHING", parameters)?;
+    let rows = tx.query("SELECT i.*,p.id FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) i(source,attribution,license,url) CROSS JOIN LATERAL (SELECT id FROM source_provenance p WHERE (p.source,p.attribution,p.license,p.url)=(i.source,i.attribution,i.license,i.url) OFFSET 0) p", parameters)?;
+    if rows.len() != keys.len() {
+        bail!("source provenance lookup lost metadata");
+    }
+    Ok(rows
+        .iter()
+        .map(|r| ((r.get(0), r.get(1), r.get(2), r.get(3)), r.get(4)))
+        .collect())
 }
 
 fn copy_input_fields(tx: &mut Transaction<'_>, records: &[&SourceRecord]) -> Result<()> {
@@ -759,6 +638,90 @@ fn write_search(tx: &mut Transaction<'_>, rows: &[Vec<Option<String>>]) -> Resul
     )?;
     tx.execute("INSERT INTO merchant_search(merchant_id,text) SELECT merchant_id,text FROM import_search_stage ON CONFLICT(merchant_id) DO UPDATE SET text=excluded.text WHERE merchant_search.text IS DISTINCT FROM excluded.text", &[])?;
     tx.batch_execute("TRUNCATE import_search_stage")?;
+    Ok(())
+}
+
+/// Every merchant is final and new. No staging joins, reads, upserts or deletes.
+pub(super) fn write_initial_merchants(
+    tx: &mut Transaction<'_>,
+    merchants: &[Merchant],
+) -> Result<()> {
+    if merchants.is_empty() {
+        return Ok(());
+    }
+    copy_merchants_to(
+        tx,
+        merchants,
+        "COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) FROM STDIN BINARY",
+    )?;
+    write_initial_derived(tx, merchants)
+}
+
+pub(super) fn write_current_merchants(
+    tx: &mut Transaction<'_>,
+    merchants: &[Merchant],
+) -> Result<()> {
+    if merchants.is_empty() {
+        return Ok(());
+    }
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage (LIKE merchants) ON COMMIT DROP; TRUNCATE import_merchant_stage")?;
+    copy_merchants(tx, merchants)?;
+    tx.batch_execute(UPSERT_MERCHANTS)?;
+    let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();
+    tx.execute("DELETE FROM aliases WHERE merchant_id=ANY($1)", &[&ids])?;
+    tx.execute(
+        "DELETE FROM merchant_search WHERE merchant_id=ANY($1)",
+        &[&ids],
+    )?;
+    tx.execute(
+        "DELETE FROM merchant_identity_keys WHERE merchant_id=ANY($1)",
+        &[&ids],
+    )?;
+    write_initial_derived(tx, merchants)
+}
+
+fn write_initial_derived(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Result<()> {
+    let mut aliases = Vec::new();
+    let mut search = Vec::with_capacity(merchants.len());
+    for m in merchants {
+        let mut names: Vec<_> = std::iter::once(&m.name)
+            .chain(&m.aliases)
+            .map(|n| normalize(n))
+            .collect();
+        names.sort();
+        names.dedup();
+        for name in &names {
+            aliases.push(vec![Some(m.id.clone()), Some(name.clone())]);
+        }
+        search.push(vec![Some(m.id.clone()), Some(names.join(" \n "))]);
+    }
+    copy_rows(
+        tx,
+        "COPY aliases(merchant_id,normalized) FROM STDIN BINARY",
+        2,
+        &aliases,
+    )?;
+    copy_rows(
+        tx,
+        "COPY merchant_search(merchant_id,text) FROM STDIN BINARY",
+        2,
+        &search,
+    )?;
+    let sink = tx.copy_in("COPY merchant_identity_keys(merchant_id,normalized_name,website_host,rule_name,rule_host) FROM STDIN BINARY")?;
+    let mut writer = BinaryCopyInWriter::new(sink, &[Type::TEXT; 5]);
+    for m in merchants {
+        let key = crate::dedupe::deterministic_key(m);
+        let name = key.as_ref().map(|k| k.0.as_str());
+        let rule_host = key.as_ref().map(|k| k.1.as_deref().unwrap_or(""));
+        writer.write(&[
+            &m.id,
+            &normalize(&m.name),
+            &crate::dedupe::host(&m.website),
+            &name,
+            &rule_host,
+        ])?;
+    }
+    writer.finish()?;
     Ok(())
 }
 

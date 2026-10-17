@@ -82,6 +82,17 @@ pub fn prepare(contents: &str, region: &str) -> Result<(Vec<SourceRecord>, usize
     }
     let mut reader = csv::Reader::from_reader(contents.trim_start_matches('\u{feff}').as_bytes());
     let headers = reader.headers()?.clone();
+    prepare_rows(&headers, reader.records(), region)
+}
+
+pub(crate) fn prepare_rows(
+    headers: &csv::StringRecord,
+    rows: impl IntoIterator<Item = csv::Result<csv::StringRecord>>,
+    region: &str,
+) -> Result<(Vec<SourceRecord>, usize)> {
+    if region != "global" && !crate::markets::valid_country(&region.to_ascii_uppercase()) {
+        bail!("Foursquare region must be global or a two-letter country code");
+    }
     for field in [
         "fsq_place_id",
         "name",
@@ -96,8 +107,15 @@ pub fn prepare(contents: &str, region: &str) -> Result<(Vec<SourceRecord>, usize
     let mut groups: BTreeMap<String, Value> = BTreeMap::new();
     let mut seen = BTreeMap::new();
     let mut skipped = 0;
-    for record in reader.records() {
+    for record in rows {
         let record = record?;
+        if record.len() != headers.len() {
+            bail!(
+                "Foursquare row has {} fields; expected {}",
+                record.len(),
+                headers.len()
+            );
+        }
         let row: BTreeMap<String, String> = headers
             .iter()
             .zip(record.iter())

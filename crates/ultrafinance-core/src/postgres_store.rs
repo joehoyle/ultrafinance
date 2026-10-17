@@ -16,6 +16,8 @@ use std::{
     time::Duration,
 };
 
+#[path = "postgres_store/foursquare_identity.rs"]
+mod foursquare_identity;
 #[path = "postgres_store/foursquare_locations.rs"]
 mod foursquare_locations;
 #[path = "postgres_store/import_bulk.rs"]
@@ -207,7 +209,7 @@ impl PostgresStore {
                         .context("schema upgrade could not initialize merchant redirects")?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)
                         .context("schema upgrade could not initialize location redirects")?;
-                    if version > 15 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > 18 { bail!("unsupported PostgreSQL schema version {version}"); }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -264,12 +266,25 @@ impl PostgresStore {
                         tx.batch_execute(include_str!("../migrations/015_typed_catalog_lists.sql"))
                             .context("schema migration 15 (typed catalog lists) failed")?;
                     }
+                    if version < 16 {
+                        tx.batch_execute(include_str!("../migrations/016_remove_unused_indexes.sql"))
+                            .context("schema migration 16 (unused search indexes) failed")?;
+                    }
+                    if version < 17 {
+                        tx.batch_execute("SET LOCAL statement_timeout='0'; SET LOCAL idle_in_transaction_session_timeout='0'; SET LOCAL work_mem='64MB'")?;
+                        tx.batch_execute(include_str!("../migrations/017_source_provenance.sql"))
+                            .context("schema migration 17 (shared source provenance) failed")?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
+                    if version < 18 {
+                        tx.batch_execute(include_str!("../migrations/018_foursquare_identity_only.sql"))
+                            .context("schema migration 18 (Foursquare import identities) failed")?;
+                    }
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 15 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != 18 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {
@@ -358,6 +373,11 @@ impl PostgresStore {
                     && let Some(row)=tx.query_opt("SELECT merchant_id FROM merchant_redirects WHERE retired_id=$1", &[&*merchant_id])? { *merchant_id=row.get(0); }
                 let overridden: bool = tx.query_opt("SELECT manual_override FROM location_records WHERE source=$1 AND external_id=$2", &[&record.source,&record.external_id])?.is_some_and(|r| r.get(0));
                 if !record.manual_override && overridden { continue; }
+                if let crate::location::MerchantReference::Source { source,external_id } = &record.merchant
+                    && source == "foursquare" {
+                    let merchant_id = tx.query_one("SELECT merchant_id FROM source_identities WHERE source='foursquare' AND external_id=$1", &[external_id])?.get(0);
+                    record.merchant = crate::location::MerchantReference::Local { merchant_id };
+                }
                 let (merchant_id, merchant_source, merchant_external) = location_reference(&record.merchant);
                 let exists: bool = if let Some(id) = merchant_id {
                     tx.query_one("SELECT EXISTS(SELECT 1 FROM merchants WHERE id=$1)", &[&id])?.get(0)
@@ -369,6 +389,8 @@ impl PostgresStore {
                 let mut stored = record.clone();
                 stored.location.id = Some(id.clone());
                 crate::columns::postgres_location_records(&mut tx, &id, &record.source, &record.external_id, &merchant_id, &merchant_source, &merchant_external, &serde_json::to_string(&stored)?)?;
+                if record.source == "foursquare" { tx.execute("DELETE FROM foursquare_unlocated WHERE external_id=$1", &[&record.external_id])?; }
+
             }
             reconcile_locations(&mut tx, None, false)?;
             refresh_market_lookup(&mut tx, None)?;
@@ -462,7 +484,10 @@ impl PostgresStore {
         let (source, external_id) = (source.to_owned(), external_id.map(str::to_owned));
         let (limit, offset) = (i64::try_from(limit)?, i64::try_from(offset)?);
         self.run(move |client| {
-            client.query("SELECT * FROM source_records WHERE source=$1 AND ($2::text IS NULL OR external_id=$2) ORDER BY external_id LIMIT $3 OFFSET $4", &[&source,&external_id,&limit,&offset])?.into_iter().map(|row| {
+            if source == "foursquare" {
+                return client.query("SELECT external_id,merchant_id FROM source_identities WHERE source='foursquare' AND ($1::text IS NULL OR external_id=$1) ORDER BY external_id LIMIT $2 OFFSET $3", &[&external_id,&limit,&offset])?.iter().map(|r| Ok(serde_json::json!({"merchant_id":r.get::<_,String>("merchant_id"),"record":{"source":"foursquare","external_id":r.get::<_,String>("external_id")},"identity_only":true}))).collect();
+            }
+            client.query("SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source=$1 AND ($2::text IS NULL OR external_id=$2) ORDER BY external_id LIMIT $3 OFFSET $4", &[&source,&external_id,&limit,&offset])?.into_iter().map(|row| {
                 let record = rows::source(&row)?;
                 let mut document = serde_json::to_value(&record)?;
                 // Source listings retain explicit null/empty input fields.
@@ -500,7 +525,6 @@ impl PostgresStore {
             let mut tx = client.transaction()?;
             write_lock(&mut tx)?;
             let delta = import_records(&mut tx, &records, None, None)?;
-            foursquare_locations::import(&mut tx, &records)?;
             tx.commit()?;
             Ok(delta)
         })
@@ -513,7 +537,7 @@ impl PostgresStore {
             write_lock(&mut tx)?;
             let old: String = tx
                 .query_one(
-                    "SELECT merchant_id FROM source_records WHERE source=$1 AND external_id=$2",
+                    "SELECT merchant_id FROM source_identities WHERE source=$1 AND external_id=$2",
                     &[&source, &external_id],
                 )?
                 .get(0);
@@ -523,10 +547,15 @@ impl PostgresStore {
             {
                 bail!("target merchant does not exist");
             }
+            if source == "foursquare" {
+                tx.execute("UPDATE location_records SET merchant_id=$2 WHERE source='foursquare' AND external_id=$1", &[&external_id,&target])?;
+                tx.execute("UPDATE foursquare_unlocated SET merchant_id=$2 WHERE external_id=$1", &[&external_id,&target])?;
+            } else {
             tx.execute(
                 "UPDATE source_records SET merchant_id=$3 WHERE source=$1 AND external_id=$2",
                 &[&source, &external_id, &target],
             )?;
+            }
             rebuild(&mut tx, &target)?;
             if old != target {
                 rebuild(&mut tx, &old)?;
@@ -539,7 +568,7 @@ impl PostgresStore {
         let (source, external_id) = (source.to_owned(), external_id.to_owned());
         self.run(move |c| {
             Ok(c.query_opt(
-                "SELECT merchant_id FROM source_records WHERE source=$1 AND external_id=$2",
+                "SELECT merchant_id FROM source_identities WHERE source=$1 AND external_id=$2",
                 &[&source, &external_id],
             )?
             .map(|r| r.get(0)))
@@ -1226,6 +1255,20 @@ fn import_records(
     identities: Option<&[String]>,
     baseline: Option<&crate::dedupe::Snapshot>,
 ) -> Result<super::ImportDelta> {
+    if records.iter().any(|r| r.source == "foursquare") {
+        let (fsq, other): (Vec<_>, Vec<_>) = records
+            .iter()
+            .cloned()
+            .partition(|r| r.source == "foursquare");
+        let (mut delta, _) = foursquare_identity::import(tx, &fsq)?;
+        if !other.is_empty() {
+            let rest = import_records(tx, &other, None, None)?;
+            delta.added += rest.added;
+            delta.updated += rest.updated;
+            delta.unchanged += rest.unchanged;
+        }
+        return Ok(delta);
+    }
     if let (Some(identities), Some(baseline)) = (identities, baseline) {
         return import_bulk::import(tx, records, identities, baseline);
     }
@@ -1252,7 +1295,7 @@ fn import_records(
         .map(|m| m.id.clone())
         .collect();
     let previous_query =
-        tx.prepare("SELECT * FROM source_records WHERE source=$1 AND external_id=$2")?;
+        tx.prepare("SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source=$1 AND external_id=$2")?;
     let merchant_query = tx.prepare("SELECT id FROM merchants WHERE id=$1")?;
     for (index, record) in records.iter().enumerate() {
         let previous: Option<(String, SourceRecord)> = if baseline.is_some() {
@@ -1358,6 +1401,21 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
     for group in groups {
         let target = &group[0];
         for retired in &group[1..] {
+            let fsq: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM source_identities WHERE source='foursquare' AND merchant_id=$1)", &[retired])?.get(0);
+            if fsq {
+                let mut target_merchant = rows::merchant(
+                    &tx.query_one("SELECT * FROM merchants WHERE id=$1", &[target])?,
+                )?;
+                let retired_merchant = rows::merchant(
+                    &tx.query_one("SELECT * FROM merchants WHERE id=$1", &[retired])?,
+                )?;
+                crate::dedupe::combine(&mut target_merchant, &retired_merchant);
+                import_bulk::write_current_merchants(tx, &[target_merchant])?;
+            }
+            tx.execute(
+                "UPDATE foursquare_unlocated SET merchant_id=$1 WHERE merchant_id=$2",
+                &[target, retired],
+            )?;
             tx.execute(
                 "UPDATE source_records SET merchant_id=$1 WHERE merchant_id=$2",
                 &[target, retired],

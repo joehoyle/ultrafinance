@@ -13,7 +13,7 @@ fn import_lookups_probe_keys_without_scanning_the_catalog() -> Result<()> {
         // Temp relations shadow the real tables. Leave them unanalyzed, like
         // rapidly growing catalogs between auto-analyze passes. Wide payloads
         // make an accidental catalog scan expensive without a huge test fixture.
-        tx.batch_execute("CREATE TEMP TABLE source_records(source TEXT,external_id TEXT,payload TEXT,PRIMARY KEY(source,external_id)); CREATE TEMP TABLE merchants(id TEXT PRIMARY KEY,payload TEXT); INSERT INTO source_records SELECT 'fixture',i::text,repeat('x',512) FROM generate_series(1,20000) i; INSERT INTO merchants SELECT i::text,repeat('x',512) FROM generate_series(1,20000) i")?;
+        tx.batch_execute("CREATE TEMP TABLE source_provenance(id BIGINT PRIMARY KEY,attribution TEXT,license TEXT,url TEXT); INSERT INTO source_provenance VALUES(1,'fixture','licence','url'); CREATE TEMP TABLE source_records(source TEXT,external_id TEXT,payload TEXT,source_provenance_id BIGINT,PRIMARY KEY(source,external_id)); CREATE TEMP TABLE merchants(id TEXT PRIMARY KEY,payload TEXT); INSERT INTO source_records SELECT 'fixture',i::text,repeat('x',512),1 FROM generate_series(1,20000) i; INSERT INTO merchants SELECT i::text,repeat('x',512) FROM generate_series(1,20000) i")?;
         let sources = vec!["fixture".to_owned(); 5000];
         let external: Vec<_> = (1..=5000).map(|i| i.to_string()).collect();
         let rows = tx.query(SOURCE_LOOKUP, &[&sources, &external])?;
@@ -22,7 +22,7 @@ fn import_lookups_probe_keys_without_scanning_the_catalog() -> Result<()> {
         let source_plan = tx.query(&format!("EXPLAIN {SOURCE_LOOKUP}"), &[&sources, &external])?;
         let source_plan: String = source_plan.iter().map(|r| r.get::<_, String>(0)).collect();
         assert!(source_plan.contains("Index Scan"), "{source_plan}");
-        assert!(!source_plan.contains("Seq Scan"), "{source_plan}");
+        assert!(!source_plan.contains("Seq Scan on source_records"), "{source_plan}");
 
         let mut ids = external;
         ids.extend(["1".to_owned(), "missing".to_owned()]);
@@ -208,7 +208,7 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
         assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
         let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id='legacy-00004999'",&[])?;
         assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),15);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),18);
         Ok(())
     })
 }

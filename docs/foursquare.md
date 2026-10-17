@@ -1,3 +1,10 @@
+> Current storage (schema 18): Foursquare keeps current merchants/outlets and
+> provider IDs for idempotent imports, not parallel source-evidence records.
+> Addressless places use a minimal ID-to-merchant mapping. Existing IDs retain
+> their merchant assignment; imports refresh current outlets without replaying
+> original merchant evidence. Earlier benchmarks below describe their stated
+> schema versions. See [database schema](database-schema.md#foursquare-identity-only-storage-version-18).
+
 # Foursquare merchant imports
 
 Import a filtered Foursquare OS Places CSV export as merchant and outlet knowledge.
@@ -169,14 +176,17 @@ catalogs.
 The initial loader streams prepared records through binary COPY into a temporary
 PostgreSQL table, computes identity keys with the same Rust rules, and sorts the
 staged records by identity and source ID. Related places are processed together,
-reducing repeated updates to established chains. Reconciliation still uses the
-shared importer, with bounded chunks even for a very large chain. Diagnostic
-merge groups are capped; candidate and imported-record counts remain exact.
+reducing repeated updates to established chains. A dedicated grouped loader uses
+the shared evidence-combination and identity rules without existing-catalog
+lookups. It writes each completed merchant and its derived search/identity rows
+once, retaining one unfinished group and bounded source/location batches.
+Diagnostic merge groups are capped; candidate and imported-record counts remain exact.
 
-Primary/unique keys and matching indexes remain active. Secondary search,
-geography and browsing indexes are built once after loading. Foreign keys on the
-loaded tables are restored and validated against the complete tables before
-commit, avoiding a reference lookup for every inserted row. Location writes use
+Catalog primary/unique keys and matching, search, geography and browsing indexes
+are built once after loading. Foreign keys on or referencing the loaded tables
+are restored and validated against the complete tables before commit, avoiding
+a reference lookup for every inserted row. Duplicate keys or invalid references
+abort the entire transaction, including its temporary schema changes. Location writes use
 typed COPY fields instead of serializing and reparsing entire JSON records.
 Search vocabulary and all normal indexes are present when the transaction commits.
 
@@ -518,3 +528,130 @@ include the notice prominently in developer documentation as described by
 [Foursquare](https://opensource.foursquare.com/places-notice-txt/). The bundled
 notice is also available at [../crates/ultrafinance-core/data/foursquare/NOTICE.txt](../crates/ultrafinance-core/data/foursquare/NOTICE.txt).
 No production deployment or production import is performed by preparation.
+
+## Schema 16 and initial-load refactor benchmark (2026-10-17)
+
+A fresh paired run used the same 600,000-row Canada input, selecting 500,000
+eligible records into empty databases on the isolated PostgreSQL 17 instance.
+Both runs included fresh filesystem preparation, locations, index builds,
+foreign-key validation and durable commit; builds and tests were stopped during
+timing. The baseline was the schema-15 initial loader, not the older incremental
+importer.
+
+| Initial loader | End to end | Database staging through commit |
+| --- | ---: | ---: |
+| Before this refactor, schema 15 | 81.25 s | 71.11 s |
+| Refactored loader, schema 16 | 73.78 s | 64.02 s |
+
+This single paired run measured **9.2% less elapsed time (1.10× throughput)**.
+It is an incremental improvement, not a new 10× result or a full-dataset timing.
+Both produced 424,925 merchants and 445,053 locations, with no location/source
+ownership mismatches. A per-source digest of source, canonical merchant and
+location columns matched across all 500,000 records, excluding generated internal
+IDs. Database size fell from 1,347,819,187 to 1,303,402,163 bytes (about 42 MiB);
+physical size also varies with generated IDs and page packing.
+
+The changes remove two unused indexes, skip existing-source probes and duplicate
+temporary key writes during an empty-catalog load, and build the search vocabulary
+once from final names. Incremental refreshes still use the normal guarded path.
+See [the schema review](database-schema.md#import-and-schema-review-2026-10-17)
+for retained data responsibilities and the next storage candidates. Apply schema
+16 with `ultrafinance database init`; no catalog reset is needed to migrate.
+
+## Bulk location ownership and shared provenance benchmark (2026-10-17)
+
+A second paired run compared the schema-16 loader above with schema 17 and the
+next bulk-write refactor. It used the same 600,000-row Canada input and 500,000
+eligible records, fresh preparation, isolated PostgreSQL 17, durable writes and
+no concurrent compilation or tests. The changed path carries reconciled owners
+into initial location inserts, validates all source-linked owners before commit,
+COPYs new merchants directly, and shares source attribution/licence/URL metadata.
+
+| Measure | Previous refactor (schema 16) | New loader (schema 17) |
+| --- | ---: | ---: |
+| End-to-end import | 77.66 s | 69.20 s |
+| Database staging through commit | 67.59 s | 59.50 s |
+| Source table including TOAST, excluding indexes | 259,145,728 bytes | 197,869,568 bytes |
+| Complete database | 1,303,017,139 bytes | 1,242,044,083 bytes |
+
+This run measured **10.9% less elapsed time**, **23.6% less source-table storage**,
+and **4.7% less total database storage**. It is one paired local benchmark, not a
+full-dataset guarantee. Both catalogs had 424,925 merchants and 445,053 locations,
+with zero source/location ownership mismatches. Source, canonical merchant,
+location and provenance evidence matched across all 500,000 records, excluding
+generated internal IDs and reconstructing normalized source metadata.
+
+The populated schema-16 baseline was also upgraded to schema 17 in **15.34 s**;
+the complete evidence digest was unchanged after migration. The storage savings
+above compare fresh loads: the migration's backfill and column drops do not
+immediately shrink an existing table file. Apply the upgrade with `ultrafinance
+database init` during maintenance; a reset is not required. All 194 core tests
+and 14 CLI source tests passed (three existing core tests remain ignored).
+
+
+## Grouped initial-load benchmark (2026-10-17)
+
+A dedicated grouped bootstrap path replaces repeated identity lookups and
+canonical refreshes with one final write per merchant. It also defers catalog
+primary/unique keys and matching indexes, restoring and validating everything
+inside the same transaction. The streaming adapter consumes parsed CSV records
+directly instead of serializing and parsing them again.
+
+The same local PostgreSQL 17 benchmark selected 500,000 eligible source records
+from 600,000 raw Canada rows, with fresh filesystem preparation for each run.
+Downloading and schema initialization were excluded; preparation, locations,
+index builds and durable commit were included.
+
+| Measurement | Previous schema-17 loader | Grouped loader |
+| --- | ---: | ---: |
+| End-to-end import | 72.61 s | 47.94 s |
+| Database staging through commit | 62.95 s | 37.87 s |
+| Database size | 1,242,158,771 bytes | 1,149,703,859 bytes |
+
+This is **1.51× throughput / 34% less elapsed time**, below the 2× target.
+An earlier grouped run before the adapter cleanup took 48.59 seconds; the small
+additional change is within normal single-run variation. These are local runs,
+not a repeated statistical benchmark or a full-dataset scaling guarantee.
+
+Both produced 424,925 merchants and 445,053 locations, with zero incorrect
+source-linked owners. Full source/canonical/location/provenance checksums and
+separate derived alias/search/identity checksums matched, excluding generated
+IDs. Focused tests also compare normal and initial imports across fetch boundaries,
+including one-record batches, and verify rollback and constraint restoration.
+
+The remaining costs include two preparation passes, staging/sorting the source
+records, and building final indexes. Further work toward 2× should combine
+counting with staging and reduce the temporary full-record representation;
+these changes need checkpoint/retry and evidence-equivalence validation.
+
+
+## Identity-only Foursquare storage benchmark (schema 18)
+
+The same 600,000 raw Canada rows, selecting 500,000 eligible records, were loaded
+into a fresh disposable local PostgreSQL 17 database. Filesystem preparation,
+index construction, integrity checks and durable commit are included; download
+and schema initialization are excluded. The baseline is the earlier schema-17
+grouped-loader run on the same input, not a repeated statistical comparison.
+
+| Measurement | Schema 17 | Schema 18 |
+| --- | ---: | ---: |
+| End-to-end import | 47.94 s | 40.99 s |
+| Database staging through commit | 37.87 s | 31.38 s |
+| Total database size | 1,149,703,859 bytes | 857,757,363 bytes |
+| Merchants | 424,925 | 424,925 |
+| Outlets | 445,053 | 445,053 |
+| Foursquare source-evidence rows | 500,000 | 0 |
+| Addressless import-ID mappings | 0 | 54,947 |
+
+This is **25.4% less database space** and **14.5% less elapsed import time** in
+these runs. The addressless mapping table and its indexes occupy 12,222,464 bytes.
+The derived alias/search/identity checksum remains
+`e7782f043d066c6da4a74e828f33dbaf`, excluding generated IDs. Original source-input
+checksums are deliberately no longer applicable because that evidence is removed.
+
+Initial imports collect expected ID-to-merchant mappings in a temporary table
+and compare sets after rebuilding indexes. They do not probe the growing,
+unindexed outlet table for each record. Source/outlet IDs, manual overrides,
+repeat imports, addressless-to-addressed transitions, migration and rollback are
+covered by regression tests. Existing databases require migration 18; deleting
+old evidence rows does not immediately shrink their existing relation files.

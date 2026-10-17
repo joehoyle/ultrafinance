@@ -718,14 +718,23 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
             assert!(stderr.contains("identity preview complete"));
             assert!(!stderr.contains("Import: committed"));
         } else {
-            assert!(stderr.contains("checking/writing source records 2/2 (100%)"));
+            assert!(stderr.contains("writing current Foursquare records 2/2 (100%)"));
             assert!(stderr.contains("Import: committed"));
         }
         json(output)
     };
     let preview = execute(true);
     assert_eq!(preview["dry_run"], true);
-    assert_eq!(preview["dedupe"]["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(preview["dedupe"]["candidates"], 2);
+    assert_eq!(
+        preview["dedupe"]["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g.as_array().unwrap().len() - 1)
+            .sum::<usize>(),
+        2
+    );
     assert!(
         store
             .resolve_source("foursquare", "place:a")

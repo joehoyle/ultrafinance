@@ -26,7 +26,9 @@ fn decode(r: &postgres::Row) -> Input {
     }
 }
 pub(super) fn read(c: &mut impl GenericClient, ids: Option<&[String]>) -> Result<Vec<Input>> {
-    Ok(c.query("SELECT merchant_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,url,country_hints,dataset_region FROM source_records WHERE ($1::text[] IS NULL OR merchant_id=ANY($1)) ORDER BY source,external_id", &[&ids])?.iter().map(decode).collect())
+    let mut inputs = current_foursquare(c, ids)?;
+    inputs.extend(c.query("SELECT merchant_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,url,country_hints,dataset_region FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE ($1::text[] IS NULL OR merchant_id=ANY($1)) ORDER BY s.source,external_id", &[&ids])?.iter().map(decode));
+    Ok(inputs)
 }
 /// Visit source inputs without collecting an entire chain's records in Rust.
 pub(super) fn for_each(
@@ -34,8 +36,11 @@ pub(super) fn for_each(
     ids: &[String],
     mut consume: impl FnMut(Input) -> Result<()>,
 ) -> Result<()> {
+    for input in current_foursquare(c, Some(ids))? {
+        consume(input)?;
+    }
     use postgres::fallible_iterator::FallibleIterator;
-    let mut rows=c.query_raw("SELECT merchant_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,url,country_hints,dataset_region FROM source_records WHERE merchant_id=ANY($1) ORDER BY source,external_id", [&ids as &(dyn postgres::types::ToSql+Sync)])?;
+    let mut rows=c.query_raw("SELECT merchant_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,url,country_hints,dataset_region FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE merchant_id=ANY($1) ORDER BY s.source,external_id", [&ids as &(dyn postgres::types::ToSql+Sync)])?;
     while let Some(row) = rows.next()? {
         consume(decode(&row))?;
     }
@@ -45,3 +50,14 @@ pub(super) fn for_each(
 #[cfg(test)]
 #[path = "../../tests/unit/postgres_store/typed_sources/tests.rs"]
 mod tests;
+
+// Current Foursquare merchants are authoritative, not reconstructed from originals.
+fn current_foursquare(c: &mut impl GenericClient, ids: Option<&[String]>) -> Result<Vec<Input>> {
+    let ready: bool = c
+        .query_one("SELECT to_regclass('source_identities') IS NOT NULL", &[])?
+        .get(0);
+    if !ready {
+        return Ok(vec![]);
+    }
+    c.query("SELECT m.* FROM merchants m WHERE ($1::text[] IS NULL OR m.id=ANY($1)) AND (EXISTS(SELECT 1 FROM location_records l WHERE l.merchant_id=m.id AND l.source='foursquare') OR EXISTS(SELECT 1 FROM foursquare_unlocated u WHERE u.merchant_id=m.id))", &[&ids])?.iter().map(|r| Ok(Input { merchant_id:r.get("id"), merchant:rows::merchant(r)?,url:String::new(),hints:vec![],region:None })).collect()
+}

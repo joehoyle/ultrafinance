@@ -151,7 +151,7 @@ pub(super) fn bounded_sources(
 ) -> Result<Vec<(String, SourceRecord)>> {
     use postgres::fallible_iterator::FallibleIterator;
     let mut rows = c.query_raw(
-        "SELECT * FROM source_records WHERE merchant_id=ANY($1) ORDER BY source,external_id",
+        "SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE merchant_id=ANY($1) ORDER BY s.source,external_id",
         [&ids as &(dyn postgres::types::ToSql + Sync)],
     )?;
     let mut bytes = 0;

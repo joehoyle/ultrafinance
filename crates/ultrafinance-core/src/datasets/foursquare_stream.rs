@@ -25,13 +25,8 @@ fn prepared(
     region: &str,
     fingerprint: &str,
 ) -> Result<(Vec<SourceRecord>, usize)> {
-    let mut writer = csv::Writer::from_writer(Vec::new());
-    writer.write_record(headers)?;
-    for row in rows {
-        writer.write_record(row)?;
-    }
-    let contents = String::from_utf8(writer.into_inner()?)?;
-    let (mut records, skipped) = crate::foursquare::prepare(&contents, region)?;
+    let (mut records, skipped) =
+        crate::foursquare::prepare_rows(headers, rows.iter().cloned().map(Ok), region)?;
     for record in &mut records {
         record.version = Some(format!("{fingerprint}:{region}:"));
     }

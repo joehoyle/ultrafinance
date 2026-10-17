@@ -69,7 +69,7 @@ impl PostgresStore {
 fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe::Snapshot> {
     let sources = c
         .query(
-            "SELECT * FROM source_records ORDER BY source,external_id",
+            "SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id ORDER BY s.source,external_id",
             &[],
         )?
         .iter()

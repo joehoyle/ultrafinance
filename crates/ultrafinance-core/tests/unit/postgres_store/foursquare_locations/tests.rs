@@ -117,7 +117,7 @@ fn foursquare_existing_merchants_keep_distinct_outlets_and_refresh_ids() -> Resu
         false,
         crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE,
     )?;
-    assert_eq!(report.delta.unchanged, 1);
+    assert_eq!(report.delta.updated, 1);
     let updated = store.locations("existing")?;
     let zero_updated = updated.iter().find(|r| r.external_id == "place:0").unwrap();
     assert_eq!(zero_updated.location.id, zero.location.id);

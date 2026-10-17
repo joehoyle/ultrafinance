@@ -46,11 +46,7 @@ fn linked_branches_have_one_merchant_contribution_and_refreshable_outlets() -> R
 
     // Old remembered decisions must use the consolidated catalog evidence.
     let request = serde_json::from_value(json!({"description":"opaque cafe descriptor"}))?;
-    let old = store
-        .source_records("foursquare", None, 1000, 0)?
-        .into_iter()
-        .map(|r| serde_json::from_value(r["record"].clone()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let old = store.merchant_provenance(id)?;
     store.save_resolution(&crate::resolution::Resolution::supported(
         &request,
         candidate.merchant.clone(),
@@ -108,24 +104,23 @@ fn consolidation_preserves_reviewed_identity_distinct_credits_and_matching_rules
     records[1].raw["countryHints"] = json!(["CA"]);
     store.reconcile_import(records, false, 5000)?;
     let provenance = store.search("Cafe", None, 10)?.remove(0).provenance;
-    assert_eq!(provenance.len(), 3);
-    let brand = provenance
-        .iter()
-        .find(|r| r.external_id == "brand:cafe")
-        .unwrap();
-    assert_eq!(brand.raw["source_record_count"], 2);
-    assert_eq!(brand.raw["negativeAliases"], json!(["OTHER CAFE"]));
-    assert_eq!(brand.raw["countryHints"], json!(["CA"]));
+    assert!(provenance.iter().all(|p| p.raw["identity_only"] == true));
     assert!(
         provenance
             .iter()
-            .any(|r| r.url == "https://example.test/distinct-credit")
+            .any(|p| p.url == "https://example.test/distinct-credit")
     );
     assert!(
         provenance
             .iter()
-            .any(|r| r.raw["transaction_text_regexp"] == "^BANK CAFE")
+            .all(|p| p.raw.get("transaction_text_regexp").is_none()
+                && p.raw.get("negativeAliases").is_none())
     );
-    assert!(store.search("OTHER CAFE", None, 10)?.is_empty());
+    assert!(
+        store
+            .source_records("foursquare", None, 100, 0)?
+            .iter()
+            .all(|r| r["record"].get("merchant").is_none())
+    );
     Ok(())
 }
