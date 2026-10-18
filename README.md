@@ -619,6 +619,93 @@ cargo run -- sources records merchant-studio --limit 20
 cargo run -- sources records merchant-studio --external-id amazon
 ```
 
+OSFI's Canadian financial institution directory is also a registered source:
+
+```sh
+cargo run -- sources show osfi
+cargo run -- sources download osfi --region ca
+cargo run -- sources raw osfi --region ca --limit 10
+cargo run -- sources import osfi --region ca --offline --dry-run
+cargo run -- sources import osfi --region ca --offline
+cargo run -- sources records osfi --limit 20
+# Download a fresh snapshot and apply changes:
+cargo run -- sources import osfi --region ca
+```
+
+`osfi` accepts `--region ca` or the default `global`; both refer to the same
+Canadian directory, with separate cache paths. It supports `--input FILE`,
+`--limit`, and the normal import reconciliation options. `datasets import
+--source osfi --input FILE` can also prepare a bundle without applying it.
+
+Records have type `financial_institution`, Canadian market evidence, legal names,
+and official Canadian trade names as unverified aliases. Coverage includes the
+listed banks, trust and loan companies, insurers, fraternal benefit societies,
+and foreign bank representative offices. This is not a complete directory of
+provincially regulated institutions or fintech brands. No websites, logos,
+statement descriptors, or transaction locations are inferred. Public contact and
+address fields remain in original snapshots, not matching records.
+
+The CSV supplies no institution IDs. Source IDs are SHA-256 hashes of normalized
+legal name and regulatory type/group/industry, explicitly prefixed `name:`.
+Duplicate contact rows share an ID, and contact/address changes do not change it;
+a legal-name or regulatory-classification change creates a new source identity
+that may require an explicit link. As with other sources, missing rows do not
+retire existing catalog entries automatically. Original CSVs and prepared bundles
+retain classification evidence; catalog source records retain the supported
+identity fields and provenance. The dataset is licensed under the
+[Open Government Licence – Canada](https://open.canada.ca/en/open-government-licence-canada).
+`sources eval osfi` and `--examples` are rejected: this is institution knowledge,
+not labeled transaction evaluation data.
+
+The other financial institution sources use the same workflow:
+
+```sh
+cargo run -- sources import fdic --region us --dry-run
+cargo run -- sources import ncua --region us --dry-run
+cargo run -- sources import wikidata --region ca --dry-run
+cargo run -- sources import gleif --region ca --dry-run
+# Inspect a downloaded snapshot, then import it (remove --dry-run to apply).
+cargo run -- sources raw gleif --region ca --limit 10
+cargo run -- sources import gleif --region ca --offline
+```
+
+| Source | Selection and identity | Coverage |
+| --- | --- | --- |
+| `fdic` | Active BankFind institutions; FDIC certificate number | US; `global` or `us` |
+| `ncua` | Latest linked active federally insured credit union spreadsheet; charter number | US; `global` or `us` |
+| `wikidata` | Instances/subclasses of financial institution (`Q650241`), English labels, no dissolution date; QID | `global` or two-letter country code |
+| `gleif` | Exact LEIs attached to the above Wikidata selection, then active GLEIF legal entities; LEI | `global` or two-letter legal-address country code |
+
+All four support `show`, `download`, `raw`, `import`, `records`, `--input`,
+`--offline`, and `--refresh`. They reject `eval` and transaction `--examples`.
+FDIC downloads every API page and validates the total and index version. NCUA
+resolves the current archive from its official data page and converts its XLSX
+worksheet to a UTF-8 CSV snapshot with the original columns. Offline NCUA input
+is that CSV; the other three accept their JSON snapshots. GLEIF snapshots include
+both the Wikidata selection evidence and the returned LEI records. Malformed
+optional LEI values stay in the raw snapshot but are excluded from GLEIF lookup; arbitrary
+unfiltered GLEIF API responses are deliberately rejected.
+
+Wikidata and GLEIF download the global selection before country filtering. This
+is supplemental coverage, not a complete global regulator directory. Wikidata
+country and GLEIF legal-address country are country hints, not evidence of every
+market served. Wikidata supplies English aliases and unambiguous official URLs;
+GLEIF excludes inactive entities and annulled/duplicate registrations. It
+supplies legal names and official language/trading names, excluding previous
+legal names. An LEI or QID is a source identity, not a transaction descriptor.
+Names and aliases remain unverified evidence. FDIC/NCUA data is US government
+public data; GLEIF and Wikidata structured data use CC0. No logos or branch
+locations are inferred.
+
+Source IDs survive name changes. Cross-source records remain separate unless
+explicitly reconciled; sharing an LEI in selection evidence does not silently merge
+catalog identities. Missing or inactive records do not automatically retire
+previous imports. Original snapshots and prepared bundles preserve classification
+and linking evidence; the catalog retains supported identity fields and provenance.
+Upstream errors, incomplete downloads, ambiguous NCUA archives, and schema changes
+fail before replacing the latest snapshot. Wikidata query-service availability is
+also required for automatic GLEIF downloads; cached imports work offline.
+
 Imports prepare the same versioned bundles as `datasets import`, then atomically
 apply their saved `knowledge.json`. They report `added`, `updated`, and `unchanged`
 source-record counts. Unchanged payloads are skipped, including changes only to

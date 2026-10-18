@@ -1,6 +1,7 @@
 mod batch;
 mod build_metadata;
 mod database;
+mod financial_download;
 mod foursquare_download;
 mod infra;
 mod logos;
@@ -256,6 +257,12 @@ enum DatasetCommand {
 }
 #[derive(Clone, clap::ValueEnum)]
 enum DatasetSource {
+    /// OSFI Canadian financial institution directory.
+    Osfi,
+    Fdic,
+    Ncua,
+    Gleif,
+    Wikidata,
     MerchantStudio,
     OpenEnrichment,
     Dodatathings,
@@ -803,6 +810,11 @@ async fn main() -> Result<()> {
                 output,
             } => {
                 let source = match source {
+                    DatasetSource::Osfi => ultrafinance_core::datasets::Source::Osfi,
+                    DatasetSource::Fdic => ultrafinance_core::datasets::Source::Fdic,
+                    DatasetSource::Ncua => ultrafinance_core::datasets::Source::Ncua,
+                    DatasetSource::Gleif => ultrafinance_core::datasets::Source::Gleif,
+                    DatasetSource::Wikidata => ultrafinance_core::datasets::Source::Wikidata,
                     DatasetSource::Foursquare => ultrafinance_core::datasets::Source::Foursquare,
                     DatasetSource::MerchantStudio => {
                         ultrafinance_core::datasets::Source::MerchantStudio

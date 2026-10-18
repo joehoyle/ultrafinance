@@ -160,7 +160,7 @@ fn foursquare_import_refresh_keeps_place_and_location_identities() {
 fn registry_and_offline_browsing_work_without_a_database() {
     let root = tempfile::tempdir().unwrap();
     let registry = json(run(root.path(), &["list", "--json"]));
-    assert_eq!(registry.as_array().unwrap().len(), 7);
+    assert_eq!(registry.as_array().unwrap().len(), 12);
     assert_eq!(registry[3]["download"], "automatic");
     let moneyvis = json(run(root.path(), &["show", "moneyvis"]));
     assert_eq!(
@@ -954,4 +954,242 @@ fn merchants_only_requires_foursquare() {
         String::from_utf8_lossy(&result.stderr)
             .contains("--merchants-only is supported only for Foursquare")
     );
+}
+
+#[test]
+fn osfi_source_supports_registry_snapshots_import_refresh_and_browsing() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join("osfi.csv");
+    let fixture = include_str!("../../ultrafinance-core/tests/fixtures/osfi.csv");
+    std::fs::write(&input, fixture).unwrap();
+    let bundles = root.path().join("bundles");
+    let info = json(run(root.path(), &["show", "osfi", "--region", "ca"]));
+    assert_eq!(info["license"], "Open Government Licence - Canada");
+    assert!(
+        info["downloads"][0]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("who_we_regulate_fi_eng.csv")
+    );
+    let prepared = json(run(
+        root.path(),
+        &[
+            "import",
+            "osfi",
+            "--region",
+            "ca",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            bundles.to_str().unwrap(),
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(prepared["manifest"]["merchant_records"], 3);
+    assert_eq!(prepared["manifest"]["holdout_samples"], 0);
+    let offline = json(run(
+        root.path(),
+        &[
+            "import",
+            "osfi",
+            "--region",
+            "ca",
+            "--offline",
+            "--output",
+            bundles.to_str().unwrap(),
+            "--dry-run",
+        ],
+    ));
+    assert_eq!(prepared["bundle"], offline["bundle"]);
+    assert_eq!(
+        json(run(root.path(), &["raw", "osfi", "--region", "ca"]))["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    let eval = run(root.path(), &["eval", "osfi", "--offline"]);
+    assert!(!eval.status.success());
+    assert!(String::from_utf8_lossy(&eval.stderr).contains("not transaction evaluation samples"));
+    assert!(
+        !run(root.path(), &["show", "osfi", "--region", "us"])
+            .status
+            .success()
+    );
+    let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let call = |args: &[&str]| {
+        json(
+            Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+                .args(["sources", "--cache-dir"])
+                .arg(root.path().join("cache"))
+                .args(args)
+                .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url())
+                .output()
+                .unwrap(),
+        )
+    };
+    let args = [
+        "import",
+        "osfi",
+        "--region",
+        "ca",
+        "--offline",
+        "--output",
+        bundles.to_str().unwrap(),
+    ];
+    assert_eq!(call(&args)["delta"]["added"], 3);
+    let records = store.source_records("osfi", None, 100, 0).unwrap();
+    assert_eq!(records.len(), 3);
+    assert!(
+        records
+            .iter()
+            .all(|r| r["record"]["merchant"]["type"] == "financial_institution")
+    );
+    assert!(records.iter().all(|r| r["merchant_id"].is_string()));
+    let before: Vec<_> = records.iter().map(|r| r["merchant_id"].clone()).collect();
+    assert_eq!(call(&args)["delta"]["unchanged"], 3);
+    std::fs::write(
+        &input,
+        fixture.replace("Example Banking", "Example Financial"),
+    )
+    .unwrap();
+    let refreshed = call(&[
+        "import",
+        "osfi",
+        "--region",
+        "ca",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        bundles.to_str().unwrap(),
+    ]);
+    assert_eq!(refreshed["delta"]["updated"], 1);
+    let after: Vec<_> = store
+        .source_records("osfi", None, 100, 0)
+        .unwrap()
+        .iter()
+        .map(|r| r["merchant_id"].clone())
+        .collect();
+    assert_eq!(before, after);
+    let candidates = store.search("Example Financial", Some("CA"), 10).unwrap();
+    assert_eq!(
+        candidates[0].merchant.counterparty_type,
+        ultrafinance_core::CounterpartyType::FinancialInstitution
+    );
+    assert!(!candidates[0].trusted);
+    assert!(
+        store
+            .locations(&candidates[0].merchant.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn financial_sources_support_offline_import_browsing_and_idempotent_refresh() {
+    for (source, fixture, extension) in [
+        (
+            "fdic",
+            include_str!("../../ultrafinance-core/tests/fixtures/fdic.json"),
+            "json",
+        ),
+        (
+            "ncua",
+            include_str!("../../ultrafinance-core/tests/fixtures/ncua.csv"),
+            "csv",
+        ),
+        (
+            "wikidata",
+            include_str!("../../ultrafinance-core/tests/fixtures/wikidata.json"),
+            "json",
+        ),
+        (
+            "gleif",
+            include_str!("../../ultrafinance-core/tests/fixtures/gleif.json"),
+            "json",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join(format!("input.{extension}"));
+        std::fs::write(&input, fixture).unwrap();
+        let bundles = root.path().join("bundles");
+        let info = json(run(root.path(), &["show", source]));
+        assert_eq!(info["source"], source);
+        let prepared = json(run(
+            root.path(),
+            &[
+                "import",
+                source,
+                "--input",
+                input.to_str().unwrap(),
+                "--output",
+                bundles.to_str().unwrap(),
+                "--dry-run",
+            ],
+        ));
+        assert_eq!(prepared["manifest"]["merchant_records"], 1);
+        assert_eq!(prepared["manifest"]["holdout_samples"], 0);
+        let offline = json(run(
+            root.path(),
+            &[
+                "import",
+                source,
+                "--offline",
+                "--output",
+                bundles.to_str().unwrap(),
+                "--dry-run",
+            ],
+        ));
+        assert_eq!(offline["bundle"], prepared["bundle"]);
+        assert_eq!(
+            json(run(root.path(), &["raw", source]))["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            !run(root.path(), &["eval", source, "--offline"])
+                .status
+                .success()
+        );
+        let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+        let call = |args: &[&str]| {
+            json(
+                Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+                    .args(["sources", "--cache-dir"])
+                    .arg(root.path().join("cache"))
+                    .args(args)
+                    .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url())
+                    .output()
+                    .unwrap(),
+            )
+        };
+        let args = [
+            "import",
+            source,
+            "--offline",
+            "--output",
+            bundles.to_str().unwrap(),
+        ];
+        assert_eq!(call(&args)["delta"]["added"], 1);
+        assert_eq!(call(&args)["delta"]["unchanged"], 1);
+        let before = store.source_records(source, None, 10, 0).unwrap();
+        assert_eq!(
+            before[0]["record"]["merchant"]["type"],
+            "financial_institution"
+        );
+        std::fs::write(&input, fixture.replace("Example", "Renamed")).unwrap();
+        let updated = call(&[
+            "import",
+            source,
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            bundles.to_str().unwrap(),
+        ]);
+        assert_eq!(updated["delta"]["updated"], 1);
+        let after = store.source_records(source, None, 10, 0).unwrap();
+        assert_eq!(before[0]["merchant_id"], after[0]["merchant_id"]);
+    }
 }

@@ -513,7 +513,7 @@ impl PostgresStore {
                 // Source listings retain explicit null/empty input fields.
                 let merchant = &record.merchant;
                 document["merchant"] = serde_json::json!({
-                    "id":merchant.id,"name":merchant.name,"website":merchant.website,
+                    "id":merchant.id,"type":merchant.counterparty_type,"name":merchant.name,"website":merchant.website,
                     "logo_url":merchant.logo_url,"logo_source":merchant.logo_source,
                     "markets":merchant.markets,"aliases":merchant.aliases,"sources":merchant.sources
                 });

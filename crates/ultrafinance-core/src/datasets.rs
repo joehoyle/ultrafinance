@@ -10,8 +10,10 @@ use std::{
     path::Path,
 };
 
+pub mod financial;
 #[path = "datasets/foursquare_file.rs"]
 mod foursquare_file;
+pub mod osfi;
 pub fn prepare_foursquare_file(
     input: &Path,
     output: &Path,
@@ -57,6 +59,11 @@ pub async fn resume_foursquare_import(
 
 #[derive(Clone, Copy)]
 pub enum Source {
+    Osfi,
+    Fdic,
+    Ncua,
+    Gleif,
+    Wikidata,
     MerchantStudio,
     OpenEnrichment,
     DoDataThings,
@@ -68,6 +75,11 @@ pub enum Source {
 impl Source {
     pub fn name(self) -> &'static str {
         match self {
+            Self::Osfi => "osfi",
+            Self::Fdic => "fdic",
+            Self::Ncua => "ncua",
+            Self::Gleif => "gleif",
+            Self::Wikidata => "wikidata",
             Self::MerchantStudio => "merchant-studio",
             Self::OpenEnrichment => "open-enrichment",
             Self::DoDataThings => "dodatathings",
@@ -441,6 +453,31 @@ pub fn prepare(
     let mut skipped_places = 0;
     let mut retained_places = 0;
     let (license, credit, url, kind) = match source {
+        Source::Fdic | Source::Ncua | Source::Gleif | Source::Wikidata => {
+            if example_data.is_some() {
+                bail!("financial institution sources do not accept transaction examples");
+            }
+            records = financial::prepare(source, contents, region)?;
+            let (license, credit, url) = financial::metadata(source);
+            (license, credit, url, "counterparty-knowledge-only")
+        }
+        Source::Osfi => {
+            if !matches!(region, "global" | "ca") {
+                bail!("OSFI supports only --region global or ca (Canadian coverage)");
+            }
+            if example_data.is_some() {
+                bail!(
+                    "OSFI imports do not accept --examples; the directory contains no transaction labels"
+                );
+            }
+            records = osfi::prepare(contents)?;
+            (
+                osfi::LICENSE,
+                osfi::CREDIT,
+                osfi::URL,
+                "counterparty-knowledge-only",
+            )
+        }
         Source::Foursquare => {
             if example_data.is_some() {
                 bail!("Foursquare imports do not accept --examples or manual brand mappings");

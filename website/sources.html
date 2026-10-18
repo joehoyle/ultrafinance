@@ -106,6 +106,42 @@
           </article>
         </div>
       </section>
+      <section aria-labelledby="institution-sources">
+        <h2 id="institution-sources">Financial institution knowledge</h2>
+        <div class="grid">
+          <article>
+            <h3><a href="https://open.canada.ca/data/en/dataset/b27ec3ef-7338-4e76-a6fd-128339a92df5">OSFI — Who we regulate ↗</a></h3>
+            <span class="license"><a href="https://open.canada.ca/en/open-government-licence-canada">Open Government Licence – Canada</a></span>
+            <p class="credit">Contains information licensed under the Open Government Licence – Canada. Office of the Superintendent of Financial Institutions.</p>
+            <p>Canadian financial institution legal names and official trade names from OSFI’s public directory. Imported identities are typed as financial institutions; names and aliases remain unverified matching evidence.</p>
+            <p>Source IDs derive from names and regulatory classifications because the CSV has no institution identifiers. No logos, websites, transaction descriptors, or branch locations are inferred. Contact details stay in original snapshots. Coverage is limited to the published directory and does not include every provincial institution or fintech brand.</p>
+          </article>
+          <article>
+            <h3><a href="https://api.fdic.gov/banks/docs">FDIC BankFind ↗</a></h3>
+            <span class="license">US government public data</span>
+            <p>Active US bank names and reported websites, identified by FDIC certificate number.</p>
+            <p>Imported as financial institutions. Names and aliases remain unverified matching evidence; no transaction labels, logos, or branch locations are inferred.</p>
+          </article>
+          <article>
+            <h3><a href="https://ncua.gov/analysis/credit-union-corporate-call-report-data">NCUA ↗</a></h3>
+            <span class="license">US government public data</span>
+            <p>Active federally insured US credit unions from the latest published quarterly list, identified by charter number.</p>
+            <p>Imported as financial institutions. Names and aliases remain unverified matching evidence; no transaction labels, logos, or branch locations are inferred.</p>
+          </article>
+          <article>
+            <h3><a href="https://www.wikidata.org/wiki/Q650241">Wikidata ↗</a></h3>
+            <span class="license">CC0-1.0</span>
+            <p>Supplemental financial institution names, English aliases, country hints, official websites and LEI links. Selected by financial institution classification; items with dissolution dates are excluded. Identified by QID.</p>
+            <p>Imported as financial institutions. Names and aliases remain unverified matching evidence; no transaction labels, logos, or branch locations are inferred.</p>
+          </article>
+          <article>
+            <h3><a href="https://www.gleif.org/en/lei-data/gleif-api">GLEIF ↗</a></h3>
+            <span class="license">CC0-1.0</span>
+            <p>Active legal entity names and official alternative names for LEIs linked to Wikidata financial institutions. Identified by LEI. Selection evidence is preserved; this is not the full global LEI registry.</p>
+            <p>Imported as financial institutions. Names and aliases remain unverified matching evidence; no transaction labels, logos, or branch locations are inferred.</p>
+          </article>
+        </div>
+      </section>
       <section aria-labelledby="evaluation-sources">
         <h2 id="evaluation-sources">Transaction evaluation datasets</h2>
         <p>These adapters prepare transaction examples for evaluation. Category-only and unlabeled examples need merchant labels before they can measure merchant recognition. Synthetic reference catalogs are intended for isolated testing.</p>

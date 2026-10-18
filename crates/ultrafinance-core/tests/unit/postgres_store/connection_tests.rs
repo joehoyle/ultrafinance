@@ -441,6 +441,12 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
         serde_json::to_value(upgraded.resolutions(None, 100)?)?,
         serde_json::to_value(resolutions)?
     );
+    // Legacy exports predate the explicit counterparty type; migration defaults
+    // those identities to merchant while preserving their other fields.
+    let mut exports = exports;
+    for export in &mut exports {
+        export["record"]["merchant"]["type"] = serde_json::json!("merchant");
+    }
     assert_eq!(upgraded.source_records("fixture", None, 100, 0)?, exports);
     upgraded.run(move |client| {
         assert!(client.query_one("SELECT revision FROM catalog_revision", &[])?.get::<_, i64>(0) >= revision);

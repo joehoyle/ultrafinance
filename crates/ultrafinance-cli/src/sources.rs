@@ -163,6 +163,28 @@ struct Registration {
 }
 fn registry(source: DatasetSource) -> Registration {
     let (source, purpose, url, license) = match source {
+        DatasetSource::Fdic => {
+            let (license, purpose, url) = datasets::financial::metadata(Source::Fdic);
+            (Source::Fdic, purpose, url, license)
+        }
+        DatasetSource::Ncua => {
+            let (license, purpose, url) = datasets::financial::metadata(Source::Ncua);
+            (Source::Ncua, purpose, url, license)
+        }
+        DatasetSource::Gleif => {
+            let (license, purpose, url) = datasets::financial::metadata(Source::Gleif);
+            (Source::Gleif, purpose, url, license)
+        }
+        DatasetSource::Wikidata => {
+            let (license, purpose, url) = datasets::financial::metadata(Source::Wikidata);
+            (Source::Wikidata, purpose, url, license)
+        }
+        DatasetSource::Osfi => (
+            Source::Osfi,
+            "Canadian financial institution names and official trade names; no transaction labels",
+            datasets::osfi::URL,
+            datasets::osfi::LICENSE,
+        ),
         DatasetSource::Foursquare => (
             Source::Foursquare,
             "Merchant and outlet knowledge; automatic deterministic identity reconciliation",
@@ -214,7 +236,13 @@ fn registry(source: DatasetSource) -> Registration {
     }
 }
 fn urls(source: Source, region: &str) -> Result<Vec<(&'static str, String)>> {
-    if matches!(source, Source::OpenEnrichment | Source::Foursquare) {
+    if datasets::financial::supported(source) {
+        datasets::financial::validate_region(source, region)?;
+    } else if matches!(source, Source::Osfi) {
+        if !matches!(region, "global" | "ca") {
+            bail!("OSFI supports only --region global or ca (Canadian coverage)");
+        }
+    } else if matches!(source, Source::OpenEnrichment | Source::Foursquare) {
         if region != "global"
             && !(region.len() == 2 && region.bytes().all(|b| b.is_ascii_lowercase()))
         {
@@ -226,6 +254,11 @@ fn urls(source: Source, region: &str) -> Result<Vec<(&'static str, String)>> {
         bail!("this source supports only --region global");
     }
     Ok(match source {
+        Source::Fdic => vec![("input.json", "https://api.fdic.gov/banks/institutions?filters=ACTIVE%3A1".into())],
+        Source::Ncua => vec![("input.csv", datasets::financial::NCUA_URL.into())],
+        Source::Gleif => vec![("input.json", "https://api.gleif.org/api/v1/lei-records".into())],
+        Source::Wikidata => vec![("input.json", "https://query.wikidata.org/sparql".into())],
+        Source::Osfi => vec![("input.csv", datasets::osfi::DOWNLOAD_URL.into())],
         Source::Foursquare => vec![],
         Source::MerchantStudio => vec![
             ("input.json", "https://jtvargas.github.io/merchant-studio/data/merchant_aliases.json".into()),
@@ -264,7 +297,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
-async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     const MAX_BYTES: usize = 64 * 1024 * 1024;
     let mut response = client.get(url).send().await?.error_for_status()?;
     if response
@@ -283,7 +316,6 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     if bytes.is_empty() {
         bail!("upstream returned an empty file");
     }
-    std::str::from_utf8(&bytes).context("source download is not UTF-8")?;
     Ok(bytes)
 }
 async fn download(
@@ -313,6 +345,10 @@ async fn download(
             "https://catalog.h3-hub.foursquare.com/iceberg?warehouse=places&table=datasets.places_os&region={region}&limit={limit_label}"
         );
         return save_foursquare_snapshot(root, r, region, &export.path().join("places.csv"), url);
+    }
+    if datasets::financial::supported(r.source) {
+        let (name, url, bytes) = super::financial_download::download(r.source).await?;
+        return save_snapshot(root, r, region, vec![(name, url, bytes)]);
     }
     let files = urls(r.source, region)?;
     if matches!(r.source, Source::LunchMoney) {
@@ -564,6 +600,25 @@ fn save_foursquare_snapshot(
 }
 
 fn validate_file(source: Source, name: &str, bytes: &[u8]) -> Result<()> {
+    if datasets::financial::supported(source) {
+        let expected = if matches!(source, Source::Ncua) {
+            "input.csv"
+        } else {
+            "input.json"
+        };
+        if name != expected {
+            bail!("institution imports do not accept examples");
+        }
+        datasets::financial::prepare(source, std::str::from_utf8(bytes)?, "global")?;
+        return Ok(());
+    }
+    if matches!(source, Source::Osfi) {
+        if name != "input.csv" {
+            bail!("institution imports do not accept --examples");
+        }
+        datasets::osfi::prepare(std::str::from_utf8(bytes)?)?;
+        return Ok(());
+    }
     if matches!(source, Source::MerchantStudio | Source::LunchMoney) {
         let data: Value = serde_json::from_slice(bytes)?;
         let key = if matches!(source, Source::LunchMoney) {
@@ -588,7 +643,13 @@ fn validate_file(source: Source, name: &str, bytes: &[u8]) -> Result<()> {
             Source::DoDataThings => "description",
             Source::MoneyVis => "Transaction Description",
             Source::BusinessTransactions => "transaction_string",
-            Source::MerchantStudio | Source::LunchMoney => unreachable!(),
+            Source::Fdic
+            | Source::Ncua
+            | Source::Gleif
+            | Source::Wikidata
+            | Source::Osfi
+            | Source::MerchantStudio
+            | Source::LunchMoney => unreachable!(),
         };
         if !reader.headers()?.iter().any(|h| h == required) {
             bail!("download is missing CSV column {required}");
@@ -638,13 +699,19 @@ fn raw_rows(path: &Path, examples: bool, limit: usize, offset: usize) -> Result<
     let text = std::fs::read_to_string(path)?;
     if path.extension().is_some_and(|x| x == "json") {
         let data: Value = serde_json::from_str(&text)?;
-        let rows = data[if examples {
-            "descriptors"
-        } else if data["transactions"].is_array() {
-            "transactions"
+        let rows = if data["results"]["bindings"].is_array() {
+            &data["results"]["bindings"]
+        } else if data["data"].is_array() {
+            &data["data"]
         } else {
-            "merchants"
-        }]
+            &data[if examples {
+                "descriptors"
+            } else if data["transactions"].is_array() {
+                "transactions"
+            } else {
+                "merchants"
+            }]
+        }
         .as_array()
         .context("missing source rows")?;
         Ok(
@@ -689,6 +756,11 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
             threshold,
         } => {
             let r = registry(source);
+            if matches!(r.source, Source::Osfi) || datasets::financial::supported(r.source) {
+                bail!(
+                    "This source supplies counterparty knowledge, not transaction evaluation samples; evaluate an independent transaction suite after importing"
+                );
+            }
             if matches!(r.source, Source::Foursquare) {
                 bail!(
                     "Foursquare supplies merchant knowledge, not transaction evaluation samples; evaluate an independent transaction suite after importing"
@@ -761,6 +833,11 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 DatasetSource::Lunchmoney,
                 DatasetSource::BusinessTransactions,
                 DatasetSource::Foursquare,
+                DatasetSource::Osfi,
+                DatasetSource::Fdic,
+                DatasetSource::Ncua,
+                DatasetSource::Gleif,
+                DatasetSource::Wikidata,
             ]
             .map(registry);
             if !as_json {
@@ -880,6 +957,11 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     "BusinessTransactions is a synthetic reference catalog; use --dry-run to prepare it, or --evaluation with a separate evaluation database"
                 );
             }
+            if (matches!(r.source, Source::Osfi) || datasets::financial::supported(r.source))
+                && examples.is_some()
+            {
+                bail!("institution imports do not accept --examples");
+            }
             if matches!(r.source, Source::Foursquare) && examples.is_some() {
                 bail!("Foursquare imports do not accept --examples or manual brand mappings");
             }
@@ -897,7 +979,14 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                     format!("local:{}", input.display()),
                 )?)?
             } else if let Some(input) = input {
-                let name = if matches!(r.source, Source::MerchantStudio | Source::LunchMoney) {
+                let name = if matches!(
+                    r.source,
+                    Source::MerchantStudio
+                        | Source::LunchMoney
+                        | Source::Fdic
+                        | Source::Gleif
+                        | Source::Wikidata
+                ) {
                     "input.json"
                 } else {
                     "input.csv"
