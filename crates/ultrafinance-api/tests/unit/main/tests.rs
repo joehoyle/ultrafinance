@@ -84,8 +84,9 @@ async fn enrichment_responses_hide_aliases_but_still_match_them() {
 }
 
 #[test]
-fn public_enrichment_keeps_attributions_without_merchant_sources() {
+fn public_enrichment_keeps_kind_and_attributions_without_merchant_sources() {
     let internal: ultrafinance_core::EnrichResponse = serde_json::from_value(json!({
+        "kind": "refund",
         "merchant": {"status":"matched", "data": {
             "id":"beta", "name":"Beta Shop", "sources":["https://source.example"]
         }},
@@ -94,6 +95,7 @@ fn public_enrichment_keeps_attributions_without_merchant_sources() {
     }))
     .unwrap();
     let public = serde_json::to_value(response::EnrichResponse::from(internal)).unwrap();
+    assert_eq!(public["kind"], "refund");
     assert!(public["merchant"]["data"].get("sources").is_none());
     assert_eq!(
         public["attributions"],
@@ -262,7 +264,8 @@ async fn served_openapi_matches_reviewed_contract_and_docs_are_available() {
         spec, reviewed,
         "API contract changed; review and regenerate the OpenAPI snapshot (see README)"
     );
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 4);
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 5);
+    assert!(spec["paths"]["/v1/counterparties"]["get"].is_object());
     assert!(spec["paths"]["/v1/enrich/batch"]["post"].is_object());
     assert!(spec["paths"]["/health"]["get"].is_object());
     assert!(spec["paths"]["/v1/enrich"]["post"].is_object());
@@ -527,4 +530,61 @@ async fn research_flag_is_optional_typed_and_only_requires_configuration_for_fal
             .unwrap();
         assert_eq!(response.status(), status, "{payload}");
     }
+}
+
+#[tokio::test]
+async fn counterparties_are_typed_public_records_and_merchants_stay_compatible() {
+    let records = serde_json::from_value(json!([
+        {"id":"bank", "name":"Example Bank", "type":"financial_institution", "aliases":["BANK FEE"], "sources":["https://internal.example"]},
+        {"id":"cafe", "name":"Cafe"}
+    ])).unwrap();
+    let app = router(Enricher::new(None, "unused".into(), 0.95, records).unwrap());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/enrich")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"description":"BANK FEE"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["counterparties"][0]["type"], "financial_institution");
+    assert_eq!(body["counterparties"][0]["id"], "bank");
+    assert!(body["counterparties"][0].get("aliases").is_none());
+    assert!(body["counterparties"][0].get("sources").is_none());
+    assert_eq!(body["merchant"]["status"], "unresolved");
+    for (path, key, id) in [
+        ("/v1/merchants", "merchants", "cafe"),
+        (
+            "/v1/counterparties?type=financial_institution",
+            "counterparties",
+            "bank",
+        ),
+        ("/v1/counterparties?type=merchant", "counterparties", "cafe"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["total"], 1);
+        assert_eq!(body[key][0]["id"], id);
+    }
+    let response = app
+        .oneshot(
+            Request::get("/v1/counterparties?type=invalid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

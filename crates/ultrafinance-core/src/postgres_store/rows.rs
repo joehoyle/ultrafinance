@@ -11,6 +11,7 @@ fn json_column<T: serde::de::DeserializeOwned>(row: &Row, column: &str) -> Resul
 
 pub(super) fn merchant(row: &Row) -> Result<Merchant> {
     Ok(Merchant {
+        counterparty_type: row.try_get::<_, &str>("counterparty_type")?.parse()?,
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         website: row.try_get("website")?,
@@ -45,6 +46,7 @@ pub(crate) fn source(row: &Row) -> Result<SourceRecord> {
         source: row.try_get("source")?,
         external_id: row.try_get("external_id")?,
         merchant: Merchant {
+            counterparty_type: row.try_get::<_, &str>("input_counterparty_type")?.parse()?,
             id: row.try_get("input_id")?,
             name: row.try_get("input_name")?,
             website: row.try_get("input_website")?,

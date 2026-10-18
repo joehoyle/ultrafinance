@@ -114,7 +114,7 @@ fn migration_removes_foursquare_evidence_and_preserves_import_identity() -> Resu
         assert_eq!(
             c.query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            19
+            crate::store::POSTGRES_SCHEMA_VERSION
         );
         Ok(())
     })?;

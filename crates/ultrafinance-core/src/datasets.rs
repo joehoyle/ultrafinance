@@ -525,6 +525,7 @@ pub fn prepare(
                     continue;
                 }
                 let merchant = crate::Merchant {
+                    counterparty_type: Default::default(),
                     id: id.into(),
                     name: brand.into(),
                     markets: vec![],
@@ -745,6 +746,7 @@ pub fn prepare(
                     source: name.into(),
                     external_id: id.clone(),
                     merchant: crate::Merchant {
+                        counterparty_type: Default::default(),
                         id,
                         name: merchant_name.clone(),
                         markets: vec![],

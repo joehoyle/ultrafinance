@@ -10,10 +10,13 @@ fn jev_scores_and_abstention_are_distinct_from_search_similarity() {
     assert!(table.contains("Jev choice"));
     assert!(!table.contains("MATCHED"));
     let summary = jev_summary(&answer, &candidates, &json!(0.95));
-    assert!(summary.contains("confidence 90.0%"));
+    assert!(summary.contains("confidence (derived diagnostic) 90.0%"));
     assert!(summary.contains("below match threshold"));
     let none = json!({"choice":"none", "confidence":0.99, "probabilities":{"none":0.98}});
     assert!(jev_summary(&none, &candidates, &json!(0.95)).contains("Jev selected no merchant"));
+    let boundary = json!({"choice":"candidate_0", "confidence":0.8,
+        "probabilities":{"candidate_0":0.9,"none":0.1}});
+    assert!(!jev_summary(&boundary, &candidates, &json!(0.9)).contains("below match threshold"));
 }
 #[test]
 fn discovery_choices_use_their_own_shortlist_and_null_context_is_omitted() {

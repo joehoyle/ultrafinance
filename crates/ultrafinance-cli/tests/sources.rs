@@ -361,6 +361,7 @@ fn source_eval_prepares_cached_moneyvis_and_runs_unlabeled_holdout_without_impor
         .unwrap();
     store
         .put(&ultrafinance_core::Merchant {
+            counterparty_type: Default::default(),
             id: "sample-shop".into(),
             name: description.into(),
             markets: vec![],

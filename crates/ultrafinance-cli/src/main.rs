@@ -7,6 +7,7 @@ mod logos;
 mod output;
 mod research;
 mod sources;
+mod text_enrich;
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Map;
@@ -84,7 +85,7 @@ enum Command {
         #[arg(long, default_value = "0")]
         offset: usize,
     },
-    /// Enrich a description or a complete JSON request without starting the API.
+    /// Enrich a description, a TXT file, or a complete JSON request locally.
     Enrich(Box<EnrichArgs>),
     /// Research a transaction description using web search and the merchant catalog.
     Research(research::Args),
@@ -127,7 +128,8 @@ enum Command {
         #[command(subcommand)]
         command: LocationCommand,
     },
-    /// Maintain and search the local merchant database.
+    /// Maintain and search the local counterparty catalog.
+    #[command(visible_alias = "counterparties")]
     Merchants {
         #[command(subcommand)]
         command: MerchantCommand,
@@ -298,6 +300,9 @@ enum MerchantCommand {
     },
     /// Add a verified merchant, or replace one by supplying its existing ID.
     Add {
+        /// Entity type: merchant or financial_institution.
+        #[arg(long = "type", default_value = "merchant")]
+        counterparty_type: ultrafinance_core::CounterpartyType,
         #[arg(long)]
         name: String,
         /// Declare a known operating market (repeat for multiple countries).
@@ -411,7 +416,7 @@ enum ImportFormat {
     MerchantStudio,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct EnrichArgs {
     /// Research unresolved merchants and persist supported merchants/aliases.
     #[arg(long)]
@@ -420,8 +425,14 @@ struct EnrichArgs {
     #[arg(long)]
     json: bool,
     /// Raw bank transaction description.
-    #[arg(required_unless_present = "input", conflicts_with = "input")]
+    #[arg(required_unless_present_any = ["input", "file"], conflicts_with_all = ["input", "file"])]
     description: Option<String>,
+    /// Enrich one description per nonblank TXT line; use - for stdin.
+    #[arg(long, conflicts_with_all = ["input", "description", "details"])]
+    file: Option<PathBuf>,
+    /// Process only the first N nonblank lines from --file.
+    #[arg(long, requires = "file", value_parser = clap::value_parser!(u32).range(1..))]
+    limit: Option<u32>,
     /// Read a complete JSON request from a file, or use - for stdin.
     #[arg(long, conflicts_with_all = ["description", "amount", "currency", "date", "country", "location", "extra"])]
     input: Option<PathBuf>,
@@ -446,7 +457,7 @@ struct EnrichArgs {
     merchants: Option<PathBuf>,
     #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
     model: String,
-    /// Minimum chosen probability and model confidence; provisional, not measured accuracy.
+    /// Minimum selected probability; provisional, not measured accuracy.
     #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
     threshold: f64,
     /// Validate and print the request without reading a catalog or calling Jev.
@@ -900,9 +911,22 @@ async fn main() -> Result<()> {
             .await?;
         }
         Command::Enrich(args) => {
-            let request = read_request(&args)?;
+            let requests = if let Some(path) = &args.file {
+                text_enrich::read_requests(path, &args)?
+            } else {
+                vec![read_request(&args)?]
+            };
             if args.dry_run {
-                println!("{}", serde_json::to_string_pretty(&request)?);
+                if args.file.is_some() {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({"transactions": requests})
+                        )?
+                    );
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&requests[0])?);
+                }
                 return Ok(());
             }
             let store = if let Some(path) = &args.merchants {
@@ -924,17 +948,22 @@ async fn main() -> Result<()> {
                 args.threshold,
                 store,
             )?;
+            if args.file.is_some() {
+                text_enrich::run(&enricher, &requests, args.json).await?;
+                return Ok(());
+            }
+            let request = &requests[0];
             let response = if args.details {
                 let (response, details) = tokio::time::timeout(
                     Duration::from_secs(55),
-                    enricher.enrich_with_details(&request),
+                    enricher.enrich_with_details(request),
                 )
                 .await
                 .context("merchant evaluation timed out")?;
                 output::enrichment_details(&details)?;
                 response?
             } else {
-                tokio::time::timeout(Duration::from_secs(55), enricher.enrich(&request))
+                tokio::time::timeout(Duration::from_secs(55), enricher.enrich(request))
                     .await
                     .context("merchant evaluation timed out")??
             };
@@ -1040,6 +1069,7 @@ async fn main() -> Result<()> {
                     output::merchant_stats(&store.stats()?, json)?;
                 }
                 MerchantCommand::Add {
+                    counterparty_type,
                     name,
                     mut markets,
                     website,
@@ -1052,6 +1082,7 @@ async fn main() -> Result<()> {
                     markets.sort();
                     markets.dedup();
                     let merchant = Merchant {
+                        counterparty_type,
                         id: id.unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple())),
                         name,
                         markets,

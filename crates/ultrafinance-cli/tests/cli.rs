@@ -4,6 +4,51 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[test]
+fn enrich_txt_preserves_order_duplicates_and_context_beyond_one_batch() {
+    let mut input = String::from("\u{feff}COFFEE\r\n\r\nCOFFEE\r\n");
+    for i in 0..104 {
+        input.push_str(&format!("SHOP {i}\n"));
+    }
+    let output = run(
+        &["enrich", "--file", "-", "--country", "CA", "--dry-run"],
+        Some(&input),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["transactions"].as_array().unwrap();
+    assert_eq!(rows.len(), 106);
+    assert_eq!(rows[0]["description"], "COFFEE");
+    assert_eq!(rows[1]["description"], "COFFEE");
+    assert_eq!(rows[105]["description"], "SHOP 103");
+    assert!(rows.iter().all(|row| row["country"] == "CA"));
+    let output = run(
+        &["enrich", "--file", "-", "--limit", "2", "--dry-run"],
+        Some(&input),
+    );
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["transactions"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn enrich_txt_rejects_empty_files_and_conflicting_inputs() {
+    let output = run(&["enrich", "--file", "-", "--dry-run"], Some("\n \r\n"));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no descriptions"));
+    for args in [
+        vec!["enrich", "description", "--file", "-"],
+        vec!["enrich", "--input", "request.json", "--file", "-"],
+        vec!["enrich", "--file", "-", "--details"],
+    ] {
+        assert!(!run(&args, None).status.success());
+    }
+}
+
 fn run(args: &[&str], stdin: Option<&str>) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ultrafinance"));
     command
@@ -466,7 +511,7 @@ fn short_descriptor_remains_unresolved_without_provider_credentials() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "Transaction: LS\nMerchant:    Unresolved\nLocation:    Unresolved\n"
+        "Transaction: LS\nKind:        unknown\nMerchant:    Unresolved\nLocation:    Unresolved\n"
     );
 }
 

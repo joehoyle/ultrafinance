@@ -44,6 +44,7 @@ fn copy_merchants_to(tx: &mut Transaction<'_>, merchants: &[Merchant], sql: &str
             Type::TEXT_ARRAY,
             Type::TEXT_ARRAY,
             Type::TEXT_ARRAY,
+            Type::TEXT,
         ],
     );
     for m in merchants {
@@ -56,13 +57,14 @@ fn copy_merchants_to(tx: &mut Transaction<'_>, merchants: &[Merchant], sql: &str
             &m.markets,
             &m.aliases,
             &m.sources,
+            &m.counterparty_type.as_str(),
         ])?;
     }
     writer.finish()?;
     Ok(())
 }
-const COPY_MERCHANTS: &str = "COPY import_merchant_stage(id,name,website,logo_url,logo_source,markets,aliases,sources) FROM STDIN BINARY";
-const UPSERT_MERCHANTS: &str = "INSERT INTO merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) SELECT id,name,website,logo_url,logo_source,markets,aliases,sources FROM import_merchant_stage ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources WHERE (merchants.name,merchants.website,merchants.logo_url,merchants.logo_source,merchants.markets,merchants.aliases,merchants.sources) IS DISTINCT FROM (excluded.name,excluded.website,excluded.logo_url,excluded.logo_source,excluded.markets,excluded.aliases,excluded.sources)";
+const COPY_MERCHANTS: &str = "COPY import_merchant_stage(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) FROM STDIN BINARY";
+const UPSERT_MERCHANTS: &str = "INSERT INTO merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) SELECT id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type FROM import_merchant_stage ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources,counterparty_type=excluded.counterparty_type WHERE (merchants.name,merchants.website,merchants.logo_url,merchants.logo_source,merchants.markets,merchants.aliases,merchants.sources,merchants.counterparty_type) IS DISTINCT FROM (excluded.name,excluded.website,excluded.logo_url,excluded.logo_source,excluded.markets,excluded.aliases,excluded.sources,excluded.counterparty_type)";
 
 pub(super) fn import(
     tx: &mut Transaction<'_>,
@@ -107,7 +109,7 @@ fn apply(
     baseline: &crate::dedupe::Snapshot,
     append_only: bool,
 ) -> Result<Applied> {
-    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_source_stage(source TEXT,external_id TEXT,merchant_id TEXT,version TEXT,attribution TEXT,license TEXT,url TEXT,transaction_pattern TEXT,parent_id TEXT,input_id TEXT,input_name TEXT) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[]) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_input_stage ON COMMIT DROP AS SELECT source,external_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases FROM source_records WITH NO DATA")?;
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_source_stage(source TEXT,external_id TEXT,merchant_id TEXT,version TEXT,attribution TEXT,license TEXT,url TEXT,transaction_pattern TEXT,parent_id TEXT,input_id TEXT,input_name TEXT) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[],counterparty_type TEXT) ON COMMIT DROP; CREATE TEMP TABLE IF NOT EXISTS import_input_stage ON COMMIT DROP AS SELECT source,external_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type FROM source_records WITH NO DATA")?;
     let previous: HashMap<_, _> = baseline
         .sources
         .iter()
@@ -182,7 +184,7 @@ fn apply(
             )?;
             copy_input_fields(tx, &updates)?;
             tx.batch_execute("INSERT INTO source_provenance(source,attribution,license,url) SELECT DISTINCT source,attribution,license,url FROM import_source_stage ON CONFLICT(source,attribution,license,url) DO NOTHING")?;
-            tx.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) SELECT s.source,s.external_id,s.merchant_id,s.version,p.id,s.transaction_pattern,s.parent_id,i.input_id,i.input_name,i.input_website,i.input_logo_url,i.input_logo_source,i.input_markets,i.input_aliases,i.input_sources,i.country_hints,i.dataset_region,i.negative_aliases FROM import_source_stage s JOIN import_input_stage i USING(source,external_id) JOIN source_provenance p ON (p.source,p.attribution,p.license,p.url)=(s.source,s.attribution,s.license,s.url) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases",&[])?;
+            tx.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type) SELECT s.source,s.external_id,s.merchant_id,s.version,p.id,s.transaction_pattern,s.parent_id,i.input_id,i.input_name,i.input_website,i.input_logo_url,i.input_logo_source,i.input_markets,i.input_aliases,i.input_sources,i.country_hints,i.dataset_region,i.negative_aliases,i.input_counterparty_type FROM import_source_stage s JOIN import_input_stage i USING(source,external_id) JOIN source_provenance p ON (p.source,p.attribution,p.license,p.url)=(s.source,s.attribution,s.license,s.url) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases,input_counterparty_type=excluded.input_counterparty_type",&[])?;
             tx.batch_execute(
                 "TRUNCATE import_source_stage,import_merchant_stage,import_input_stage",
             )?;
@@ -200,7 +202,8 @@ fn apply(
 }
 
 fn same_canonical_fields(a: &Merchant, b: &Merchant) -> bool {
-    a.name == b.name
+    a.counterparty_type == b.counterparty_type
+        && a.name == b.name
         && a.website == b.website
         && a.logo_url == b.logo_url
         && a.logo_source == b.logo_source
@@ -291,7 +294,7 @@ fn insert_new_merchants(
             copy_merchants_to(
                 tx,
                 &rows,
-                "COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) FROM STDIN BINARY",
+                "COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) FROM STDIN BINARY",
             )?;
             inserted += rows.len();
             rows.clear();
@@ -315,8 +318,8 @@ pub(super) fn copy_new_sources(
         return Ok(());
     }
     let provenance = source_provenance(tx, records)?;
-    let sink = tx.copy_in("COPY source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) FROM STDIN BINARY")?;
-    let mut types = vec![Type::TEXT; 18];
+    let sink = tx.copy_in("COPY source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type) FROM STDIN BINARY")?;
+    let mut types = vec![Type::TEXT; 19];
     types[4] = Type::INT8;
     types[12..16].fill(Type::TEXT_ARRAY);
     types[17] = Type::TEXT_ARRAY;
@@ -355,6 +358,7 @@ pub(super) fn copy_new_sources(
             &strings("countryHints"),
             &crate::markets::dataset_region(r),
             &strings("negativeAliases"),
+            &m.counterparty_type.as_str(),
         ])?;
     }
     writer.finish()?;
@@ -413,6 +417,7 @@ fn copy_input_fields(tx: &mut Transaction<'_>, records: &[&SourceRecord]) -> Res
         Type::TEXT_ARRAY,
         Type::TEXT,
         Type::TEXT_ARRAY,
+        Type::TEXT,
     ];
     let mut writer = BinaryCopyInWriter::new(sink, &types);
     for r in records {
@@ -444,6 +449,7 @@ fn copy_input_fields(tx: &mut Transaction<'_>, records: &[&SourceRecord]) -> Res
             &hints,
             &region,
             &negative_aliases,
+            &m.counterparty_type.as_str(),
         ])?;
     }
     writer.finish()?;
@@ -654,7 +660,7 @@ pub(super) fn write_initial_merchants(
     if entries.is_empty() {
         return Ok(());
     }
-    let sink = tx.copy_in("COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,merchant_key) FROM STDIN BINARY")?;
+    let sink = tx.copy_in("COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,merchant_key,counterparty_type) FROM STDIN BINARY")?;
     let mut writer = BinaryCopyInWriter::new(
         sink,
         &[
@@ -667,6 +673,7 @@ pub(super) fn write_initial_merchants(
             Type::TEXT_ARRAY,
             Type::TEXT_ARRAY,
             Type::INT8,
+            Type::TEXT,
         ],
     );
     for (m, key) in entries {
@@ -680,6 +687,7 @@ pub(super) fn write_initial_merchants(
             &m.aliases,
             &m.sources,
             key,
+            &m.counterparty_type.as_str(),
         ])?;
     }
     writer.finish()?;
@@ -695,7 +703,7 @@ pub(super) fn write_current_merchants(
     if merchants.is_empty() {
         return Ok(());
     }
-    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[]) ON COMMIT DROP; TRUNCATE import_merchant_stage")?;
+    tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[],counterparty_type TEXT) ON COMMIT DROP; TRUNCATE import_merchant_stage")?;
     copy_merchants(tx, merchants)?;
     tx.batch_execute(UPSERT_MERCHANTS)?;
     let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();

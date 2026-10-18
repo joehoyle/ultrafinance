@@ -3,7 +3,7 @@
 A small synchronous merchant enrichment API in Rust. Axum serves HTTP, and the
 independent `ultrafinance-core` crate retrieves merchant candidates from PostgreSQL
 and uses Jev to evaluate fuzzy matches. Unique normalized exact aliases resolve
-locally without a provider call.
+locally; operation kind is classified independently through Jev when configured.
 One request returns a completed result; there are no background jobs.
 
 Merchant lookup now preserves competing interpretations of processor prefixes,
@@ -12,6 +12,64 @@ discovery supplies evidence when catalog matching cannot resolve a transaction.
 Supported resolutions are remembered with context; only explicit review enables
 direct matching from a remembered mapping. See [interpretation, discovery and
 mapping configuration](docs/discovery.md).
+
+## Counterparties
+
+Enrichment returns `counterparties`, an array of supported catalog identities,
+with an explicit `type`: `merchant` or `financial_institution`. Each identity has
+an ID, name, and optional website, markets, and logo metadata. Public API responses
+omit internal matching aliases and source URLs. An empty array means no supported
+identity; this version resolves at most one counterparty per transaction.
+
+`kind` describes the operation independently. A fee or transfer can have a
+financial institution as its counterparty, while a refund can have a merchant.
+The bank supplying the account or statement is not automatically a counterparty.
+Types come from explicit catalog records, not guesses based on names or kind.
+
+The existing `merchant` field remains populated for merchant matches and is
+`unresolved` for institution-only matches. `/v1/merchants` lists merchants only.
+`GET /v1/counterparties` lists both types and supports `type=financial_institution`
+or `type=merchant`, plus the existing `q`, `market`, `limit`, and `offset` parameters.
+Search totals refer to a bounded candidate pool, not all matching catalog rows.
+
+Existing catalog records default to `merchant`. The existing catalog management
+commands accept typed records (`counterparties` is an alias for `merchants`); for example:
+
+```sh
+ultrafinance counterparties add --name 'Example Bank' --type financial_institution \
+  --website https://bank.example --alias 'EXAMPLE MONTHLY FEE' --market CA
+```
+
+Catalog storage retains its existing table and command names. `Counterparty` is
+the core identity type, with `Merchant` retained as a Rust alias. Import refreshes
+preserve explicit types, and automatic identity grouping separates different
+types. Schema version 20 adds type columns to canonical, manual, and source records;
+follow the existing schema upgrade cutover before deployment. This change does
+not reclassify existing bank records or supply a financial institution dataset.
+
+## Transaction kind
+
+Enrichment returns a top-level `kind` alongside `counterparties`, `merchant`, and `location`:
+`purchase`, `transfer`, `cash_withdrawal`, `cash_deposit`, `refund`, `fee`,
+`interest`, `adjustment`, or `unknown`. This is Ultrafinance's operation taxonomy,
+not an ISO bank transaction code. Direction, payment method, purpose (such as
+salary), and personal versus business use are separate concepts.
+
+Jev classifies kind from supplied transaction evidence, independently of merchant
+identity. Ordinary retail descriptors with business and store/locality details can
+support `purchase` without a literal purchase marker; explicit operation evidence
+and clearly understood bank codes take precedence. Selected-choice probability must meet the configured
+threshold; otherwise kind is `unknown`. Missing or malformed provider answers and
+provider failures are errors, isolated per transaction when possible. A transfer
+can involve a business, so kind does not change merchant status automatically.
+No new merchant `not_applicable` status is introduced by this classification.
+
+Without Jev configured, existing local merchant enrichment remains available with
+`kind: "unknown"`. Read-only local research evidence also uses `unknown` without a
+provider call. With Jev configured, exact matches and empty catalogs now incur a
+classification call; this adds latency and provider usage. Kind answers and request
+bodies are included in the existing enrichment audit. Kind is preserved through
+merchant discovery and research fallbacks.
 
 ## Run
 
@@ -41,7 +99,7 @@ an existing non-durable database back requires a clean PostgreSQL shutdown and
 flushing its data to disk before durable operation resumes. AWS production
 configuration is separate and retains its durability settings.
 The local container accepts connections without a password on its loopback port.
-An empty database returns `unresolved` without calling any provider.
+An empty database returns an `unresolved` merchant; Jev still classifies the transaction kind when configured.
 
 Open `http://127.0.0.1:3000/` for the project website, copyable HTTP/CLI examples,
 an interactive merchant lookup, and a searchable merchant explorer. The form calls `/v1/enrich` on the same
@@ -171,6 +229,23 @@ printf '%s' '{"description":"LS","extra":{"notes":"Possibly lunch"}}' | \
   cargo run -- enrich --input -
 ```
 
+To enrich a TXT file, put one original bank description on each line:
+
+```sh
+cargo run -- enrich --file descriptions.txt --country CA
+cargo run -- enrich --file descriptions.txt --country CA --limit 20
+cargo run -- enrich --file descriptions.txt --country CA > matches.txt
+cargo run -- enrich --file descriptions.txt --country CA --json > matches.json
+```
+
+The default output is a table of original descriptions and matched merchants.
+Blank lines are skipped; repeated descriptions and input order are preserved.
+Files up to 1 MiB are processed in batches of up to 100 transactions. Shared
+context flags apply to every line. Unmatched entries show `Unresolved`; errors
+are identified separately and cause a nonzero exit after partial results are
+printed. Progress and error details go to stderr. Use `--file -` to read stdin
+or `--dry-run` to validate requests without calling providers.
+
 Use `--dry-run` to validate and inspect the input without a provider call:
 
 ```sh
@@ -189,13 +264,42 @@ In a batch, each shared Jev request body is recorded once. Other transaction
 logs reference its `request_id` and `owner_log_id`; evaluation reports reference
 the same request ID without creating log records. Audit stages write their
 transaction records together rather than issuing one database write per item.
-Jev selects between distinct full merchant-name choices, so duplicate catalog
-records do not split the brand-name probability. Merchant matching does not require
-verified location evidence. Catalog identity is resolved
-separately: a sole established brand record can represent the name alongside
-unlinked place listings, which remain separate records. Conflicting same-name
-business identities remain unresolved even when Jev confidently selects that
-name. `--details` shows both the grouped choices and record-resolution status.
+Jev compares plausible business identities using names, aliases, websites, and
+catalog outlet evidence. Records with the same name (preserving punctuation such
+as `RONA+`) and a shared business website domain form one choice. Other identities
+remain separate choices even when their names match. Source provenance does not
+select a preferred record. Indistinguishable records without an established shared
+identity remain unresolved; Jev can also choose `none` when evidence is insufficient.
+
+When distinct catalog identities share a trading name, enrichment separates the
+decision into two stages. First Jev recognizes the name using names, aliases and
+relevant locality evidence, with duplicate names appearing only once. If that
+passes the configured probability threshold, a second question compares only
+the identities under that name using websites and outlet evidence. Name groups
+do not merge records or assert shared ownership. Both stages must pass the
+threshold; `none`, weak evidence and indistinguishable identities still abstain.
+The second-stage probability is conditional on the recognized name, not an
+overall calibrated match probability. `--details` records both answers and requests.
+Cases without competing same-name identities retain the single merchant question.
+
+An opt-in live regression check covers unresolved homonyms, precise outlet
+evidence against a larger footprint, incidental transfer memos, unrelated
+descriptors, and candidate reordering. It uses synthetic catalog fixtures and
+does not save learned mappings. With `TYPESAFE_API_KEY` exported:
+
+```sh
+cargo test --locked -p ultrafinance-core live_identity_controls -- --ignored --nocapture
+```
+
+Each shortlisted merchant includes a bounded outlet summary: distinct identifiable
+outlets, incomplete country coverage, and up to three relevant outlets with explicit
+agreements and conflicts against transaction geography or known store numbers.
+Duplicate addresses do not inflate outlet counts; counts are a modest preference,
+not grounds to override identity or location conflicts. These summaries use the
+current catalog and request, without usage frequency or learned preferences.
+Merchant selection and outlet resolution remain separate: the merchant can match
+while the outlet is unresolved. `--details` shows competing business identities,
+websites, the selected catalog records, and their outlet evidence.
 
 ```sh
 cargo run --locked -- enrich 'Startbucks ON CAN' --details
@@ -219,8 +323,13 @@ rejects the whole request. The bulk API has a 55-second overall deadline; exceed
 it returns 504 for the whole batch.
 
 Single enrichment, bulk enrichment, and `eval --mode enrich` share the same
-provider logic. Verified exact matches and empty shortlists resolve locally.
-Remaining transactions become independent named Choice questions in Jev's
+provider logic. Verified exact matches and empty shortlists resolve merchant identity locally.
+When Jev is configured, every valid transaction also receives an independent kind
+Choice question, including transactions with no merchant candidates or exact matches.
+Kind and initial merchant questions share a bounded request. Same-name identity
+questions run in a subsequent bounded batch, adding one provider round trip for
+those transactions. Follow-ups obey the same limits and never silently truncate evidence.
+Transactions become independent named Choice questions in Jev's
 `/v1/systemone` request, with each transaction's evidence inside its own question
 and an empty shared state. Requests hold up to 32 questions, with conservative
 48 KiB encoded request and 24 KiB per-question budgets, and at most four provider
@@ -729,11 +838,15 @@ or future training; this importer does not train a model.
 | `ULTRAFINANCE_REQUIRE_POSTGRES` | unset locally; `true` in Docker | Refuse API startup without PostgreSQL |
 | `TYPESAFE_API_KEY` | unset | Jev credential |
 | `JEV_MODEL` | `jev-latest` | Jev model |
-| `ULTRAFINANCE_MATCH_THRESHOLD` | `0.90` | Minimum chosen probability and model confidence |
+| `ULTRAFINANCE_MATCH_THRESHOLD` | `0.90` | Minimum selected probability for merchant and kind enrichment |
 | `OPENAI_API_KEY` | unset | OpenAI credential for the separate `research` CLI |
 | `ULTRAFINANCE_RESEARCH_MODEL` | `gpt-6.1-sol` | Model for merchant research with web search |
 
-The threshold is provisional, not an accuracy guarantee. Evaluate against labeled
+Enrichment gates on selected probability alone. Jev's `confidence` is a
+[rescaling of that probability by the number of choices](https://docs.typesafe.ai/confidence),
+not independent evidence; it remains visible as a diagnostic in `--details`.
+This replaces the previous dual gate, whose effective probability cutoff varied
+with shortlist size. The threshold remains provisional, not an accuracy guarantee. Evaluate against labeled
 transactions before trusting matches automatically. Search retrieves the top 10 candidates for Jev, plus any exact alias collisions.
 The database can contain more than 254 merchants; Jev receives at most 254
 candidates, reserving its final choice for insufficient evidence.
@@ -969,11 +1082,11 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 19 before running this application. See
+schema version 20 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
 Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
-against version 19, so application-only rollback across this schema change is unsupported.
+against version 20, so application-only rollback across this schema change is unsupported.
 
 Use `ultrafinance database check` to check compatibility without applying
 migrations. CI does not have administrator access and cannot upgrade production

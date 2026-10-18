@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Ultrafinance API",
-    "description": "Synchronous merchant and location enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication.",
+    "description": "Synchronous transaction kind, counterparty and location enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication.",
     "license": {
       "name": ""
     },
@@ -33,12 +33,112 @@
         }
       }
     },
+    "/v1/counterparties": {
+      "get": {
+        "tags": [
+          "Counterparties"
+        ],
+        "summary": "Explore the counterparty catalog without calling the AI provider.\nBrowsing is alphabetical; search ranks a bounded candidate pool rather than\nmatching every catalog row. Search totals refer to that pool (at most 255 for\nexact alias collisions, otherwise 100), not the full catalog. Results include\ntyped counterparty records with known markets, without aliases or internal matching scores.",
+        "operationId": "counterparties",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Optional counterparty type filter.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/CounterpartyType"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional name or alias search; at most 256 bytes. Searches return a bounded candidate pool.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "market",
+            "in": "query",
+            "description": "Filter by known operating market, as a two-letter uppercase country code. Coverage is not exhaustive.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, from 1 to 100. Defaults to 20.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of results to skip, up to 1,000,000. Defaults to 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated catalog records or ranked search candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CounterpartyPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable or database schema incompatible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Catalog query timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/enrich": {
       "post": {
         "tags": [
           "Enrichment"
         ],
-        "summary": "Enrich a transaction with a merchant and independently supported location.",
+        "summary": "Enrich a transaction with its operation kind, counterparty and independently supported location.\nKind is classified independently through Jev when configured, including exact\nmerchant matches and empty catalogs. Without Jev, kind is unknown.",
         "description": "Only description is required; unknown top-level fields are rejected. The JSON body\nis limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or\nambiguous candidates require provider evaluation. No candidates or insufficient\nevidence returns unresolved with null data, not an HTTP error. Transaction fields\nand candidate records are sent to TypeSafe when evaluation runs. The overall\nenrichment deadline is 55 seconds. Set `research: true` to research unresolved\nmerchants using OpenAI web search and persist a supported merchant/descriptor\nalias with source evidence. This is opt-in, may incur research costs, and requires\nserver-side OPENAI_API_KEY. Aliases remain unverified. Failed or inconclusive\nresearch creates no merchant or alias. Configuration, database and provider failures\nreturn 502 rather than unresolved.",
         "operationId": "enrich",
         "requestBody": {
@@ -65,7 +165,7 @@
         },
         "responses": {
           "200": {
-            "description": "Completed merchant and location enrichment",
+            "description": "Completed kind, counterparty and location enrichment",
             "content": {
               "application/json": {
                 "schema": {
@@ -74,6 +174,8 @@
                 "examples": {
                   "extracted_location": {
                     "value": {
+                      "counterparties": [],
+                      "kind": "unknown",
                       "location": {
                         "data": {
                           "address": null,
@@ -95,6 +197,19 @@
                   },
                   "matched": {
                     "value": {
+                      "counterparties": [
+                        {
+                          "id": "mer_example",
+                          "logo_source": "official website",
+                          "logo_url": "https://example.com/logo.png",
+                          "markets": [
+                            "CA"
+                          ],
+                          "name": "Example Café",
+                          "type": "merchant"
+                        }
+                      ],
+                      "kind": "unknown",
                       "location": {
                         "data": null,
                         "status": "unresolved"
@@ -115,6 +230,8 @@
                   },
                   "unresolved": {
                     "value": {
+                      "counterparties": [],
+                      "kind": "unknown",
                       "location": {
                         "data": null,
                         "status": "unresolved"
@@ -225,7 +342,7 @@
         "tags": [
           "Enrichment"
         ],
-        "summary": "Enrich 1 to 100 transactions, preserving input order.\nEach transaction has an isolated provider question. Verified exact matches and\nempty candidate sets resolve locally. Provider calls are packed within byte\nbudgets, with at most four in flight. Invalid transactions and provider failures\nproduce per-item errors alongside successful results. The body limit is 1 MiB;\nthe overall deadline is 55 seconds, after which the whole request returns 504.",
+        "summary": "Enrich 1 to 100 transactions, preserving input order.\nEach transaction has independent kind and merchant questions as needed. Verified\nexact matches and empty candidate sets resolve merchant identity locally; kind\nstill uses Jev when configured. Provider calls are packed within byte\nbudgets, with at most four in flight. Invalid transactions and provider failures\nproduce per-item errors alongside successful results. The body limit is 1 MiB;\nthe overall deadline is 55 seconds, after which the whole request returns 504.",
         "operationId": "enrich_batch",
         "requestBody": {
           "content": {
@@ -490,6 +607,61 @@
           }
         ]
       },
+      "Counterparty": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Merchant"
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "$ref": "#/components/schemas/CounterpartyType"
+              }
+            }
+          }
+        ]
+      },
+      "CounterpartyPage": {
+        "type": "object",
+        "required": [
+          "counterparties",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "counterparties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Counterparty"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CounterpartyType": {
+        "type": "string",
+        "description": "Entity classification, not a transaction operation or account-provider hint.",
+        "enum": [
+          "merchant",
+          "financial_institution"
+        ]
+      },
       "EnrichRequest": {
         "type": "object",
         "required": [
@@ -560,7 +732,9 @@
       "EnrichResponse": {
         "type": "object",
         "required": [
+          "kind",
           "merchant",
+          "counterparties",
           "location"
         ],
         "properties": {
@@ -570,6 +744,17 @@
               "type": "string"
             },
             "description": "Source attribution for matched merchants and outlets. Omitted when empty."
+          },
+          "counterparties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Counterparty"
+            },
+            "description": "Supported counterparties; empty when unresolved. Currently at most one identity."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TransactionKind",
+            "description": "Financial operation classified independently of merchant identity; unknown when evidence is insufficient or Jev is not configured."
           },
           "location": {
             "$ref": "#/components/schemas/LocationResult",
@@ -916,17 +1101,36 @@
             }
           }
         ]
+      },
+      "TransactionKind": {
+        "type": "string",
+        "description": "Ultrafinance's operation taxonomy; not an ISO bank transaction code.",
+        "enum": [
+          "purchase",
+          "transfer",
+          "cash_withdrawal",
+          "cash_deposit",
+          "refund",
+          "fee",
+          "interest",
+          "adjustment",
+          "unknown"
+        ]
       }
     }
   },
   "tags": [
     {
       "name": "Enrichment",
-      "description": "Resolve merchants and transaction geography"
+      "description": "Classify transaction kinds and resolve counterparties and geography"
     },
     {
       "name": "Merchants",
       "description": "Browse and search the merchant catalog"
+    },
+    {
+      "name": "Counterparties",
+      "description": "Browse merchants and financial institutions"
     },
     {
       "name": "Health",

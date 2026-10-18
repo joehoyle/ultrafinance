@@ -1,4 +1,5 @@
 pub mod batch;
+mod business;
 mod columns;
 pub mod datasets;
 pub mod dedupe;
@@ -11,7 +12,11 @@ pub mod gazetteer;
 pub mod import;
 mod import_progress;
 pub use import_progress::set_import_verbose;
+mod counterparty;
 pub mod interpretation;
+pub use counterparty::CounterpartyType;
+mod kind;
+pub use kind::TransactionKind;
 pub mod location;
 pub mod location_dedupe;
 pub mod logos;
@@ -87,8 +92,11 @@ impl EnrichRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct Merchant {
-    /// Stable ID in this service's merchant catalog.
+pub struct Counterparty {
+    /// Explicit catalog classification, independent of transaction kind.
+    #[serde(default, rename = "type")]
+    pub counterparty_type: CounterpartyType,
+    /// Stable ID in this service's counterparty catalog.
     pub id: String,
     pub name: String,
     /// Known countries of operation. Coverage is not exhaustive.
@@ -105,6 +113,9 @@ pub struct Merchant {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
 }
+
+/// Backwards-compatible name for a catalog identity. New code may use Counterparty.
+pub type Merchant = Counterparty;
 
 // Internally tagged variants ensure status and data cannot disagree.
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,7 +141,15 @@ fn null_schema() -> utoipa::openapi::schema::Object {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnrichResponse {
+    /// Financial operation, classified independently of merchant identity.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
+    pub kind: TransactionKind,
     pub merchant: MerchantResult,
+    /// Supported counterparties. Currently the matcher resolves at most one identity.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
+    pub counterparties: Vec<Counterparty>,
     /// Independently extracted geography or a supported catalog outlet match.
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(required = true))]
@@ -138,6 +157,19 @@ pub struct EnrichResponse {
     /// Source attribution for matched merchants and outlets. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attributions: Vec<String>,
+}
+
+impl EnrichResponse {
+    // Run after catalog persistence and outlet resolution, which share the legacy
+    // internal match slot. Never expose an institution as a merchant.
+    fn finish_counterparties(&mut self) {
+        if let MerchantResult::Matched { data } = &self.merchant {
+            self.counterparties = vec![(**data).clone()];
+            if data.counterparty_type != CounterpartyType::Merchant {
+                self.merchant = MerchantResult::Unresolved { data: () };
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -224,10 +256,31 @@ impl Enricher {
         limit: usize,
         offset: usize,
     ) -> Result<store::MerchantPage> {
+        self.list_counterparties(
+            query,
+            market,
+            limit,
+            offset,
+            Some(CounterpartyType::Merchant),
+        )
+        .await
+    }
+
+    /// Browse all counterparties or filter by explicit entity type.
+    pub async fn list_counterparties(
+        &self,
+        query: Option<String>,
+        market: Option<String>,
+        limit: usize,
+        offset: usize,
+        entity_type: Option<CounterpartyType>,
+    ) -> Result<store::MerchantPage> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
             if let Some(query) = query {
                 let mut candidates = store.search(&query, market.as_deref(), 100)?;
+                candidates
+                    .retain(|c| entity_type.is_none_or(|t| c.merchant.counterparty_type == t));
                 if let Some(market) = &market {
                     candidates.retain(|c| c.merchant.markets.contains(market));
                 }
@@ -244,7 +297,7 @@ impl Enricher {
                     offset,
                 })
             } else {
-                store.list(market.as_deref(), limit, offset)
+                store.list_typed(market.as_deref(), limit, offset, entity_type)
             }
         })
         .await?
@@ -277,6 +330,8 @@ impl Enricher {
 
 fn unresolved() -> EnrichResponse {
     EnrichResponse {
+        counterparties: vec![],
+        kind: TransactionKind::Unknown,
         location: LocationResult::default(),
         attributions: vec![],
         merchant: MerchantResult::Unresolved { data: () },
@@ -294,7 +349,7 @@ fn parse_choice_answer(
     let choice = answer["choice"]
         .as_str()
         .context("Jev answer is missing choice")?;
-    let confidence = answer["confidence"]
+    let _confidence = answer["confidence"]
         .as_f64()
         .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
         .context("Jev returned invalid confidence")?;
@@ -315,10 +370,15 @@ fn parse_choice_answer(
         .find(|(index, _)| choice == format!("candidate_{index}"))
         .map(|(_, merchant)| merchant)
         .context("Jev chose an unknown candidate")?;
-    if confidence < threshold || probability < threshold {
+    // Jev Choice confidence rescales the winning probability by choice count.
+    // It is diagnostic, not independent evidence or a second acceptance gate.
+    // https://docs.typesafe.ai/confidence
+    if probability < threshold {
         return Ok(unresolved());
     }
     Ok(EnrichResponse {
+        counterparties: vec![],
+        kind: TransactionKind::Unknown,
         location: LocationResult::default(),
         attributions: vec![],
         merchant: MerchantResult::Matched {

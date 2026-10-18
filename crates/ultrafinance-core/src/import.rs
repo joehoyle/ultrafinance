@@ -38,6 +38,7 @@ pub fn merchant_studio(contents: &str) -> Result<Vec<SourceRecord>> {
             let entry: StudioMerchant =
                 serde_json::from_value(raw.clone()).context("invalid Merchant Studio merchant")?;
             let merchant = Merchant {
+                counterparty_type: Default::default(),
                 id: entry.id.clone(),
                 name: entry.canonical_name,
                 markets: vec![],

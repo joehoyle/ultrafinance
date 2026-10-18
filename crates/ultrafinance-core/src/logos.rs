@@ -100,6 +100,7 @@ mod tests {
         use crate::{Merchant, store::MerchantStore};
         let store = MerchantStore::temporary().unwrap();
         let mut merchant = Merchant {
+            counterparty_type: Default::default(),
             id: "example".into(),
             name: "Example".into(),
             website: Some("example.com".into()),
