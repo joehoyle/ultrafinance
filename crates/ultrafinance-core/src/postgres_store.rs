@@ -26,6 +26,8 @@ mod import_bulk;
 mod indexed_import;
 #[path = "postgres_store/initial_load.rs"]
 mod initial_load;
+#[path = "postgres_store/logos.rs"]
+mod logos;
 #[path = "postgres_store/merchant_provenance.rs"]
 mod merchant_provenance;
 #[path = "postgres_store/numeric_ids.rs"]
@@ -35,6 +37,8 @@ mod read_cache;
 #[cfg(test)]
 #[path = "../tests/unit/postgres_store/read_cache_tests.rs"]
 mod read_cache_tests;
+#[path = "postgres_store/research.rs"]
+mod research;
 #[path = "postgres_store/rows.rs"]
 pub(super) mod rows;
 #[path = "postgres_store/typed_sources.rs"]
@@ -211,7 +215,9 @@ impl PostgresStore {
                         .context("schema upgrade could not initialize merchant redirects")?;
                     tx.batch_execute(crate::location_dedupe::SCHEMA)
                         .context("schema upgrade could not initialize location redirects")?;
-                    if version > 19 { bail!("unsupported PostgreSQL schema version {version}"); }
+                    if version > super::POSTGRES_SCHEMA_VERSION {
+                        return Err(super::SchemaMismatch { found: version, required: super::POSTGRES_SCHEMA_VERSION }.into());
+                    }
                     if version < 4 {
                         tx.batch_execute(crate::resolution::LEGACY_SCHEMA)?;
                         tx.batch_execute(include_str!("../migrations/005_columns_postgres.sql"))?;
@@ -284,11 +290,15 @@ impl PostgresStore {
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     // Run historical normalizer backfills after key conversion.
                     if version < 12 { indexed_import::backfill(&mut tx)?; }
+                    tx.batch_execute(include_str!("../schema/logos.sql"))
+                        .context("schema initialization could not initialize website logos")?;
                     tx.commit()?;
                 }
                 let version: i32 = client.query_one("SELECT version FROM ultrafinance_schema", &[])
                     .context("PostgreSQL schema missing; run `ultrafinance database init` first")?.get(0);
-                if version != 19 { bail!("unsupported PostgreSQL schema version {version}; run `ultrafinance database init` to migrate lookup columns"); }
+                if version != super::POSTGRES_SCHEMA_VERSION {
+                    return Err(super::SchemaMismatch { found: version, required: super::POSTGRES_SCHEMA_VERSION }.into());
+                }
                 Ok(client)
             };
             let mut client = match if lazy { Ok(None) } else { setup().map(Some) } {

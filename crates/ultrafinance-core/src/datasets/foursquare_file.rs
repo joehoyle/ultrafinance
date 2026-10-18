@@ -5,7 +5,7 @@ use std::{
     cmp::Reverse,
     collections::BinaryHeap,
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Read, Seek, Write},
+    io::{BufRead, BufReader, BufWriter, Seek, Write},
     path::PathBuf,
 };
 const RUN: usize = 5000;
@@ -107,28 +107,20 @@ impl Drop for Scratch {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+// Cache identity only: provider IDs, not this value, make database imports idempotent.
+// Avoid reading the entire export before sorting or resuming it.
 fn fingerprint_file(path: &Path) -> Result<String> {
-    let file = File::open(path)?;
-    let bytes = usize::try_from(file.metadata()?.len())?;
-    let mut reader = BufReader::new(crate::import_progress::Reader::new(
-        file,
-        "hashing input CSV (bytes)",
-        bytes,
-    ));
-    let mut buffer = [0; 65536];
-    let mut hash = 0xcbf29ce484222325u64;
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        for byte in &buffer[..n] {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    Ok(format!("fnv1a64:{hash:016x}"))
+    let path = path.canonicalize()?;
+    let metadata = std::fs::metadata(&path)?;
+    let identity = format!(
+        "foursquare-file-metadata-v1:{:?}:{}:{:?}",
+        path,
+        metadata.len(),
+        metadata.modified()?,
+    );
+    Ok(crate::eval::fingerprint(identity.as_bytes()))
 }
+
 fn row_csv(headers: &csv::StringRecord, row: Option<&csv::StringRecord>) -> Result<String> {
     let mut writer = csv::Writer::from_writer(Vec::new());
     writer.write_record(headers)?;

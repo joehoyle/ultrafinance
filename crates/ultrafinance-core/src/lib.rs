@@ -14,11 +14,13 @@ pub use import_progress::set_import_verbose;
 pub mod interpretation;
 pub mod location;
 pub mod location_dedupe;
+pub mod logos;
 pub mod markets;
 pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
 mod pipeline;
 pub use pipeline::{LocalEnrichment, enrich_locally};
 mod regex_rules;
+pub mod research;
 pub mod resolution;
 mod search_score;
 pub mod store;
@@ -33,6 +35,11 @@ use std::{collections::HashSet, time::Duration};
 pub struct EnrichRequest {
     /// Bank transaction description. Must contain nonblank text and be at most 4096 UTF-8 bytes.
     pub description: String,
+    /// Opt in to web research when normal enrichment is unresolved. Successful
+    /// research persists a merchant and an unverified descriptor alias.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "openapi", schema(default = false))]
+    pub research: bool,
     /// Decimal amount as a string. The service does not validate its numeric format.
     pub amount: Option<String>,
     /// Three uppercase ASCII letters, for example CAD.
@@ -137,6 +144,7 @@ pub struct EnrichResponse {
 pub struct Enricher {
     persist_matches: bool,
     discovery: Option<discovery::Discovery>,
+    research: Option<research::Research>,
     client: reqwest::Client,
     provider_url: String,
     api_key: Option<String>,
@@ -146,6 +154,11 @@ pub struct Enricher {
 }
 
 impl Enricher {
+    /// Override optional research configuration (for explicit clients/tests).
+    pub fn with_research(mut self, research: Option<research::Research>) -> Self {
+        self.research = research;
+        self
+    }
     pub fn new(
         api_key: Option<String>,
         model: String,
@@ -178,6 +191,7 @@ impl Enricher {
         Ok(Self {
             persist_matches: true,
             discovery: discovery::Discovery::from_env()?,
+            research: research::Research::from_env()?,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .build()?,

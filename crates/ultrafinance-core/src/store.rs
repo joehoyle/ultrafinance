@@ -12,6 +12,26 @@ mod postgres_store;
 
 pub const LOCAL_DATABASE_URL: &str =
     "postgresql://ultrafinance@127.0.0.1:55432/ultrafinance?sslmode=disable";
+pub const POSTGRES_SCHEMA_VERSION: i32 = 19;
+
+#[derive(Debug)]
+pub struct SchemaMismatch {
+    pub found: i32,
+    pub required: i32,
+}
+
+impl std::fmt::Display for SchemaMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PostgreSQL schema version {} is incompatible with required version {}; run `ultrafinance database init` using this release's administrator CLI before deploying",
+            self.found, self.required
+        )
+    }
+}
+
+impl std::error::Error for SchemaMismatch {}
+
 #[derive(Clone)]
 pub struct MerchantStore(postgres_store::PostgresStore);
 pub fn normalize(value: &str) -> String {
@@ -45,6 +65,61 @@ pub fn normalize(value: &str) -> String {
 }
 
 impl MerchantStore {
+    pub(crate) fn persist_research(
+        &self,
+        request: &crate::EnrichRequest,
+        merchant: &Merchant,
+        new: bool,
+        source: &str,
+        model: &str,
+        evidence: Value,
+    ) -> Result<Merchant> {
+        let mut merchant = merchant.clone();
+        if !new {
+            merchant.id = self.resolve_merchant_id(&merchant.id)?;
+        }
+        let saved = self
+            .0
+            .persist_research(request, &merchant, new, source, model, evidence)?;
+        self.get(&saved.id)?
+            .ok_or_else(|| anyhow::anyhow!("saved research merchant missing"))
+    }
+
+    pub fn website_logo(&self, website: &str) -> Result<Option<crate::logos::WebsiteLogo>> {
+        self.0.website_logo(website)
+    }
+    pub fn list_website_logos(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<crate::logos::LogoPage> {
+        if !(1..=1000).contains(&limit) || offset > i64::MAX as usize {
+            bail!("logo limit must be 1..1000 and offset must fit an integer");
+        }
+        self.0.list_website_logos(limit, offset)
+    }
+    pub fn save_website_logo(&self, logo: &crate::logos::WebsiteLogo) -> Result<()> {
+        self.0.save_website_logo(logo)
+    }
+    fn apply_logos<'a>(&self, merchants: impl Iterator<Item = &'a mut Merchant>) -> Result<()> {
+        let pending: Vec<_> = merchants
+            .filter(|m| m.logo_url.is_none())
+            .filter_map(|m| {
+                let website = crate::logos::normalize_website(m.website.as_deref()?).ok()?;
+                Some((website, m))
+            })
+            .collect();
+        let logos = self
+            .0
+            .logo_fallbacks(pending.iter().map(|(url, _)| url.clone()).collect())?;
+        for (website, merchant) in pending {
+            if let Some((url, source)) = logos.get(&website) {
+                merchant.logo_url = Some(url.clone());
+                merchant.logo_source = Some(source.clone());
+            }
+        }
+        Ok(())
+    }
     pub fn postgres(url: &str) -> Result<Self> {
         Ok(Self(postgres_store::PostgresStore::connect(url, false)?))
     }
@@ -73,7 +148,9 @@ impl MerchantStore {
             .expect("store is not a temporary catalog")
     }
     pub fn get(&self, id: &str) -> Result<Option<Merchant>> {
-        self.0.get(&self.resolve_merchant_id(id)?)
+        let mut merchant = self.0.get(&self.resolve_merchant_id(id)?)?;
+        self.apply_logos(merchant.iter_mut())?;
+        Ok(merchant)
     }
     pub fn resolutions(
         &self,
@@ -393,7 +470,9 @@ impl MerchantStore {
         self.0.stats()
     }
     pub fn list(&self, market: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
-        self.0.list(market, limit, offset)
+        let mut page = self.0.list(market, limit, offset)?;
+        self.apply_logos(page.merchants.iter_mut())?;
+        Ok(page)
     }
     pub fn search(
         &self,
@@ -401,7 +480,9 @@ impl MerchantStore {
         country: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Candidate>> {
-        self.0.search(description, country, limit)
+        let mut candidates = self.0.search(description, country, limit)?;
+        self.apply_logos(candidates.iter_mut().map(|c| &mut c.merchant))?;
+        Ok(candidates)
     }
 }
 #[derive(Debug, Clone, Serialize)]

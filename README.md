@@ -272,7 +272,8 @@ cargo run --locked -- research 'SQ *JULIUS CAFE BROMONT' --country CA --create
 
 Creation retains a `web-research` source link, model and source URLs;
 repeat imports preserve catalog IDs. Existing-merchant and unresolved proposals
-are not written. Research never learns descriptor aliases or remembered resolutions,
+are not written by this standalone command. Standalone research never learns
+descriptor aliases or remembered resolutions,
 creates outlets, or writes enrichment history. New businesses become available to
 normal catalog retrieval after creation. Use `--output` to retain the complete report,
 including supporting sources and catalog context. Reports may contain private bank descriptions.
@@ -974,6 +975,12 @@ Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
 against version 19, so application-only rollback across this schema change is unsupported.
 
+Use `ultrafinance database check` to check compatibility without applying
+migrations. CI does not have administrator access and cannot upgrade production
+automatically. Follow the [schema upgrade cutover](deploy/SCHEMA_UPGRADES.md)
+before releasing an image that requires a different database schema. A
+`database_schema_mismatch` response stops deployment without readiness retries.
+
 ## Homepage example
 
 The homepage displays a saved, complete production API response, with its UTC
@@ -1564,3 +1571,45 @@ original source record remains stored and inspectable with `--raw`. Source refre
 preserve their identity mappings and reviewed overrides. Merchant dedupe also runs
 outlet dedupe after reassigning location references. The full Foursquare download
 has not yet been imported as locations by these commands.
+
+Website logo discovery, image metadata, and static hosting: [Logo operations](docs/logos.md).
+
+### Opt-in research fallback during enrichment
+
+Set `OPENAI_API_KEY` in the API/CLI environment, then opt in per request:
+
+```sh
+ultrafinance enrich 'SQ *JULIUS CAFE BROMONT' --country CA --research
+ultrafinance enrich --input transaction.json --research --details
+ultrafinance enrich-batch --input transactions.json --research
+curl -s http://127.0.0.1:3000/v1/enrich -H 'Content-Type: application/json' \
+  -d '{"description":"SQ *JULIUS CAFE BROMONT","country":"CA","research":true}'
+```
+
+`research` defaults to false. It runs only after normal enrichment (including
+configured discovery) completes with an unresolved merchant, never for invalid
+requests, existing matches, or failed provider/database calls. Batch items may
+also set `research` individually in their JSON. At most four research sessions
+run concurrently. Each session gets one web search and at most six model rounds,
+with a 40-second research budget inside the existing 55-second enrichment deadline.
+Large opted-in batches may exceed that overall deadline; keep research batches small.
+Standalone `research` retains its separate five-minute budget.
+
+A supported existing match gains the original transaction description as an alias.
+A supported new business is reconciled against catalog identities before creation
+and gains the alias as well. Merchant creation, alias evidence, and a context-scoped
+remembered resolution commit in one database transaction. Existing manual data and
+verified resolutions are preserved; conflicting mappings roll back all changes.
+Unresolved research, provider errors, and rejected proposals save no new merchant
+or alias. Research aliases and remembered resolutions remain **unverified**:
+web evidence supports a candidate, not proof of the bank charge. Future ordinary
+enrichment still evaluates unverified aliases using the configured matcher.
+
+Research source URLs, model, and decision evidence are retained in the private
+enrichment log (`research` in `--details`) and research source/resolution records.
+Transaction descriptions and concise catalog context are sent to OpenAI when
+research runs; research may incur provider charges. Do not include secrets in bank
+metadata. Set `ULTRAFINANCE_RESEARCH_MODEL` to choose the server-side research model.
+For managed AWS deployment, configure the sensitive `openai_api_key` variable and
+optional `research_model` through the existing OpenTofu workflow; no settings are
+changed by compiling the application.

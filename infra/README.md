@@ -16,7 +16,9 @@ The root `.env` supplies the local Rust CLI/API; OpenTofu uses
 
 `foursquare_token` is an optional sensitive Places Portal token in that private
 variable file. OpenTofu sets `ULTRAFINANCE_FOURSQUARE_TOKEN` alongside Lambda's
-other API keys. The same Foursquare and Jev keys are stored in Secrets Manager
+other API keys. Optional `openai_api_key` enables explicit research and opt-in
+enrichment research fallback; `research_model` selects its model. The OpenAI,
+Foursquare and Jev keys are stored in Secrets Manager
 for injection into new CLI tasks; existing tasks retain their environment.
 Token values remain
 private in configuration/state and must never be printed in plans or logs.
@@ -82,6 +84,13 @@ PostgreSQL release (see the root README). Use a non-administrator application
 role for Lambda, with catalog read/write permissions. CLI shells use the RDS
 administrator for migrations and catalog work. The application URL is sensitive
 and, like other Lambda secrets managed here, is stored in private OpenTofu state.
+
+Schema changes in later releases also require an administrator migration.
+`ultrafinance database check` checks compatibility without changing the schema.
+Follow the [schema upgrade cutover](../deploy/SCHEMA_UPGRADES.md) for incompatible
+versions: take a recovery snapshot, migrate during a maintenance window with the
+candidate's CLI image, and promote that same immutable image. CI cannot perform
+this administrator operation; repeated 503 checks cannot fix a schema mismatch.
 
 For cutover, first apply with `enable_aurora = true` and `database_url = null`.
 This provisions the database/network without attaching Lambda to the VPC.

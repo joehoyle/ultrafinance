@@ -160,3 +160,14 @@ variable "aurora_max_acu" {
     error_message = "Maximum must be a half-ACU increment between 1 and 256."
   }
 }
+
+variable "openai_api_key" {
+  description = "Optional OpenAI credential for explicit research and enrichment research fallback."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+variable "research_model" {
+  type    = string
+  default = "gpt-6.1-sol"
+}

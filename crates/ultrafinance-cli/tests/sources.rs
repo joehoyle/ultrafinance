@@ -536,12 +536,9 @@ open(path, 'w').write('fsq_place_id,name,country,fsq_category_ids,date_closed\np
     assert!(progress.contains("Preparing export"));
     assert!(progress.contains("1/1 rows (100.0%)"));
     assert!(progress.contains("MiB") && progress.contains("Export complete"));
-    for stage in [
-        "Saving CSV",
-        "Validating CSV",
-        "Hashing CSV",
-        "snapshot saved",
-    ] {
+    assert!(!progress.contains("Validating CSV"));
+    assert!(!progress.contains("Hashing CSV"));
+    for stage in ["Saving CSV", "snapshot saved"] {
         assert!(progress.contains(stage), "{progress}");
     }
     assert!(!progress.contains('\u{1b}'));
@@ -713,7 +710,7 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
         }
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("2 available source records; 2 selected"));
+        assert!(!stderr.contains("validating sorted place rows"));
         assert!(stderr.contains("100.0% · 2/2"));
         assert!(stderr.contains("matching new merchant identities"));
         assert!(stderr.contains("processing places for linked locations 2/2 (100%)"));
@@ -790,7 +787,7 @@ c,Gamma,CA,https://gamma.test,"[""restaurant""]",
                 .find(|pair| pair[0] == "--limit")
                 .map_or("3", |pair| pair[1]);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains(&format!("3 available source records; {expected} selected")));
+            assert!(stderr.contains(&format!("committed {expected} source records")));
             assert!(stderr.contains("Import: committed"));
             assert!(!stderr.contains("looking up existing source identities"));
             assert!(!stderr.contains("matching new merchant identities"));

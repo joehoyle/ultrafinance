@@ -78,9 +78,9 @@ fn committed_chunks_survive_cursor_failure_and_resume_without_duplicate_outlets(
     std::fs::create_dir_all(&root.0)?;
     let input = input(&root.0)?;
     let output = root.0.join("out");
-    // Final sort, counts, application start, and first committed cursor succeed.
+    // Final sort, application start, and first committed cursor succeed.
     // The second DB commit succeeds but saving its cursor fails.
-    CHECKPOINT_FAILURE.with(|f| *f.borrow_mut() = Some((Stage::Preparing, 4)));
+    CHECKPOINT_FAILURE.with(|f| *f.borrow_mut() = Some((Stage::Preparing, 3)));
     assert!(import_file(&input, &output, "ca", options(Some(&store), false, None)).is_err());
     let base = bundle_path(
         &output,
@@ -316,7 +316,7 @@ fn checkpoint_only_resume_survives_deleted_csv_and_validates_target_and_files() 
 }
 
 #[test]
-fn checkpoint_only_resume_rejects_incomplete_sorting_or_validation() -> Result<()> {
+fn checkpoint_only_resume_rejects_incomplete_sorting_or_missing_application() -> Result<()> {
     let store = MerchantStore::temporary()?;
     let root = Scratch(std::env::temp_dir().join(format!(
         "ultra-fsq-resume-validation-{}",
@@ -333,11 +333,10 @@ fn checkpoint_only_resume_rejects_incomplete_sorting_or_validation() -> Result<(
     let scratch = PathBuf::from(first["checkpoint"].as_str().unwrap());
     std::fs::remove_file(input)?;
     let before = std::fs::read(scratch.join("checkpoint.json"))?;
-    for field in ["stage", "counts_ready", "application"] {
+    for field in ["stage", "application"] {
         let mut modified: Value = serde_json::from_slice(&before)?;
         modified[field] = match field {
             "stage" => json!("Sorting"),
-            "counts_ready" => json!(false),
             _ => Value::Null,
         };
         std::fs::write(
@@ -348,7 +347,7 @@ fn checkpoint_only_resume_rejects_incomplete_sorting_or_validation() -> Result<(
         assert!(
             error
                 .to_string()
-                .contains("validated Foursquare import checkpoint")
+                .contains("sorted Foursquare import checkpoint")
         );
         assert_eq!(store.source_records("foursquare", None, 100, 0)?.len(), 1);
     }
@@ -447,5 +446,60 @@ fn merchants_only_can_resume_and_add_locations_later() -> Result<()> {
             assert!(after.iter().any(|a| a.location.id == outlet.location.id));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn counts_accumulate_on_resume_and_include_skipped_tail() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let root = Scratch(
+        std::env::temp_dir().join(format!("ultra-fsq-inline-counts-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(&root.0)?;
+    let input = input(&root.0)?;
+    let mut writer = std::fs::OpenOptions::new().append(true).open(&input)?;
+    writeln!(writer, "z,Closed Cafe,CA,Main St,[],2020-01-01")?;
+    drop(writer);
+    let first = import_file(
+        &input,
+        &root.0.join("out"),
+        "ca",
+        options(Some(&store), false, Some(2)),
+    )?;
+    assert!(first["selection"]["available_records"].is_null());
+    assert_eq!(first["manifest"]["merchant_records"], 2);
+    let scratch = Path::new(first["checkpoint"].as_str().unwrap());
+    let checkpoint: Checkpoint =
+        serde_json::from_reader(File::open(scratch.join("checkpoint.json"))?)?;
+    assert!(!checkpoint.counts_ready);
+    std::fs::remove_file(input)?;
+    let report = resume_import(scratch, "ca", options(Some(&store), false, None))?;
+    assert_eq!(report["selection"]["available_records"], 5);
+    assert_eq!(report["manifest"]["merchant_records"], 5);
+    assert_eq!(report["manifest"]["skipped_places"], 2);
+    assert_eq!(report["resume"]["complete"], true);
+    Ok(())
+}
+
+#[test]
+fn conflicting_tail_is_detected_during_import_after_prior_commits() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let root = Scratch(
+        std::env::temp_dir().join(format!("ultra-fsq-late-conflict-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(&root.0)?;
+    let input = input(&root.0)?;
+    let mut writer = std::fs::OpenOptions::new().append(true).open(&input)?;
+    writeln!(writer, "4,Conflicting Cafe,CA,Main St,[],")?;
+    drop(writer);
+    let error = import_file(
+        &input,
+        &root.0.join("out"),
+        "ca",
+        options(Some(&store), false, None),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("conflicting Foursquare rows"));
+    assert!(!store.source_records("foursquare", None, 100, 0)?.is_empty());
     Ok(())
 }

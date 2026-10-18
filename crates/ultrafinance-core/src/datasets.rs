@@ -126,6 +126,7 @@ pub struct Bundle {
 
 fn request(description: String) -> EnrichRequest {
     EnrichRequest {
+        research: false,
         description,
         amount: None,
         currency: None,

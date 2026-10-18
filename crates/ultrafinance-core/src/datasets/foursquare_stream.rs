@@ -50,7 +50,7 @@ fn select_merchants(mut records: Vec<SourceRecord>, merchants_only: bool) -> Vec
     records
 }
 
-// Used for validation/counting and a single-transaction reconciliation preview.
+// Stream preparation directly into an initial load or reconciliation preview.
 // No prepared records are saved, and memory stays bounded by chunk_size.
 fn scan<F>(
     paths: &[PathBuf],
@@ -65,7 +65,7 @@ where
     F: FnMut(Vec<SourceRecord>) -> Result<()>,
 {
     let mut progress =
-        crate::import_progress::Progress::new("validating sorted place rows", total_rows);
+        crate::import_progress::Progress::new("preparing sorted place rows", total_rows);
     let mut processed = 0;
     let mut previous: Option<(String, Vec<String>)> = None;
     let mut pending = Vec::with_capacity(chunk_size);
@@ -131,7 +131,6 @@ fn empty_manifest(
 fn validate_resume(checkpoint: &Checkpoint, region: &str) -> Result<()> {
     if checkpoint.format != 1
         || checkpoint.stage != Stage::Preparing
-        || !checkpoint.counts_ready
         || checkpoint.application.is_none()
         || checkpoint.manifest.source != "foursquare"
         || checkpoint.manifest.region != region
@@ -139,7 +138,7 @@ fn validate_resume(checkpoint: &Checkpoint, region: &str) -> Result<()> {
         || checkpoint.manifest.input_fingerprint.is_empty()
     {
         bail!(
-            "checkpoint-only resume requires a validated Foursquare import checkpoint matching this region and adapter version"
+            "checkpoint-only resume requires a sorted Foursquare import checkpoint matching this region and adapter version"
         );
     }
     Ok(())
@@ -341,95 +340,73 @@ fn import_from(
         std::fs::write(scratch.join(name), contents)?;
     }
     let headers = csv::StringRecord::from(checkpoint.headers.clone());
-    if !checkpoint.counts_ready {
-        eprintln!("Import: validating and counting sorted places (no JSON bundle)");
-        let paths: Vec<_> = checkpoint
-            .paths
-            .iter()
-            .map(|name| scratch.join(name))
-            .collect();
-        let mut manifest = empty_manifest(&headers, region, &fingerprint)?;
-        scan(
-            &paths,
-            &headers,
-            &mut manifest,
-            chunk_size,
-            None,
-            checkpoint.total_rows,
-            |_| Ok(()),
-        )?;
-        checkpoint.manifest = manifest;
-        checkpoint.counts_ready = true;
-        checkpoint.save(&scratch)?;
-    }
-    let available = checkpoint.manifest.merchant_records;
+    // Old checkpoints may have exact counts from the former preflight scan.
+    // New imports count while consuming rows; raw row count is an upper bound.
+    let available = checkpoint
+        .counts_ready
+        .then_some(checkpoint.manifest.merchant_records);
     let selected_total = options
         .limit
-        .map_or(available, |n| available.min(n as usize));
-    eprintln!("Import: {available} available source records; {selected_total} selected");
-    if options.initial_load {
+        .map_or(available.unwrap_or(checkpoint.total_rows), |n| {
+            available.unwrap_or(checkpoint.total_rows).min(n as usize)
+        });
+    if options.initial_load || preview {
         let paths: Vec<_> = checkpoint
             .paths
             .iter()
             .map(|name| scratch.join(name))
             .collect();
-        let mut report = json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,"manifest":checkpoint.manifest,
-            "initial_load":true,"dry_run":preview,
-            "selection":{"available_records":available,"selected_records":selected_total,"limit":options.limit,"chunk_size":chunk_size}});
-        if let Some(store) = store {
-            let mut manifest = empty_manifest(&headers, region, &fingerprint)?;
-            let total_rows = checkpoint.total_rows;
-            let result = store.initial_foursquare_load(
-                selected_total,
-                options.dedupe.dry_run,
+        let counts = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result_counts = counts.clone();
+        let mut manifest = empty_manifest(&headers, region, &fingerprint)?;
+        let total_rows = checkpoint.total_rows;
+        let produce = move |consume: &mut dyn FnMut(Vec<SourceRecord>) -> Result<()>| {
+            let selected = scan(
+                &paths,
+                &headers,
+                &mut manifest,
                 chunk_size,
-                move |consume| {
-                    scan(
-                        &paths,
-                        &headers,
-                        &mut manifest,
-                        chunk_size,
-                        options.limit,
-                        total_rows,
-                        |records| consume(select_merchants(records, options.merchants_only)),
-                    )?;
-                    Ok(())
-                },
+                options.limit,
+                total_rows,
+                |records| consume(select_merchants(records, options.merchants_only)),
             )?;
-            report["delta"] = json!(result.delta);
-            report["dedupe"] = json!(result.dedupe);
+            *result_counts.lock().unwrap() = Some((manifest, selected));
+            Ok(())
+        };
+        let result = if let Some(store) = store {
+            Some(if options.initial_load {
+                store.initial_foursquare_load(
+                    selected_total,
+                    options.dedupe.dry_run,
+                    chunk_size,
+                    produce,
+                )?
+            } else {
+                store.reconcile_generated(selected_total, true, chunk_size, produce)?
+            })
+        } else {
+            produce(&mut |_| Ok(()))?;
+            None
+        };
+        let (manifest, selected) = counts
+            .lock()
+            .unwrap()
+            .take()
+            .context("missing import counts")?;
+        checkpoint.manifest = manifest;
+        checkpoint.counts_ready = true;
+        if preview {
+            checkpoint.save(&scratch)?;
         }
-        // Retain prepared input for retry. The database transaction is atomic;
-        // no application cursor can become inconsistent with a committed load.
-        return Ok(report);
-    }
-    if preview {
-        let paths: Vec<_> = checkpoint
-            .paths
-            .iter()
-            .map(|name| scratch.join(name))
-            .collect();
-        let mut report = json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,"manifest":checkpoint.manifest,"dry_run":true,
-            "selection":{"available_records":available,"selected_records":selected_total,"limit":options.limit,"chunk_size":chunk_size}});
-        if let Some(store) = store {
-            let mut manifest = empty_manifest(&headers, region, &fingerprint)?;
-            let total_rows = checkpoint.total_rows;
-            let result =
-                store.reconcile_generated(selected_total, true, chunk_size, move |consume| {
-                    scan(
-                        &paths,
-                        &headers,
-                        &mut manifest,
-                        chunk_size,
-                        options.limit,
-                        total_rows,
-                        |records| consume(select_merchants(records, options.merchants_only)),
-                    )?;
-                    Ok(())
-                })?;
+        let mut report = json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,
+            "manifest":checkpoint.manifest,"initial_load":options.initial_load,"dry_run":preview,
+            "selection":{"available_records":checkpoint.manifest.merchant_records,"selected_records":selected,"limit":options.limit,"chunk_size":chunk_size}});
+        if let Some(result) = result {
             report["delta"] = json!(result.delta);
             report["dedupe"] = json!(result.dedupe);
-            eprintln!("Import: identity preview complete; no database changes");
+            if preview {
+                eprintln!("Import: identity preview complete; no database changes");
+            }
         }
         return Ok(report);
     }
@@ -474,7 +451,10 @@ fn import_from(
             break;
         }
         if checkpoint.paths.is_empty() {
-            bail!("sorted input ended before the selected record count");
+            if apply.processed != checkpoint.total_rows {
+                bail!("sorted input row count does not match its checkpoint");
+            }
+            break;
         }
         let path = scratch.join(&checkpoint.paths[0]);
         let mut file = File::open(&path)?;
@@ -497,6 +477,9 @@ fn import_from(
                 if old_fields != &fields {
                     bail!("conflicting Foursquare rows for place ID {id}");
                 }
+                if !checkpoint.counts_ready {
+                    checkpoint.manifest.skipped_places += 1;
+                }
                 continue;
             }
             rows.push(csv::StringRecord::from(fields.clone()));
@@ -504,8 +487,13 @@ fn import_from(
         }
         eof |= reader.fill_buf()?.is_empty();
         apply.offset = reader.stream_position()?;
-        let (records, _) = prepared(&headers, &rows, region, &fingerprint)?;
+        let (records, skipped) = prepared(&headers, &rows, region, &fingerprint)?;
         let count = records.len();
+        if !checkpoint.counts_ready {
+            checkpoint.manifest.skipped_places += skipped;
+            checkpoint.manifest.merchant_records += count;
+            checkpoint.manifest.retained_places += count;
+        }
         if count > 0 {
             let started = std::time::Instant::now();
             let result: ImportReport =
@@ -540,14 +528,15 @@ fn import_from(
             std::fs::remove_file(path)?;
         }
     }
-    // Finish consuming duplicate/skipped trailing rows only when all eligible
-    // records were selected; otherwise preserve them for a larger future limit.
-    if selected_total == available {
+    // New imports complete at EOF; legacy precounted checkpoints can also
+    // finish at their known total. Preserve limited imports for later resume.
+    if available == Some(selected_total) || checkpoint.paths.is_empty() {
         let apply = checkpoint
             .application
             .as_mut()
             .context("missing application checkpoint")?;
         apply.complete = true;
+        checkpoint.counts_ready = true;
         apply.processed = checkpoint.total_rows;
         checkpoint.paths.clear();
         checkpoint.save(&scratch)?;
@@ -564,7 +553,7 @@ fn import_from(
     );
     Ok(
         json!({"bundle":null,"merchants_only":options.merchants_only,"checkpoint":scratch,"manifest":checkpoint.manifest,"dry_run":false,
-        "selection":{"available_records":available,"selected_records":apply.selected,"limit":options.limit,"chunk_size":chunk_size},
+        "selection":{"available_records":checkpoint.counts_ready.then_some(checkpoint.manifest.merchant_records),"selected_records":apply.selected,"limit":options.limit,"chunk_size":chunk_size},
         "resume":{"previously_committed":resumed,"committed_this_run":apply.selected-resumed,"complete":apply.complete},
         "delta":{"added":apply.delta.added-start_delta.0,"updated":apply.delta.updated-start_delta.1,"unchanged":apply.delta.unchanged-start_delta.2},"dedupe":{"dry_run":false,"model":"deterministic","candidates":apply.candidates,"errors":0,"details_truncated":true},"committed_chunks":apply.chunks}),
     )

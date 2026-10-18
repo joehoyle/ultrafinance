@@ -481,6 +481,109 @@ impl Enricher {
                 }
             }
         }
+        // Explicit research is a last resort after a completed unresolved
+        // decision. Provider/retrieval errors never trigger additional spending.
+        if self.persist_matches {
+            let pending: Vec<_> = requests
+                .iter()
+                .enumerate()
+                .filter(|(index, request)| {
+                    request.research
+                        && matches!(
+                            &results[*index],
+                            Ok(EnrichResponse {
+                                merchant: MerchantResult::Unresolved { .. },
+                                ..
+                            })
+                        )
+                })
+                .map(|(index, request)| (index, request.clone()))
+                .collect();
+            let mut waiting = pending.into_iter();
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                while tasks.len() < MAX_IN_FLIGHT {
+                    let Some((index, request)) = waiting.next() else {
+                        break;
+                    };
+                    audit[index].2["research_attempted"] = json!(true);
+                    let research = self.research.clone();
+                    let store = self.store.clone();
+                    tasks.spawn(async move {
+                        let outcome = match research {
+                            Some(research) => {
+                                research
+                                    .investigate(
+                                        &request,
+                                        &store,
+                                        false,
+                                        false,
+                                        Duration::from_secs(40),
+                                    )
+                                    .await
+                            }
+                            None => {
+                                Err(anyhow::anyhow!("research fallback requires OPENAI_API_KEY"))
+                            }
+                        };
+                        (index, outcome)
+                    });
+                }
+                let Some(task) = tasks.join_next().await else {
+                    break;
+                };
+                match task {
+                    Ok((index, Ok(mut report))) => {
+                        let request = requests[index].clone();
+                        let store = self.store.clone();
+                        let saved = tokio::task::spawn_blocking(move || {
+                            let merchant = report.persist(&request, &store)?;
+                            let mut seen = std::collections::HashSet::new();
+                            let credits = if let Some(merchant) = &merchant {
+                                store
+                                    .merchant_provenance(&merchant.id)?
+                                    .into_iter()
+                                    .map(|r| {
+                                        format!("{} ({}, {})", r.attribution, r.license, r.url)
+                                    })
+                                    .filter(|credit| seen.insert(credit.clone()))
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+                            Ok::<_, anyhow::Error>((report, merchant, credits))
+                        })
+                        .await;
+                        match saved {
+                            Ok(Ok((report, merchant, credits))) => {
+                                audit[index].2["research"] = json!(report);
+                                if let Some(merchant) = merchant {
+                                    audit[index].2["method"] = json!("research");
+                                    results[index] = Ok(EnrichResponse {
+                                        merchant: MerchantResult::Matched {
+                                            data: Box::new(merchant),
+                                        },
+                                        location: LocationResult::default(),
+                                        attributions: credits,
+                                    });
+                                }
+                            }
+                            Ok(Err(error)) => results[index] = Err(error),
+                            Err(error) => {
+                                results[index] =
+                                    Err(anyhow::anyhow!("research persistence failed: {error}"))
+                            }
+                        }
+                    }
+                    Ok((index, Err(error))) => results[index] = Err(error),
+                    Err(error) => {
+                        return (0..audit.len())
+                            .map(|_| Err(anyhow::anyhow!("research task failed: {error}")))
+                            .collect();
+                    }
+                }
+            }
+        }
         let mut request_owners = std::collections::HashMap::new();
         for ((log_id, _, data), requests) in audit.iter_mut().zip(provider_requests) {
             if !requests.is_empty() {
@@ -608,6 +711,8 @@ impl Enricher {
                     "catalog_candidates",
                     "discovery_attempted",
                     "discovery_skipped",
+                    "research_attempted",
+                    "research",
                 ] {
                     if let Some(value) = data.get(key) {
                         details.insert(key.into(), value.clone());
@@ -629,7 +734,7 @@ impl Enricher {
         results
     }
 
-    async fn process_candidates(
+    pub(crate) async fn process_candidates(
         &self,
         inputs: Vec<(EnrichRequest, Result<Vec<store::Candidate>>)>,
     ) -> (

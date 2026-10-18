@@ -109,6 +109,13 @@ impl Lambda for Client<'_> {
                 bail!("Lambda {qualifier} failed its {path} check");
             }
             let result: Value = serde_json::from_slice(&std::fs::read(response)?)?;
+            let body = text(&result, "body")?;
+            let decoded = if result["isBase64Encoded"] == true {
+                STANDARD.decode(body)?
+            } else {
+                body.as_bytes().to_vec()
+            };
+            verify_schema_compatibility(qualifier, &decoded)?;
             if result["statusCode"] != expected {
                 // This read can race Aurora resume. Failures after reaching the
                 // enrichment check are never retried, so writes are not replayed.
@@ -127,12 +134,6 @@ impl Lambda for Client<'_> {
                     result["statusCode"]
                 );
             }
-            let body = text(&result, "body")?;
-            let decoded = if result["isBase64Encoded"] == true {
-                STANDARD.decode(body)?
-            } else {
-                body.as_bytes().to_vec()
-            };
             verify_body(path, &decoded)?;
             if path == "/v1/enrich" && expected == 200 {
                 super::example::verify_response(self.example, &serde_json::from_slice(&decoded)?)
@@ -141,6 +142,17 @@ impl Lambda for Client<'_> {
         }
         Ok(())
     }
+}
+
+fn verify_schema_compatibility(qualifier: &str, body: &[u8]) -> Result<()> {
+    if serde_json::from_slice::<Value>(body)
+        .is_ok_and(|value| value["error"]["code"] == "database_schema_mismatch")
+    {
+        bail!(
+            "Lambda {qualifier} is incompatible with the production database schema. Run `ultrafinance database check` in this candidate's administrator CLI, then complete the documented schema-upgrade cutover before retrying deployment. Schema errors are permanent and are not retried."
+        );
+    }
+    Ok(())
 }
 
 fn verify_body(path: &str, body: &[u8]) -> Result<()> {

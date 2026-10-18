@@ -126,9 +126,7 @@ where
         Ok(())
     })?;
     writer.finish()?;
-    if staged != total {
-        bail!("initial load record count changed: expected {total}, received {staged}");
-    }
+    // `total` is a progress upper bound; filtering happens during staging.
     progress.finish();
     let duplicate: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM initial_source_stage GROUP BY source,external_id HAVING count(*)>1)", &[])?.get(0);
     if duplicate {
@@ -138,7 +136,7 @@ where
     // PostgreSQL may spill this sort to disk. Source ordering within each rule
     // identity preserves canonical first-source precedence across chunk edges.
     tx.batch_execute("DECLARE initial_records NO SCROLL CURSOR FOR SELECT rule_name,rule_host,data FROM initial_source_stage ORDER BY rule_name,rule_host,source,external_id")?;
-    let report = grouped::load(&mut tx, total, chunk_size, dry_run)?;
+    let report = grouped::load(&mut tx, staged, chunk_size, dry_run)?;
     tx.batch_execute("DROP TABLE initial_source_stage")?;
     eprintln!("Import: building search vocabulary from final merchant names");
     tx.batch_execute("INSERT INTO merchant_search_words(word) SELECT DISTINCT word FROM merchant_search CROSS JOIN LATERAL unnest(tsvector_to_array(tokens)) words(word) WHERE char_length(word)>=3 ON CONFLICT(word) DO NOTHING")?;

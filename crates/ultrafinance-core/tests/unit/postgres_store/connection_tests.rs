@@ -618,6 +618,17 @@ fn version_fourteen_json_lists_migrate_without_changing_api_values() -> Result<(
         client.batch_execute("CREATE VIEW custom_lists AS SELECT aliases_json FROM merchants")?;
         Ok(())
     })?;
+    // Runtime connections must report a permanent, typed compatibility error
+    // without silently upgrading the live application's database.
+    let error = match PostgresStore::connect(lease.temporary_url().unwrap(), false) {
+        Ok(_) => panic!("schema 14 was accepted by the current runtime"),
+        Err(error) => error,
+    };
+    let mismatch = error
+        .downcast_ref::<super::super::SchemaMismatch>()
+        .unwrap();
+    assert_eq!(mismatch.found, 14);
+    assert_eq!(mismatch.required, super::super::POSTGRES_SCHEMA_VERSION);
     assert!(PostgresStore::connect(lease.temporary_url().unwrap(), true).is_err());
     lease.run(|client| {
         assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 14);

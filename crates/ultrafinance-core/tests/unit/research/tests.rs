@@ -107,7 +107,7 @@ async fn local_enrichment_adds_compact_location_clues_without_provider_or_writes
     let request: EnrichRequest = serde_json::from_value(
         json!({"description":"SQ *NOVEL CAFE TORONTO ON CA","country":"CA"}),
     )?;
-    let local = ultrafinance_core::enrich_locally(&request, store.clone()).await?;
+    let local = crate::enrich_locally(&request, store.clone()).await?;
     assert!(!local.candidates.is_empty());
     let summary = compact_local_enrichment(&local);
     assert_eq!(summary["processor_hint"], "Square");
@@ -468,6 +468,12 @@ fn terminal_tools_reject_mixed_fields_and_results_contain_only_the_decision() ->
         json!({"status":"matched","merchant_id":"known"})
     );
     report.saved = true;
+    // Saving a descriptor alias for an existing identity is still a match.
+    assert_eq!(
+        serde_json::to_value(result(&report)?)?,
+        json!({"status":"matched","merchant_id":"known"})
+    );
+    report.proposal = proposal("new");
     assert_eq!(
         serde_json::to_value(result(&report)?)?,
         json!({"status":"created","merchant_id":"known"})
@@ -853,4 +859,283 @@ async fn provider_errors_do_not_echo_credentials_or_response_content() {
     server.join().unwrap();
     assert!(error.contains("401") && error.contains("OPENAI_API_KEY"));
     assert!(!error.contains("secret") && !error.contains("sensitive"));
+}
+
+fn fallback_engine(store: MerchantStore, endpoint: &str) -> crate::Enricher {
+    let mut research = Research::new("fixture-key".into(), "fixture-model".into()).unwrap();
+    research.endpoint = endpoint.into();
+    crate::Enricher::with_store(None, "unused".into(), 0.95, store)
+        .unwrap()
+        .with_research(Some(research))
+}
+fn web_search_then(name: &str, terminal: Value) -> Vec<(u16, Value)> {
+    vec![
+        (
+            200,
+            json!({"status":"completed","output":[
+                {"type":"web_search_call","status":"completed","action":{"type":"search","sources":[{"url":"https://novel.test/"}]}},
+                call("search_merchants", json!({"query":name,"web_evidence":[]}))
+            ]}),
+        ),
+        (200, json!({"status":"completed","output":[terminal]})),
+    ]
+}
+#[tokio::test]
+async fn fallback_is_opt_in_and_skips_resolved_invalid_and_evaluation_requests() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    store.put(&serde_json::from_value(
+        json!({"id":"known","name":"Novel Cafe"}),
+    )?)?;
+    let enricher = fallback_engine(store.clone(), "http://127.0.0.1:1/not-called");
+    let off = serde_json::from_value(json!({"description":"UNIDENTIFIED COUNTERPARTY ZZZ"}))?;
+    assert!(matches!(
+        enricher.enrich(&off).await?.merchant,
+        crate::MerchantResult::Unresolved { .. }
+    ));
+    let matched = serde_json::from_value(json!({"description":"Novel Cafe","research":true}))?;
+    assert!(matches!(
+        enricher.enrich(&matched).await?.merchant,
+        crate::MerchantResult::Matched { .. }
+    ));
+    let invalid = serde_json::from_value(json!({"description":"","research":true}))?;
+    assert!(enricher.enrich(&invalid).await.is_err());
+    let evaluator = crate::Enricher::for_evaluation(None, "unused".into(), 0.95, store.clone())?;
+    let request = serde_json::from_value(
+        json!({"description":"UNIDENTIFIED COUNTERPARTY ZZZ","research":true}),
+    )?;
+    assert!(matches!(
+        evaluator.enrich(&request).await?.merchant,
+        crate::MerchantResult::Unresolved { .. }
+    ));
+    assert!(
+        store
+            .source_records("web-research-alias", None, 10, 0)?
+            .is_empty()
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn fallback_existing_match_saves_unverified_alias_and_full_audit_evidence() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    store.put(&serde_json::from_value(json!({"id":"known","name":"Novel Cafe","website":"https://novel.test/","logo_url":"https://novel.test/manual.png","aliases":["MANUAL NOVEL"]}))?)?;
+    let (endpoint, server) = mock(web_search_then(
+        "Novel Cafe",
+        call(
+            "match_merchant",
+            json!({"merchant_id":"known","source_urls":["https://novel.test/"]}),
+        ),
+    ));
+    let enricher = fallback_engine(store.clone(), &endpoint);
+    let request: EnrichRequest = serde_json::from_value(
+        json!({"description":"BANK-76359 COUNTERPARTY","country":"CA","research":true}),
+    )?;
+    let (response, details) = enricher.enrich_with_details(&request).await;
+    let response = response?;
+    assert_eq!(server.join().unwrap().len(), 2);
+    let crate::MerchantResult::Matched { data } = response.merchant else {
+        panic!("research did not match");
+    };
+    assert_eq!(data.id, "known");
+    assert!(data.aliases.contains(&request.description));
+    assert!(data.aliases.contains(&"MANUAL NOVEL".into()));
+    assert_eq!(
+        data.logo_url.as_deref(),
+        Some("https://novel.test/manual.png")
+    );
+    assert!(
+        response
+            .attributions
+            .iter()
+            .any(|credit| credit.contains("https://novel.test/"))
+    );
+    assert_eq!(details["method"], "research");
+    assert_eq!(details["research"]["saved"], true);
+    assert!(details["research_attempted"].as_bool().unwrap());
+    let mappings = store.resolutions(None, 10)?;
+    assert_eq!(mappings.len(), 1);
+    assert!(!mappings[0].verified);
+    assert!(
+        mappings[0]
+            .evidence
+            .as_deref()
+            .unwrap()
+            .contains("https://novel.test/")
+    );
+    assert!(!store.search(&request.description, Some("CA"), 10)?[0].trusted);
+    assert_eq!(store.list(None, 10, 0)?.total, 1);
+    assert_eq!(
+        store
+            .source_records("web-research-alias", None, 10, 0)?
+            .len(),
+        1
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn fallback_new_match_creates_merchant_with_descriptor_alias() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let asset = crate::logos::ImageAsset {
+        id: "c".repeat(64),
+        url: "https://novel.test/logo.webp".into(),
+        mime_type: "image/webp".into(),
+        width: 256,
+        height: 256,
+        byte_length: 100,
+    };
+    store.save_website_logo(&crate::logos::WebsiteLogo {
+        website_url: "https://novel.test/".into(),
+        source_url: "https://novel.test/logo.png".into(),
+        kind: crate::logos::LogoKind::Logo,
+        original: asset.clone(),
+        display: asset,
+        checked_at: None,
+    })?;
+    let (endpoint, server) = mock(web_search_then(
+        "Novel Cafe",
+        call(
+            "propose_merchant",
+            json!({"name":"Novel Cafe","website":"https://novel.test/","markets":["CA"],"source_urls":["https://novel.test/"]}),
+        ),
+    ));
+    let enricher = fallback_engine(store.clone(), &endpoint);
+    let request: EnrichRequest = serde_json::from_value(
+        json!({"description":"BANK-76359 COUNTERPARTY","country":"CA","research":true}),
+    )?;
+    let response = enricher.enrich(&request).await?;
+    server.join().unwrap();
+    let crate::MerchantResult::Matched { data } = response.merchant else {
+        panic!("research did not match");
+    };
+    assert_eq!(data.name, "Novel Cafe");
+    assert_eq!(
+        data.logo_url.as_deref(),
+        Some("https://novel.test/logo.webp")
+    );
+    assert!(data.aliases.contains(&request.description));
+    assert_eq!(
+        store
+            .resolve_source("web-research", "https://novel.test/")?
+            .as_deref(),
+        Some(data.id.as_str())
+    );
+    assert_eq!(store.list(None, 10, 0)?.total, 1);
+    assert_eq!(
+        store
+            .source_records("web-research-alias", None, 10, 0)?
+            .len(),
+        1
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn fallback_unresolved_and_provider_errors_do_not_save_catalog_data() -> Result<()> {
+    for failed in [false, true] {
+        let store = MerchantStore::temporary()?;
+        let responses = if failed {
+            vec![(401, json!({"error":"fixture-key must never leak"}))]
+        } else {
+            vec![(
+                200,
+                json!({"status":"completed","output":[{"type":"web_search_call","status":"completed","action":{"type":"search","sources":[]}},call("unresolved",json!({}))]}),
+            )]
+        };
+        let (endpoint, server) = mock(responses);
+        let enricher = fallback_engine(store.clone(), &endpoint);
+        let request = serde_json::from_value(
+            json!({"description":"UNIDENTIFIED COUNTERPARTY ZZZ","research":true}),
+        )?;
+        let result = enricher.enrich(&request).await;
+        server.join().unwrap();
+        if failed {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(!error.contains("fixture-key"));
+        } else {
+            assert!(matches!(
+                result?.merchant,
+                crate::MerchantResult::Unresolved { .. }
+            ));
+        }
+        assert_eq!(store.list(None, 10, 0)?.total, 0);
+        assert!(store.resolutions(None, 10)?.is_empty());
+        assert!(
+            store
+                .source_records("web-research-alias", None, 10, 0)?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+#[test]
+fn research_persistence_is_idempotent_and_conflicts_roll_back_new_merchants() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let request: EnrichRequest =
+        serde_json::from_value(json!({"description":"BANK-76359 COUNTERPARTY","country":"CA"}))?;
+    let report = || Report {
+        description: request.description.clone(),
+        country: request.country.clone(),
+        model: "fixture-model".into(),
+        proposal: proposal("new"),
+        merchant: None,
+        saved: false,
+        verified: false,
+        consulted_urls: vec!["https://novel.test/".into()],
+        usage: Usage::default(),
+    };
+    let mut first = report();
+    let merchant = first.persist(&request, &store)?.unwrap();
+    let mut verified = store.resolutions(None, 10)?.remove(0);
+    verified.verified = true;
+    verified.evidence = Some("Explicitly reviewed descriptor identity".into());
+    store.save_resolution(&verified)?;
+    let mut again = report();
+    assert_eq!(again.persist(&request, &store)?.unwrap().id, merchant.id);
+    assert_eq!(store.list(None, 10, 0)?.total, 1);
+    assert_eq!(
+        store
+            .source_records("web-research-alias", None, 10, 0)?
+            .len(),
+        1
+    );
+    let mut conflicting = report();
+    conflicting.proposal.website = Some("https://different.test/".into());
+    conflicting.proposal.name = Some("Entirely Different Business".into());
+    assert!(conflicting.persist(&request, &store).is_err());
+    assert_eq!(store.list(None, 10, 0)?.total, 1);
+    assert!(
+        store
+            .resolve_source("web-research", "https://different.test/")?
+            .is_none()
+    );
+    assert_eq!(store.resolutions(None, 10)?[0].merchant.id, merchant.id);
+    assert!(store.resolutions(None, 10)?[0].verified);
+    let mut next_charge = request.clone();
+    next_charge.amount = Some("99.00".into());
+    report().persist(&next_charge, &store)?;
+    assert_eq!(
+        store
+            .source_records("web-research-alias", None, 10, 0)?
+            .len(),
+        1
+    );
+    assert_eq!(store.resolutions(None, 10)?.len(), 2);
+    Ok(())
+}
+#[tokio::test]
+async fn research_timeout_does_not_save_partial_identity_or_alias() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut research = Research::new("fixture-key".into(), "fixture-model".into())?;
+    research.endpoint = format!("http://{}/responses", listener.local_addr()?);
+    let request = serde_json::from_value(
+        json!({"description":"UNIDENTIFIED COUNTERPARTY ZZZ","research":true}),
+    )?;
+    let error = research
+        .investigate(&request, &store, false, false, Duration::from_millis(20))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("deadline"));
+    drop(listener);
+    assert_eq!(store.list(None, 10, 0)?.total, 0);
+    assert!(store.resolutions(None, 10)?.is_empty());
+    Ok(())
 }

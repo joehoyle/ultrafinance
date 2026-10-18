@@ -182,7 +182,7 @@ struct MerchantQuery {
     responses(
         (status = 200, description = "Paginated catalog records or ranked search candidates", body = MerchantPage),
         (status = 400, description = "Invalid query parameters", body = ApiError),
-        (status = 503, description = "Catalog unavailable", body = ApiError),
+        (status = 503, description = "Catalog unavailable or database schema incompatible", body = ApiError),
         (status = 504, description = "Catalog query timed out", body = ApiError)
     )
 )]
@@ -229,6 +229,9 @@ async fn merchants(
         Ok(Ok(page)) => Json(MerchantPage::from(page)).into_response(),
         Ok(Err(error)) => {
             eprintln!("Catalog query failed: {error:#}");
+            if let Some(response) = schema_error(&error) {
+                return response;
+            }
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "catalog_unavailable",
@@ -250,7 +253,11 @@ async fn merchants(
 /// ambiguous candidates require provider evaluation. No candidates or insufficient
 /// evidence returns unresolved with null data, not an HTTP error. Transaction fields
 /// and candidate records are sent to TypeSafe when evaluation runs. The overall
-/// enrichment deadline is 55 seconds. Configuration, database and provider failures
+/// enrichment deadline is 55 seconds. Set `research: true` to research unresolved
+/// merchants using OpenAI web search and persist a supported merchant/descriptor
+/// alias with source evidence. This is opt-in, may incur research costs, and requires
+/// server-side OPENAI_API_KEY. Aliases remain unverified. Failed or inconclusive
+/// research creates no merchant or alias. Configuration, database and provider failures
 /// return 502 rather than unresolved.
 #[utoipa::path(post, path = "/v1/enrich", tag = "Enrichment",
     request_body(content = EnrichRequest, example = json!({"description":"LS","amount":"142.97","currency":"CAD","country":"CA","extra":{"bank_category":["Food and Drink","Restaurants"]}})),
@@ -266,9 +273,10 @@ async fn merchants(
         (status = 415, description = "Missing or unsupported JSON content type", body = ApiError),
         (status = 422, description = "Invalid fields, unknown fields, or failed validation", body = ApiError,
             example = json!({"error":{"code":"invalid_request","message":"country must be a two-letter uppercase code"}})),
+        (status = 503, description = "Database schema incompatible with this release", body = ApiError),
         (status = 502, description = "Enrichment failed, including configuration or provider errors", body = ApiError,
             example = json!({"error":{"code":"enrichment_failed","message":"Merchant evaluation failed"}})),
-        (status = 504, description = "Enrichment exceeded the 25-second deadline", body = ApiError,
+        (status = 504, description = "Enrichment exceeded the 55-second deadline", body = ApiError,
             example = json!({"error":{"code":"enrichment_timeout","message":"Merchant evaluation timed out"}}))
     )
 )]
@@ -291,6 +299,9 @@ async fn enrich(
         Ok(Ok(result)) => Json(EnrichResponse::from(result)).into_response(),
         Ok(Err(error)) => {
             eprintln!("Enrichment failed: {error:#}");
+            if let Some(response) = schema_error(&error) {
+                return response;
+            }
             api_error(
                 StatusCode::BAD_GATEWAY,
                 "enrichment_failed",
@@ -376,6 +387,18 @@ async fn enrich_batch(
             "Merchant batch evaluation timed out",
         ),
     }
+}
+
+fn schema_error(error: &anyhow::Error) -> Option<Response> {
+    error
+        .downcast_ref::<ultrafinance_core::store::SchemaMismatch>()
+        .map(|mismatch| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database_schema_mismatch",
+                &mismatch.to_string(),
+            )
+        })
 }
 
 fn api_error(status: StatusCode, code: &str, message: &str) -> Response {

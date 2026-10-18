@@ -3,6 +3,7 @@ mod build_metadata;
 mod database;
 mod foursquare_download;
 mod infra;
+mod logos;
 mod output;
 mod research;
 mod sources;
@@ -41,6 +42,8 @@ struct Cli {
 enum Command {
     /// Browse registered datasets, download snapshots, and refresh source knowledge.
     Sources(sources::Args),
+    /// Discover and maintain reusable website logo assets.
+    Logos(logos::Args),
     /// Deploy the workspace, inspect Lambda logs, or open the production CLI shell.
     Infra(infra::InfraArgs),
     /// Preview competing merchant/location interpretations without provider calls.
@@ -196,6 +199,8 @@ enum GazetteerCommand {
 
 #[derive(Subcommand)]
 enum DatabaseCommand {
+    /// Check database schema compatibility without applying migrations.
+    Check,
     /// Apply PostgreSQL schema migrations (safe to repeat).
     Init,
     /// Open the configured database in the default postgres:// handler.
@@ -408,6 +413,9 @@ enum ImportFormat {
 
 #[derive(Args)]
 struct EnrichArgs {
+    /// Research unresolved merchants and persist supported merchants/aliases.
+    #[arg(long)]
+    research: bool,
     /// Print the full response as JSON instead of a readable summary.
     #[arg(long)]
     json: bool,
@@ -451,6 +459,9 @@ struct EnrichArgs {
 
 #[derive(Args)]
 struct BatchEnrichArgs {
+    /// Enable research fallback for every transaction in the input batch.
+    #[arg(long)]
+    research: bool,
     /// JSON object containing transactions; use - for stdin (maximum 1 MiB).
     #[arg(long)]
     input: PathBuf,
@@ -481,7 +492,7 @@ fn read_batch_request(path: &std::path::Path) -> Result<BatchEnrichRequest> {
 }
 
 fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
-    let request = if let Some(path) = &args.input {
+    let mut request = if let Some(path) = &args.input {
         // Match the API's 64 KiB input limit, including when stdin is used.
         let reader: Box<dyn Read> = if path.as_os_str() == "-" {
             Box::new(io::stdin())
@@ -502,6 +513,7 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
         serde_json::from_slice(&bytes).context("invalid request JSON")?
     } else {
         EnrichRequest {
+            research: args.research,
             description: args
                 .description
                 .clone()
@@ -524,6 +536,7 @@ fn read_request(args: &EnrichArgs) -> Result<EnrichRequest> {
             },
         }
     };
+    request.research |= args.research;
     if serde_json::to_vec(&request)?.len() > 65536 {
         bail!("request exceeds 64 KiB");
     }
@@ -605,6 +618,7 @@ async fn main() -> Result<()> {
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
+        Command::Logos(args) => logos::run(args, cli.database_url.as_deref()).await?,
         Command::Sources(args) => sources::run(args, cli.database_url.as_deref()).await?,
         Command::Infra(args) => infra::run(args)?,
         Command::Research(args) => research::run(args, cli.database_url.as_deref()).await?,
@@ -679,6 +693,13 @@ async fn main() -> Result<()> {
                 .as_deref()
                 .unwrap_or(ultrafinance_core::store::LOCAL_DATABASE_URL);
             match command {
+                DatabaseCommand::Check => {
+                    MerchantStore::postgres(url)?;
+                    println!(
+                        "PostgreSQL schema {} is compatible",
+                        ultrafinance_core::store::POSTGRES_SCHEMA_VERSION
+                    );
+                }
                 DatabaseCommand::Init => {
                     MerchantStore::initialize_postgres(url)?;
                     println!("PostgreSQL schema is ready");
@@ -920,7 +941,12 @@ async fn main() -> Result<()> {
             output::enrichment(&request.description, &response, args.json)?;
         }
         Command::EnrichBatch(args) => {
-            let request = read_batch_request(&args.input)?;
+            let mut request = read_batch_request(&args.input)?;
+            if args.research {
+                for transaction in &mut request.transactions {
+                    transaction.research = true;
+                }
+            }
             if args.dry_run {
                 for transaction in &request.transactions {
                     transaction.validate()?;

@@ -544,40 +544,20 @@ fn save_foursquare_snapshot(
             writer.write_all(&buffer[..count])?;
         }
     }
-    let mut reader = csv::Reader::from_reader(SnapshotReader::open(&copied, "Validating CSV")?);
+    // Only inspect the header here. Import parsing checks rows while consuming them.
+    let mut reader = csv::Reader::from_path(&copied)?;
     if !reader.headers()?.iter().any(|h| h == "fsq_place_id") {
         bail!("download is missing CSV column fsq_place_id");
     }
-    for row in reader.records() {
-        row?;
-    }
     drop(reader);
-    let fingerprint =
-        ultrafinance_core::eval::fingerprint_reader(SnapshotReader::open(&copied, "Hashing CSV")?)?;
-    let entries = json!([{"file":"input.csv","url":url,"bytes":std::fs::metadata(&copied)?.len(),"fingerprint":fingerprint}]);
-    let snapshot = format!(
-        "snapshot-{}",
-        ultrafinance_core::eval::fingerprint(&serde_json::to_vec(&entries)?)
-            .replace("fnv1a64:", "")
-    );
+    let entries = json!([{"file":"input.csv","url":url,"bytes":std::fs::metadata(&copied)?.len()}]);
+    let snapshot = format!("snapshot-{}", uuid::Uuid::new_v4());
     let path = parent.join(&snapshot);
-    if path.exists() {
-        if ultrafinance_core::eval::fingerprint_reader(SnapshotReader::open(
-            &path.join("input.csv"),
-            "Checking cached CSV",
-        )?)? != fingerprint
-        {
-            bail!("cached snapshot differs from downloaded contents: input.csv");
-        }
-    } else {
-        std::fs::write(
-            staging.path().join("download.json"),
-            serde_json::to_vec_pretty(
-                &json!({"source":metadata(r),"region":region,"files":entries}),
-            )?,
-        )?;
-        std::fs::rename(staging.path(), &path)?;
-    }
+    std::fs::write(
+        staging.path().join("download.json"),
+        serde_json::to_vec_pretty(&json!({"source":metadata(r),"region":region,"files":entries}))?,
+    )?;
+    std::fs::rename(staging.path(), &path)?;
     atomic_write(&parent.join("latest"), snapshot.as_bytes())?;
     eprintln!("Foursquare download: snapshot saved");
     Ok(path)
@@ -634,9 +614,17 @@ fn snapshot_files(path: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
             bail!("invalid download filename");
         }
         let file = path.join(name);
-        let fingerprint = ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&file)?)?;
-        if json!(fingerprint) != entry["fingerprint"] {
-            bail!("downloaded file changed: {name}");
+        if metadata["source"]["source"] == "foursquare" {
+            // Include legacy snapshots: do not rehash multi-gigabyte CSVs on open.
+            if json!(std::fs::metadata(&file)?.len()) != entry["bytes"] {
+                bail!("downloaded file size changed: {name}");
+            }
+        } else {
+            let fingerprint =
+                ultrafinance_core::eval::fingerprint_reader(std::fs::File::open(&file)?)?;
+            if json!(fingerprint) != entry["fingerprint"] {
+                bail!("downloaded file changed: {name}");
+            }
         }
         if name == "examples.json" {
             examples = Some(file);

@@ -72,9 +72,8 @@ time limit. The importer further excludes unsuitable rows.
 
 Downloads retain DuckDB's CSV on disk. Foursquare import sorts 5,000-row runs
 on disk and merges at most 64 runs at once. The final merge produces ordered
-parts of at most 100,000 CSV rows. A streaming pass validates duplicates and
-counts eligible places, without writing prepared records. Import then converts
-sorted rows into source records in memory and reconciles them directly into
+parts of at most 100,000 CSV rows. Import converts sorted rows into source
+records once, counting eligible places and checking duplicate IDs as it feeds
 PostgreSQL. **No `knowledge.json` or prepared JSON bundle is created by Foursquare
 import, including `--dry-run` and `--dedupe-dry-run`.**
 
@@ -221,6 +220,12 @@ and database:
 cargo run -- sources import --offline foursquare
 ```
 
+File imports identify cached preparation using the canonical CSV path, byte size,
+and modification time, without hashing the CSV contents. Moving or touching the
+CSV starts a new preparation cache; edits that preserve both size and modification
+time are not detected. Existing checkpoints from content-hash-based imports remain
+usable through `--resume`; rerunning with the CSV uses the new metadata identity.
+
 If the original CSV/download cache has been deleted after application began,
 resume directly from the checkpoint directory (or its `checkpoint.json` file):
 
@@ -229,8 +234,8 @@ cargo run -- sources import foursquare --region global \
   --resume data/datasets/foursquare/NAME.streaming --chunk-size 100000
 ```
 
-This mode needs no download, token, DuckDB, or CSV fingerprint pass. It requires
-completed sorting and validation plus an application checkpoint matching the
+This mode needs no download, token, DuckDB, or original CSV. It requires
+completed sorting plus an application checkpoint matching the
 region, adapter version, and database target. All remaining sorted files must
 exist. The saved cursor and duplicate boundary are retained, and a completed
 checkpoint is a no-op rather than a fresh refresh pass. `--resume` cannot be used
@@ -238,7 +243,7 @@ with `--input`, `--offline`, `--examples`, or either dry-run mode; consumed rows
 are not available for a fresh preview. Use the normal input-based command for
 new snapshots or full refreshes.
 
-The CSV is hashed again, but completed sorting and application are reused. The
+File metadata identifies the input; completed sorting and application are reused. The
 cursor advances only after a chunk commits. If the commit succeeds but saving
 the cursor fails, the next run replays that chunk through delta reconciliation.
 Completed sorted parts are deleted only after the database reports a successful
@@ -301,8 +306,11 @@ and excludes the CSV header. A startup indicator remains visible while the
 catalog and count are loading. Terminal output updates one line; redirected
 logs receive summaries every five seconds. A final CSV scan can briefly show
 `Checking CSV` after DuckDB finishes. `Export complete` marks the end of the
-DuckDB phase; saving, validating and hashing the cached CSV each report their
-own byte progress afterwards. `snapshot saved` confirms the download cache
+DuckDB phase; saving the cached CSV reports byte progress afterwards. There is
+no separate full-CSV validation or hashing pass when saving or opening Foursquare
+snapshots; headers and cached file sizes are checked without scanning contents.
+Each download creates a new snapshot; use `--offline` or `--resume` to reuse an
+existing download/checkpoint. `snapshot saved` confirms the download cache
 and latest pointer are ready. Engine output remains suppressed to
 protect credentials. No percentage is shown until the selected total is known.
 
@@ -382,12 +390,19 @@ decisions against the database without applying records or merges. Plain
 Competing writers are serialized for the import transaction. Each chunk checks
 existing indexed merchant identities and groups its own incoming duplicates.
 Later chunks reuse earlier matches. A preview runs this same pipeline and rolls
-back. Foursquare validates duplicate CSV identities before applying any database chunks.
+back. Foursquare checks duplicate CSV identities while applying chunks. A malformed
+row or conflicting duplicate can therefore fail after earlier chunks have committed;
+the saved cursor preserves that progress. Initial loads remain atomic.
 A later database failure preserves its already committed chunks. Other source
 imports using prepared bundles retain whole-import atomic transactions. Reconciliation details returned in JSON are capped at
 5,000 records/decisions with `details_truncated`; total counts remain complete,
 and merge decisions are not persisted in the database.
-Foursquare progress tracks sorted CSV rows and committed source counts.
+Foursquare progress tracks sorted CSV rows and committed source counts. Until a
+normal import reaches the end, `selection.available_records` is null and manifest
+counts cover consumed rows only (legacy precounted checkpoints retain exact totals).
+Initial-load staging uses the raw row count as a progress upper bound, then uses
+the actual staged count for database loading. Dry runs report exact counts after
+one preparation pass.
 Other sources start with an exact count of the prepared bundle
 and the selected total after `--limit`. Counting uses a bounded streaming pass
 before dispatching database work, so edited bundles are counted correctly and
@@ -619,10 +634,10 @@ separate derived alias/search/identity checksums matched, excluding generated
 IDs. Focused tests also compare normal and initial imports across fetch boundaries,
 including one-record batches, and verify rollback and constraint restoration.
 
-The remaining costs include two preparation passes, staging/sorting the source
-records, and building final indexes. Further work toward 2× should combine
-counting with staging and reduce the temporary full-record representation;
-these changes need checkpoint/retry and evidence-equivalence validation.
+At the time of this benchmark, costs included two preparation passes, staging/sorting
+the source records, and building final indexes. The importer now combines counting
+with staging, eliminating the extra preparation pass. Reducing the temporary
+full-record representation remains a potential improvement.
 
 
 ## Identity-only Foursquare storage benchmark (schema 18)

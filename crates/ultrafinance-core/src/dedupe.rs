@@ -746,8 +746,8 @@ pub(crate) fn validate_plan(
     if expected.revision != current.revision {
         bail!("catalog changed during dedupe evaluation; rerun the command");
     }
-    if !std::ptr::eq(expected, current)
-        && !(same(&expected.merchants, &current.merchants)?
+    if !(std::ptr::eq(expected, current)
+        || same(&expected.merchants, &current.merchants)?
             && same(&expected.manual, &current.manual)?
             && same(&expected.sources, &current.sources)?
             && same(&expected.locations, &current.locations)?

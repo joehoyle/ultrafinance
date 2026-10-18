@@ -64,9 +64,11 @@ resource "aws_lambda_function" "app" {
     variables = merge({
       TYPESAFE_API_KEY             = var.typesafe_api_key
       JEV_MODEL                    = var.jev_model
+      ULTRAFINANCE_RESEARCH_MODEL  = var.research_model
       ULTRAFINANCE_MATCH_THRESHOLD = tostring(var.match_threshold)
       }, var.database_url == null ? {} : { ULTRAFINANCE_DATABASE_URL = var.database_url },
-    nonsensitive(var.foursquare_token != "") ? { ULTRAFINANCE_FOURSQUARE_TOKEN = var.foursquare_token } : {})
+      nonsensitive(var.foursquare_token != "") ? { ULTRAFINANCE_FOURSQUARE_TOKEN = var.foursquare_token } : {},
+    nonsensitive(var.openai_api_key != "") ? { OPENAI_API_KEY = var.openai_api_key } : {})
   }
   # Release tooling owns image updates; Tofu still owns runtime configuration.
   lifecycle {
@@ -134,6 +136,22 @@ resource "aws_cloudfront_distribution" "app" {
       origin_ssl_protocols   = ["TLSv1.2"]
       origin_read_timeout    = 60
     }
+  }
+  origin {
+    domain_name              = aws_s3_bucket.logos[0].bucket_regional_domain_name
+    origin_id                = "logos"
+    origin_access_control_id = aws_cloudfront_origin_access_control.logos[0].id
+  }
+  ordered_cache_behavior {
+    path_pattern           = "/logos/*"
+    target_origin_id       = "logos"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    # AWS managed CachingOptimized; keys are content addressed and immutable.
+    cache_policy_id            = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.logos[0].id
+    compress                   = true
   }
   default_cache_behavior {
     target_origin_id       = "api"

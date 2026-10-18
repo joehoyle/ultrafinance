@@ -39,7 +39,7 @@
           "Enrichment"
         ],
         "summary": "Enrich a transaction with a merchant and independently supported location.",
-        "description": "Only description is required; unknown top-level fields are rejected. The JSON body\nis limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or\nambiguous candidates require provider evaluation. No candidates or insufficient\nevidence returns unresolved with null data, not an HTTP error. Transaction fields\nand candidate records are sent to TypeSafe when evaluation runs. The overall\nenrichment deadline is 55 seconds. Configuration, database and provider failures\nreturn 502 rather than unresolved.",
+        "description": "Only description is required; unknown top-level fields are rejected. The JSON body\nis limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or\nambiguous candidates require provider evaluation. No candidates or insufficient\nevidence returns unresolved with null data, not an HTTP error. Transaction fields\nand candidate records are sent to TypeSafe when evaluation runs. The overall\nenrichment deadline is 55 seconds. Set `research: true` to research unresolved\nmerchants using OpenAI web search and persist a supported merchant/descriptor\nalias with source evidence. This is opt-in, may incur research costs, and requires\nserver-side OPENAI_API_KEY. Aliases remain unverified. Failed or inconclusive\nresearch creates no merchant or alias. Configuration, database and provider failures\nreturn 502 rather than unresolved.",
         "operationId": "enrich",
         "requestBody": {
           "content": {
@@ -191,8 +191,18 @@
               }
             }
           },
+          "503": {
+            "description": "Database schema incompatible with this release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "504": {
-            "description": "Enrichment exceeded the 25-second deadline",
+            "description": "Enrichment exceeded the 55-second deadline",
             "content": {
               "application/json": {
                 "schema": {
@@ -368,7 +378,7 @@
             }
           },
           "503": {
-            "description": "Catalog unavailable",
+            "description": "Catalog unavailable or database schema incompatible",
             "content": {
               "application/json": {
                 "schema": {
@@ -538,6 +548,11 @@
                 "type": "null"
               }
             ]
+          },
+          "research": {
+            "type": "boolean",
+            "description": "Opt in to web research when normal enrichment is unresolved. Successful\nresearch persists a merchant and an unverified descriptor alias.",
+            "default": false
           }
         },
         "additionalProperties": false

@@ -49,6 +49,7 @@ resource "aws_secretsmanager_secret_version" "cli_api_keys" {
   secret_id = aws_secretsmanager_secret.cli_api_keys[0].id
   secret_string = jsonencode({
     TYPESAFE_API_KEY              = var.typesafe_api_key
+    OPENAI_API_KEY                = var.openai_api_key
     ULTRAFINANCE_FOURSQUARE_TOKEN = var.foursquare_token
   })
 }
@@ -112,12 +113,16 @@ resource "aws_ecs_task_definition" "cli" {
     readonlyRootFilesystem = false
     environment = [
       { name = "TMPDIR", value = "/scratch/tmp" },
+      { name = "ULTRAFINANCE_RESEARCH_MODEL", value = var.research_model },
+      { name = "ULTRAFINANCE_LOGO_BUCKET", value = aws_s3_bucket.logos[0].id },
+      { name = "ULTRAFINANCE_LOGO_BASE_URL", value = "https://${var.domain_name == null ? aws_cloudfront_distribution.app[0].domain_name : var.domain_name}" },
       { name = "ULTRAFINANCE_DATABASE_HOST", value = aws_rds_cluster.database[0].endpoint },
       { name = "ULTRAFINANCE_DATABASE_NAME", value = aws_rds_cluster.database[0].database_name }
     ]
     secrets = [
       { name = "ULTRAFINANCE_ADMIN_USERNAME", valueFrom = "${aws_rds_cluster.database[0].master_user_secret[0].secret_arn}:username::" },
       { name = "ULTRAFINANCE_ADMIN_PASSWORD", valueFrom = "${aws_rds_cluster.database[0].master_user_secret[0].secret_arn}:password::" },
+      { name = "OPENAI_API_KEY", valueFrom = "${aws_secretsmanager_secret.cli_api_keys[0].arn}:OPENAI_API_KEY::" },
       { name = "TYPESAFE_API_KEY", valueFrom = "${aws_secretsmanager_secret.cli_api_keys[0].arn}:TYPESAFE_API_KEY::" },
       { name = "ULTRAFINANCE_FOURSQUARE_TOKEN", valueFrom = "${aws_secretsmanager_secret.cli_api_keys[0].arn}:ULTRAFINANCE_FOURSQUARE_TOKEN::" }
     ]

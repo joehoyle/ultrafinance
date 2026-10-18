@@ -115,3 +115,28 @@ async fn downloader_rejects_http_errors_empty_and_oversized_responses() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn foursquare_snapshots_skip_content_scans_and_keep_size_checks() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let input = root.path().join("download.csv");
+    // A malformed tail is left for import parsing, not a separate snapshot scan.
+    std::fs::write(&input, "fsq_place_id,name\na,Cafe\nb,Too,many,fields\n")?;
+    let r = registry(DatasetSource::Foursquare);
+    let snapshot =
+        save_foursquare_snapshot(root.path(), &r, "ca", &input, "https://example.test".into())?;
+    let (cached, _) = snapshot_files(&snapshot)?;
+    let mut metadata: Value =
+        serde_json::from_slice(&std::fs::read(snapshot.join("download.json"))?)?;
+    assert!(metadata["files"][0]["fingerprint"].is_null());
+    // Legacy fingerprints also do not cause a complete scan on cached imports.
+    metadata["files"][0]["fingerprint"] = json!("legacy-content-fingerprint");
+    std::fs::write(
+        snapshot.join("download.json"),
+        serde_json::to_vec(&metadata)?,
+    )?;
+    assert!(snapshot_files(&snapshot).is_ok());
+    std::fs::write(cached, "shortened")?;
+    assert!(snapshot_files(&snapshot).is_err());
+    Ok(())
+}

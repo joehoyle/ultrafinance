@@ -465,6 +465,34 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
             }
         }
     }
+    if details["research_attempted"] == true {
+        rendered.push_str("\n   Web research fallback attempted.\n");
+        if let Some(research) = details.get("research") {
+            rendered.push_str(&format!(
+                "   Research model: {} · catalog saved: {} · verified: false\n",
+                text(research["model"].as_str().unwrap_or("unavailable")),
+                research["saved"]
+            ));
+            rendered.push_str(&format!(
+                "   Research decision: {}\n",
+                text(
+                    research["proposal"]["explanation"]
+                        .as_str()
+                        .unwrap_or("unavailable")
+                )
+            ));
+            for evidence in research["proposal"]["evidence"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                rendered.push_str(&format!(
+                    "   Source: {}\n",
+                    text(evidence["url"].as_str().unwrap_or(""))
+                ));
+            }
+        }
+    }
     if let Some(reason) = details["discovery_skipped"].as_str() {
         rendered.push_str(&format!("   Discovery skipped: {}\n", text(reason)));
     }
@@ -836,3 +864,97 @@ fn write_output(rendered: &str) -> Result<()> {
 #[cfg(test)]
 #[path = "../tests/unit/output/dedupe_tests.rs"]
 mod dedupe_tests;
+
+pub fn logo_list(page: &ultrafinance_core::logos::LogoPage, json: bool) -> Result<()> {
+    if json {
+        return write_output(&serde_json::to_string_pretty(page)?);
+    }
+    if page.logos.is_empty() {
+        return write_output(&format!(
+            "No logos on this page. {} total; offset {}.",
+            page.total, page.offset
+        ));
+    }
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header([
+            "Website", "Kind", "Original", "Display", "Logo URL", "Checked",
+        ]);
+    if !io::stdout().is_terminal() {
+        table.set_width(120);
+    }
+    for logo in &page.logos {
+        table.add_row([
+            text(&logo.website_url),
+            logo.kind.as_str().into(),
+            format!(
+                "{} {}×{}",
+                text(&logo.original.mime_type),
+                logo.original.width,
+                logo.original.height
+            ),
+            format!("{}×{}", logo.display.width, logo.display.height),
+            text(&logo.display.url),
+            text(logo.checked_at.as_deref().unwrap_or("—")),
+        ]);
+    }
+    write_output(&format!(
+        "{table}\n\nShowing {}–{} of {} website logos",
+        page.offset + 1,
+        page.offset + page.logos.len(),
+        page.total
+    ))
+}
+
+pub fn logo_detail(
+    logo: Option<&ultrafinance_core::logos::WebsiteLogo>,
+    website: &str,
+    json: bool,
+) -> Result<()> {
+    if json {
+        return write_output(&serde_json::to_string_pretty(&logo)?);
+    }
+    let Some(logo) = logo else {
+        return write_output(&format!("No saved logo for {}.", text(website)));
+    };
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(["Field", "Value"]);
+    if !io::stdout().is_terminal() {
+        table.set_width(120);
+    }
+    for (label, value) in [
+        ("Website", logo.website_url.clone()),
+        ("Kind", logo.kind.as_str().into()),
+        ("Source URL", logo.source_url.clone()),
+        ("Original URL", logo.original.url.clone()),
+        ("Original type", logo.original.mime_type.clone()),
+        (
+            "Original size",
+            format!(
+                "{}×{} · {} bytes",
+                logo.original.width, logo.original.height, logo.original.byte_length
+            ),
+        ),
+        ("Display URL", logo.display.url.clone()),
+        ("Display type", logo.display.mime_type.clone()),
+        (
+            "Display size",
+            format!(
+                "{}×{} · {} bytes",
+                logo.display.width, logo.display.height, logo.display.byte_length
+            ),
+        ),
+        (
+            "Checked",
+            logo.checked_at.clone().unwrap_or_else(|| "—".into()),
+        ),
+    ] {
+        table.add_row([label.to_string(), text(&value)]);
+    }
+    write_output(&table.to_string())
+}

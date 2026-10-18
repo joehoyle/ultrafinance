@@ -5,6 +5,28 @@ use axum::{
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn schema_mismatch_has_an_actionable_permanent_error_code() {
+    let error = anyhow::Error::new(ultrafinance_core::store::SchemaMismatch {
+        found: 14,
+        required: ultrafinance_core::store::POSTGRES_SCHEMA_VERSION,
+    })
+    .context("catalog setup failed");
+    let response = schema_error(&error).unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "database_schema_mismatch");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("database init")
+    );
+    assert!(schema_error(&anyhow::anyhow!("connection temporarily unavailable")).is_none());
+}
+
 #[tokio::test]
 async fn enrichment_responses_hide_aliases_but_still_match_them() {
     let merchants = serde_json::from_value(json!([
@@ -462,5 +484,47 @@ async fn locations_are_independent_in_http_results_and_hints_are_validated() {
             assert_eq!(body["merchant"]["status"], "unresolved");
             assert_eq!(body["location"]["status"], status);
         }
+    }
+}
+
+#[tokio::test]
+async fn research_flag_is_optional_typed_and_only_requires_configuration_for_fallback() {
+    let merchants =
+        serde_json::from_value(json!([{"id":"known","name":"Known Merchant"}])).unwrap();
+    let app = router(
+        Enricher::new(None, "unused".into(), 0.95, merchants)
+            .unwrap()
+            .with_research(None),
+    );
+    for (payload, status) in [
+        (
+            json!({"description":"Known Merchant","research":true}),
+            StatusCode::OK,
+        ),
+        (json!({"description":"ZXQ7P 93215"}), StatusCode::OK),
+        (
+            json!({"description":"ZXQ7P 93215","research":false}),
+            StatusCode::OK,
+        ),
+        (
+            json!({"description":"ZXQ7P 93215","research":true}),
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            json!({"description":"ZXQ7P 93215","research":"true"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/enrich")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{payload}");
     }
 }

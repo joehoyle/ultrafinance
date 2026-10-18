@@ -10,6 +10,7 @@ struct Fake {
     image_conflict: bool,
     unchanged: bool,
     catalog_failures: RefCell<usize>,
+    schema_mismatch: bool,
 }
 
 impl Lambda for Fake {
@@ -41,6 +42,9 @@ impl Lambda for Fake {
 
     fn check(&self, qualifier: &str) -> Result<()> {
         self.checks.borrow_mut().push(qualifier.into());
+        if self.schema_mismatch {
+            verify_schema_compatibility(qualifier, br#"{"error":{"code":"database_schema_mismatch","message":"credentials must not be echoed"}}"#)?;
+        }
         let mut failures = self.catalog_failures.borrow_mut();
         if *failures > 0 {
             *failures -= 1;
@@ -54,6 +58,31 @@ impl Lambda for Fake {
             bail!("smoke check failed");
         }
         Ok(())
+    }
+}
+
+#[test]
+fn schema_mismatch_never_retries_or_promotes_and_does_not_echo_response_details() {
+    let client = Fake {
+        schema_mismatch: true,
+        ..Default::default()
+    };
+    let error = release(&client, "image").unwrap_err();
+    assert!(error.to_string().contains("schema-upgrade cutover"));
+    assert!(!error.to_string().contains("credentials must not be echoed"));
+    assert_eq!(*client.checks.borrow(), vec!["8"]);
+    assert!(
+        !client
+            .calls
+            .borrow()
+            .iter()
+            .any(|(operation, _)| operation == "update-alias")
+    );
+    for body in [
+        br#"{"error":{"code":"catalog_unavailable"}}"#.as_slice(),
+        b"<html>Unavailable</html>",
+    ] {
+        assert!(verify_schema_compatibility("8", body).is_ok());
     }
 }
 

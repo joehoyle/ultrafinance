@@ -1,4 +1,33 @@
 use super::*;
+
+#[test]
+fn file_cache_identity_tracks_path_size_and_modification_time() -> Result<()> {
+    let root =
+        Scratch(std::env::temp_dir().join(format!("ultra-fsq-identity-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir(&root.0)?;
+    let input = root.0.join("input.csv");
+    std::fs::write(&input, "original")?;
+    let original = fingerprint_file(&input)?;
+    assert_eq!(original, fingerprint_file(&input)?);
+    assert_eq!(original, fingerprint_file(&root.0.join("./input.csv"))?);
+
+    let modified = std::fs::metadata(&input)?.modified()?;
+    let file = std::fs::OpenOptions::new().write(true).open(&input)?;
+    file.set_len(100)?;
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))?;
+    let resized = fingerprint_file(&input)?;
+    assert_ne!(original, resized);
+    file.set_times(
+        std::fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(1)),
+    )?;
+    let touched = fingerprint_file(&input)?;
+    assert_ne!(resized, touched);
+    let renamed = root.0.join("renamed.csv");
+    std::fs::rename(&input, &renamed)?;
+    assert_ne!(touched, fingerprint_file(&renamed)?);
+    Ok(())
+}
+
 #[test]
 #[ignore = "comparative Foursquare preparation throughput benchmark"]
 fn benchmark_streaming_preparation() -> Result<()> {
@@ -46,7 +75,13 @@ fn streaming_preparation_matches_adapter_and_reuses_cached_bundle() -> Result<()
     let input = root.join("input.csv");
     let contents = "fsq_place_id,name,country,website,fsq_category_ids,date_closed\nb,Starbucks,CA,,\"[\"\"restaurant\"\"]\",\na,Starbucks,CA,,\"[\"\"restaurant\"\"]\",\nb,Starbucks,CA,,\"[\"\"restaurant\"\"]\",\n";
     std::fs::write(&input, contents)?;
-    let expected = prepare(Source::Foursquare, contents, None, "ca")?;
+    let mut expected = prepare(Source::Foursquare, contents, None, "ca")?;
+    // In-memory preparation hashes content; file preparation uses metadata.
+    let identity = fingerprint_file(&input)?;
+    expected.manifest.input_fingerprint = identity.clone();
+    for record in &mut expected.records {
+        record.version = Some(format!("{identity}:ca:"));
+    }
     let (path, manifest) = prepare_file(&input, &root, "ca")?;
     assert_eq!(
         serde_json::to_value(&manifest)?,

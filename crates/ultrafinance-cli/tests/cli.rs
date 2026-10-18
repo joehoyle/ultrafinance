@@ -1874,3 +1874,139 @@ fn imports_ignore_provider_credentials_and_checkpoint_settings() {
         }
     }
 }
+
+#[test]
+fn logos_list_and_get_show_saved_metadata_without_discovery() {
+    use ultrafinance_core::{
+        logos::{ImageAsset, LogoKind, WebsiteLogo},
+        store::MerchantStore,
+    };
+    let store = MerchantStore::temporary().unwrap();
+    let db = store.temporary_url();
+    let asset = ImageAsset {
+        id: "a".repeat(64),
+        url: "https://cdn.example/logo.webp".into(),
+        mime_type: "image/webp".into(),
+        width: 256,
+        height: 128,
+        byte_length: 100,
+    };
+    for website in [
+        "https://c.example",
+        "https://a.example",
+        "https://b.example",
+    ] {
+        store
+            .save_website_logo(&WebsiteLogo {
+                website_url: website.into(),
+                source_url: "https://official.example/logo.png".into(),
+                kind: LogoKind::Logo,
+                original: asset.clone(),
+                display: asset.clone(),
+                checked_at: None,
+            })
+            .unwrap();
+    }
+    let invoke = |args: &[&str]| {
+        let mut full = vec!["--database-url", db, "logos"];
+        full.extend_from_slice(args);
+        let output = run(&full, None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let page: Value = serde_json::from_str(&invoke(&[
+        "list", "--limit", "1", "--offset", "1", "--json",
+    ]))
+    .unwrap();
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["limit"], 1);
+    assert_eq!(page["offset"], 1);
+    assert_eq!(page["logos"].as_array().unwrap().len(), 1);
+    assert_eq!(page["logos"][0]["website_url"], "https://b.example/");
+    assert_eq!(page["logos"][0]["display"]["mime_type"], "image/webp");
+    let detail: Value = serde_json::from_str(&invoke(&["get", "b.example", "--json"])).unwrap();
+    assert_eq!(detail, page["logos"][0]);
+    let table = invoke(&["list", "--limit", "1"]);
+    for expected in [
+        "Website",
+        "Kind",
+        "Original",
+        "Display",
+        "Logo URL",
+        "Checked",
+        "https://a.example/",
+        "256×128",
+        "Showing 1–1 of 3",
+    ] {
+        assert!(table.contains(expected), "{expected} missing from {table}");
+    }
+    let detail = invoke(&["get", "b.example"]);
+    for expected in [
+        "Source URL",
+        "Original type",
+        "Display type",
+        "100 bytes",
+        "https://cdn.example/logo.webp",
+    ] {
+        assert!(
+            detail.contains(expected),
+            "{expected} missing from {detail}"
+        );
+    }
+    assert!(invoke(&["list", "--offset", "10"]).contains("No logos on this page. 3 total"));
+    assert_eq!(invoke(&["get", "missing.example", "--json"]).trim(), "null");
+    assert!(invoke(&["get", "missing.example"]).contains("No saved logo"));
+    assert!(
+        !run(
+            &["--database-url", db, "logos", "list", "--limit", "0"],
+            None
+        )
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn enrich_research_flag_is_opt_in_and_preserved_in_json_input() {
+    for (args, input) in [
+        (
+            vec!["enrich", "UNKNOWN CHARGE", "--research", "--dry-run"],
+            None,
+        ),
+        (
+            vec!["enrich", "--input", "-", "--research", "--dry-run"],
+            Some(r#"{"description":"UNKNOWN CHARGE"}"#),
+        ),
+        (
+            vec!["enrich", "--input", "-", "--dry-run"],
+            Some(r#"{"description":"UNKNOWN CHARGE","research":true}"#),
+        ),
+    ] {
+        let output = run(&args, input);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let request: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(request["research"], true);
+    }
+    let output = run(&["enrich", "UNKNOWN CHARGE", "--dry-run"], None);
+    let request: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(request.get("research").is_none());
+    let output = run(
+        &["enrich-batch", "--input", "-", "--research", "--dry-run"],
+        Some(r#"{"transactions":[{"description":"UNKNOWN CHARGE"}]}"#),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let batch: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(batch["transactions"][0]["research"], true);
+}

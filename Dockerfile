@@ -59,7 +59,7 @@ RUN duckdb -batch :memory: -c 'LOAD httpfs; LOAD iceberg; SELECT 1;'
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates libssl3 tmux \
+    && apt-get install -y --no-install-recommends awscli bash ca-certificates libssl3 tmux \
     && sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
     && rm -rf /var/lib/apt/lists/*
 COPY deploy/bashrc /etc/bash.bashrc
