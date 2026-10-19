@@ -659,7 +659,8 @@
         "description": "Entity classification, not a transaction operation or account-provider hint.",
         "enum": [
           "merchant",
-          "financial_institution"
+          "financial_institution",
+          "payment_processor"
         ]
       },
       "EnrichRequest": {

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const FDIC_URL: &str = "https://api.fdic.gov/banks/docs";
 pub const NCUA_URL: &str = "https://ncua.gov/analysis/credit-union-corporate-call-report-data";
 pub const GLEIF_URL: &str = "https://www.gleif.org/en/lei-data/gleif-api";
+pub const PAYMENTS_URL: &str = "https://en.wikipedia.org/wiki/Category:Payment_service_providers";
 pub const WIKIDATA_URL: &str = "https://www.wikidata.org/wiki/Q650241";
 pub const WIKIDATA_QUERY: &str = r#"SELECT DISTINCT ?item ?name ?country ?website ?lei ?alias ?financialInstitution WHERE {
   ?item wdt:P31/wdt:P279* wd:Q650241; rdfs:label ?name.
@@ -22,7 +23,7 @@ pub const WIKIDATA_QUERY: &str = r#"SELECT DISTINCT ?item ?name ?country ?websit
 pub fn supported(source: Source) -> bool {
     matches!(
         source,
-        Source::Fdic | Source::Ncua | Source::Gleif | Source::Wikidata
+        Source::Fdic | Source::Ncua | Source::Gleif | Source::Wikidata | Source::WikidataPayments
     )
 }
 pub fn metadata(source: Source) -> (&'static str, &'static str, &'static str) {
@@ -41,6 +42,11 @@ pub fn metadata(source: Source) -> (&'static str, &'static str, &'static str) {
             "CC0-1.0",
             "GLEIF LEI data; financial-institution selection from Wikidata (CC0)",
             GLEIF_URL,
+        ),
+        Source::WikidataPayments => (
+            "CC0-1.0 AND CC-BY-SA-4.0",
+            "Wikidata contributors; English Wikipedia payment-service-provider category selects organizations",
+            PAYMENTS_URL,
         ),
         Source::Wikidata => (
             "CC0-1.0",
@@ -145,6 +151,7 @@ pub fn prepare(source: Source, contents: &str, region: &str) -> Result<Vec<Sourc
     let mut records = match source {
         Source::Ncua => ncua(contents)?,
         Source::Fdic => fdic(&serde_json::from_str(contents)?)?,
+        Source::WikidataPayments => wikidata_payments(&serde_json::from_str(contents)?)?,
         Source::Wikidata => wikidata(&serde_json::from_str(contents)?)?,
         Source::Gleif => gleif(&serde_json::from_str(contents)?)?,
         _ => bail!("unsupported institution source"),
@@ -260,6 +267,39 @@ fn ncua(contents: &str) -> Result<Vec<SourceRecord>> {
         .collect()
 }
 pub fn wikidata(data: &Value) -> Result<Vec<SourceRecord>> {
+    wikidata_records(data, false)
+}
+pub fn wikidata_payments(data: &Value) -> Result<Vec<SourceRecord>> {
+    let category = data["category"]["query"]["categorymembers"]
+        .as_array()
+        .context("payment-provider category evidence missing")?;
+    ensure!(
+        data["category"]["continue"].is_null(),
+        "incomplete category selection"
+    );
+    let titles: BTreeSet<_> = category
+        .iter()
+        .filter_map(|r| r["title"].as_str())
+        .collect();
+    let members = data["members"]
+        .as_array()
+        .context("Wikidata member mappings missing")?;
+    let mut ids = BTreeSet::new();
+    for member in members {
+        ensure!(
+            titles.contains(required(member, "title")?),
+            "member not present in category selection"
+        );
+        ids.insert(required(member, "qid")?);
+    }
+    let records = wikidata_records(data, true)?;
+    ensure!(
+        records.iter().all(|r| ids.contains(r.external_id.as_str())),
+        "payment provider missing category membership evidence"
+    );
+    Ok(records)
+}
+fn wikidata_records(data: &Value, payments: bool) -> Result<Vec<SourceRecord>> {
     let rows = data["results"]["bindings"]
         .as_array()
         .context("Wikidata SPARQL bindings missing")?;
@@ -267,10 +307,18 @@ pub fn wikidata(data: &Value) -> Result<Vec<SourceRecord>> {
     let mut sites = BTreeMap::<String, BTreeSet<String>>::new();
     for row in rows {
         let get = |key: &str| row[key]["value"].as_str().unwrap_or("").trim();
-        ensure!(
-            get("financialInstitution") == "http://www.wikidata.org/entity/Q650241",
-            "Wikidata financial-institution classification missing"
-        );
+        if payments {
+            ensure!(
+                get("paymentProviderCategory") == PAYMENTS_URL
+                    && get("organization") == "http://www.wikidata.org/entity/Q43229",
+                "payment-provider category/organization evidence missing"
+            );
+        } else {
+            ensure!(
+                get("financialInstitution") == "http://www.wikidata.org/entity/Q650241",
+                "Wikidata financial-institution classification missing"
+            );
+        }
         let id = get("item")
             .strip_prefix("http://www.wikidata.org/entity/")
             .context("invalid Wikidata URI")?;
@@ -282,13 +330,20 @@ pub fn wikidata(data: &Value) -> Result<Vec<SourceRecord>> {
         ensure!(!name.is_empty(), "Wikidata name missing");
         let r = records.entry(id.into()).or_insert_with(|| {
             record(
-                Source::Wikidata,
+                if payments {
+                    Source::WikidataPayments
+                } else {
+                    Source::Wikidata
+                },
                 id.into(),
                 name,
                 vec![],
-                json!({"leis":[],"classification":"Q650241"}),
+                json!({"leis":[],"classification":if payments { PAYMENTS_URL } else { "Q650241" }}),
             )
         });
+        if payments {
+            r.merchant.counterparty_type = CounterpartyType::PaymentProcessor;
+        }
         ensure!(
             r.merchant.name == name,
             "conflicting Wikidata names for {id}"
@@ -475,5 +530,23 @@ mod tests {
         data["data"] = json!([]);
         assert!(prepare(Source::Gleif, &data.to_string(), "global").is_err());
         assert!(website("javascript:alert(1)").is_none());
+    }
+    #[test]
+    fn payment_category_import_requires_membership_and_organization_evidence() {
+        let contents = include_str!("../../tests/fixtures/wikidata-payments.json");
+        let records = prepare(Source::WikidataPayments, contents, "global").unwrap();
+        assert_eq!(
+            records[0].merchant.counterparty_type,
+            CounterpartyType::PaymentProcessor
+        );
+        let mut data: Value = serde_json::from_str(contents).unwrap();
+        data["members"][0]["title"] = json!("Unlisted provider");
+        assert!(prepare(Source::WikidataPayments, &data.to_string(), "global").is_err());
+        let mut data: Value = serde_json::from_str(contents).unwrap();
+        data["results"]["bindings"][0]["organization"] = Value::Null;
+        assert!(prepare(Source::WikidataPayments, &data.to_string(), "global").is_err());
+        let mut data: Value = serde_json::from_str(contents).unwrap();
+        data["category"]["continue"] = json!({"cmcontinue":"more"});
+        assert!(prepare(Source::WikidataPayments, &data.to_string(), "global").is_err());
     }
 }

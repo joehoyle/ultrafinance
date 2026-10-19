@@ -41,7 +41,7 @@ fn migration_keeps_public_ids_outlets_and_search_and_allocates_fresh_keys() -> R
     }
     let original = id.clone();
     let key: i64 = upgraded.run(move |c| {
-        assert_eq!(c.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),20);
+        assert_eq!(c.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),21);
         assert_eq!(c.query_one("SELECT tgenabled::text FROM pg_trigger WHERE tgrelid='location_records'::regclass AND tgname='location_merchant'",&[])?.get::<_,String>(0),"A");
         assert!(c.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.table_privileges WHERE table_schema='public' AND table_name='source_identities' AND grantee='PUBLIC' AND privilege_type='SELECT')", &[])?.get::<_, bool>(0));
         assert!(c.query_one("SELECT EXISTS(SELECT 1 FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE c.oid='merchants_merchant_key_seq'::regclass AND a.grantee=0 AND a.privilege_type='USAGE')", &[])?.get::<_, bool>(0));

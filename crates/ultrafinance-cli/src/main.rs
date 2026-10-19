@@ -263,6 +263,7 @@ enum DatasetSource {
     Ncua,
     Gleif,
     Wikidata,
+    WikidataPayments,
     MerchantStudio,
     OpenEnrichment,
     Dodatathings,
@@ -310,7 +311,7 @@ enum MerchantCommand {
     },
     /// Add a verified merchant, or replace one by supplying its existing ID.
     Add {
-        /// Entity type: merchant or financial_institution.
+        /// Entity type: merchant, financial_institution, or payment_processor.
         #[arg(long = "type", default_value = "merchant")]
         counterparty_type: ultrafinance_core::CounterpartyType,
         #[arg(long)]
@@ -333,9 +334,12 @@ enum MerchantCommand {
         #[arg(long)]
         id: Option<String>,
     },
-    /// List stored merchants alphabetically, without calling Jev.
+    /// List stored counterparties alphabetically, without calling Jev.
     #[command(alias = "ls")]
     List {
+        /// Filter by merchant, financial_institution, or payment_processor; defaults to all types.
+        #[arg(long = "type")]
+        counterparty_type: Option<ultrafinance_core::CounterpartyType>,
         /// Filter by known operating country; merchants without that country are excluded.
         #[arg(long = "market")]
         market: Option<String>,
@@ -349,6 +353,9 @@ enum MerchantCommand {
     },
     /// Show exact and fuzzy candidates without calling Jev.
     Search {
+        /// Filter by merchant, financial_institution, or payment_processor; defaults to all types.
+        #[arg(long = "type")]
+        counterparty_type: Option<ultrafinance_core::CounterpartyType>,
         description: String,
         /// Print complete candidates and source evidence as JSON for scripts.
         #[arg(long)]
@@ -819,6 +826,9 @@ async fn main() -> Result<()> {
                     DatasetSource::Ncua => ultrafinance_core::datasets::Source::Ncua,
                     DatasetSource::Gleif => ultrafinance_core::datasets::Source::Gleif,
                     DatasetSource::Wikidata => ultrafinance_core::datasets::Source::Wikidata,
+                    DatasetSource::WikidataPayments => {
+                        ultrafinance_core::datasets::Source::WikidataPayments
+                    }
                     DatasetSource::Foursquare => ultrafinance_core::datasets::Source::Foursquare,
                     DatasetSource::MerchantStudio => {
                         ultrafinance_core::datasets::Source::MerchantStudio
@@ -1121,15 +1131,18 @@ async fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&merchant)?);
                 }
                 MerchantCommand::List {
+                    counterparty_type,
                     market,
                     limit,
                     offset,
                     json,
                 } => {
-                    let page = store.list(market.as_deref(), limit, offset)?;
+                    let page =
+                        store.list_typed(market.as_deref(), limit, offset, counterparty_type)?;
                     output::merchant_list(&page, json)?;
                 }
                 MerchantCommand::Search {
+                    counterparty_type,
                     description,
                     country,
                     limit,
@@ -1138,7 +1151,12 @@ async fn main() -> Result<()> {
                     if !(1..=254).contains(&limit) {
                         bail!("limit must be between 1 and 254");
                     }
-                    let candidates = store.search(&description, country.as_deref(), limit)?;
+                    let candidates = store.search_typed(
+                        &description,
+                        country.as_deref(),
+                        limit,
+                        counterparty_type,
+                    )?;
                     output::merchant_search(&description, &candidates, json)?;
                 }
                 MerchantCommand::Import {

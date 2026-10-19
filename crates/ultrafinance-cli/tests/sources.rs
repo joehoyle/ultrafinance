@@ -160,7 +160,7 @@ fn foursquare_import_refresh_keeps_place_and_location_identities() {
 fn registry_and_offline_browsing_work_without_a_database() {
     let root = tempfile::tempdir().unwrap();
     let registry = json(run(root.path(), &["list", "--json"]));
-    assert_eq!(registry.as_array().unwrap().len(), 12);
+    assert_eq!(registry.as_array().unwrap().len(), 13);
     assert_eq!(registry[3]["download"], "automatic");
     let moneyvis = json(run(root.path(), &["show", "moneyvis"]));
     assert_eq!(
@@ -1089,6 +1089,11 @@ fn osfi_source_supports_registry_snapshots_import_refresh_and_browsing() {
 fn financial_sources_support_offline_import_browsing_and_idempotent_refresh() {
     for (source, fixture, extension) in [
         (
+            "wikidata-payments",
+            include_str!("../../ultrafinance-core/tests/fixtures/wikidata-payments.json"),
+            "json",
+        ),
+        (
             "fdic",
             include_str!("../../ultrafinance-core/tests/fixtures/fdic.json"),
             "json",
@@ -1177,7 +1182,11 @@ fn financial_sources_support_offline_import_browsing_and_idempotent_refresh() {
         let before = store.source_records(source, None, 10, 0).unwrap();
         assert_eq!(
             before[0]["record"]["merchant"]["type"],
-            "financial_institution"
+            if source == "wikidata-payments" {
+                "payment_processor"
+            } else {
+                "financial_institution"
+            }
         );
         std::fs::write(&input, fixture.replace("Example", "Renamed")).unwrap();
         let updated = call(&[

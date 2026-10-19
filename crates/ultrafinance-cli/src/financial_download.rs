@@ -17,6 +17,7 @@ pub async fn download(source: Source) -> Result<(&'static str, String, Vec<u8>)>
         .build()?;
     eprintln!("Downloading {} financial institutions", source.name());
     match source {
+        Source::WikidataPayments => payment_providers(&client).await,
         Source::Fdic => {
             let mut all = vec![];
             let mut index = None;
@@ -195,6 +196,155 @@ fn ncua_csv(bytes: &[u8]) -> Result<Vec<u8>> {
     let bytes = csv.into_inner()?;
     fi::prepare(Source::Ncua, std::str::from_utf8(&bytes)?, "global")?;
     Ok(bytes)
+}
+
+async fn payment_providers(client: &reqwest::Client) -> Result<(&'static str, String, Vec<u8>)> {
+    let mut category_members = vec![];
+    let mut continuation = None::<String>;
+    let mut continuations = BTreeSet::new();
+    loop {
+        let mut url = reqwest::Url::parse("https://en.wikipedia.org/w/api.php")?;
+        url.query_pairs_mut().extend_pairs([
+            ("action", "query"),
+            ("list", "categorymembers"),
+            ("cmtitle", "Category:Payment service providers"),
+            ("cmlimit", "500"),
+            ("cmnamespace", "0"),
+            ("format", "json"),
+        ]);
+        if let Some(value) = &continuation {
+            url.query_pairs_mut().append_pair("cmcontinue", value);
+        }
+        let page: Value =
+            serde_json::from_slice(&super::sources::fetch(client, url.as_str()).await?)?;
+        category_members.extend(
+            page["query"]["categorymembers"]
+                .as_array()
+                .context("Wikipedia category members missing")?
+                .iter()
+                .cloned(),
+        );
+        ensure!(
+            category_members.len() <= 10_000,
+            "payment-provider category exceeds supported size"
+        );
+        continuation = page["continue"]["cmcontinue"].as_str().map(str::to_owned);
+        if let Some(value) = &continuation {
+            ensure!(
+                continuations.insert(value.clone()),
+                "repeated category continuation"
+            );
+        } else {
+            break;
+        }
+    }
+    eprintln!(
+        "Payment providers: selected {} category pages",
+        category_members.len()
+    );
+    ensure!(
+        !category_members.is_empty(),
+        "empty payment-provider category"
+    );
+    let mut members = vec![];
+    for chunk in category_members.chunks(50) {
+        let ids = chunk
+            .iter()
+            .map(|r| {
+                r["pageid"]
+                    .as_u64()
+                    .context("category page ID missing")
+                    .map(|id| id.to_string())
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("|");
+        let mut url = reqwest::Url::parse("https://en.wikipedia.org/w/api.php")?;
+        url.query_pairs_mut().extend_pairs([
+            ("action", "query"),
+            ("prop", "pageprops"),
+            ("ppprop", "wikibase_item"),
+            ("pageids", ids.as_str()),
+            ("format", "json"),
+        ]);
+        let page: Value =
+            serde_json::from_slice(&super::sources::fetch(client, url.as_str()).await?)?;
+        ensure!(
+            page["continue"].is_null(),
+            "incomplete Wikipedia page mappings"
+        );
+        let pages = page["query"]["pages"]
+            .as_object()
+            .context("Wikipedia pages missing")?;
+        ensure!(
+            pages.len() == chunk.len(),
+            "incomplete Wikipedia page mappings"
+        );
+        for page in pages.values() {
+            ensure!(
+                page["missing"].is_null(),
+                "category changed during download; retry"
+            );
+            if let Some(qid) = page["pageprops"]["wikibase_item"].as_str() {
+                ensure!(
+                    qid.starts_with('Q')
+                        && qid.len() > 1
+                        && qid[1..].bytes().all(|b| b.is_ascii_digit()),
+                    "invalid Wikidata page mapping"
+                );
+                members.push(json!({"title":page["title"],"qid":qid}));
+            }
+        }
+    }
+    let ids: BTreeSet<_> = members.iter().filter_map(|m| m["qid"].as_str()).collect();
+    let ids: Vec<_> = ids.into_iter().collect();
+    ensure!(!ids.is_empty(), "category has no Wikidata identities");
+    let mut bindings = vec![];
+    eprintln!(
+        "Payment providers: resolving {} Wikidata identities",
+        ids.len()
+    );
+    for chunk in ids.chunks(40) {
+        let values = chunk
+            .iter()
+            .map(|id| format!("wd:{id}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let query = format!(
+            r#"SELECT DISTINCT ?item ?name ?country ?website ?lei ?alias ?paymentProviderCategory ?organization WHERE {{
+          hint:Query hint:optimizer "None" .
+          VALUES ?item {{ {values} }}
+          ?item wdt:P31 ?class .
+          ?class wdt:P279* wd:Q43229 . hint:Prior hint:gearing "forward" .
+          ?item rdfs:label ?name.
+          FILTER(LANG(?name)="en") FILTER NOT EXISTS {{ ?item wdt:P576 ?end }}
+          BIND(<{}> AS ?paymentProviderCategory) BIND(wd:Q43229 AS ?organization)
+          OPTIONAL {{ ?item wdt:P17/wdt:P297 ?country }}
+          OPTIONAL {{ ?item wdt:P856 ?website }} OPTIONAL {{ ?item wdt:P1278 ?lei }}
+          OPTIONAL {{ ?item skos:altLabel ?alias FILTER(LANG(?alias)="en") }}
+        }} ORDER BY ?item ?name ?country ?website ?lei ?alias"#,
+            fi::PAYMENTS_URL
+        );
+        let mut url = reqwest::Url::parse("https://query.wikidata.org/sparql")?;
+        url.query_pairs_mut()
+            .append_pair("query", &query)
+            .append_pair("format", "json");
+        let page: Value =
+            serde_json::from_slice(&super::sources::fetch(client, url.as_str()).await?)?;
+        bindings.extend(
+            page["results"]["bindings"]
+                .as_array()
+                .context("payment-provider bindings missing")?
+                .iter()
+                .cloned(),
+        );
+    }
+    let data = json!({"category":{"query":{"categorymembers":category_members}},"members":members,"results":{"bindings":bindings}});
+    fi::prepare(Source::WikidataPayments, &data.to_string(), "global")?;
+    Ok((
+        "input.json",
+        fi::PAYMENTS_URL.into(),
+        serde_json::to_vec(&data)?,
+    ))
 }
 
 #[cfg(test)]

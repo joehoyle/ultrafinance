@@ -536,7 +536,8 @@ async fn research_flag_is_optional_typed_and_only_requires_configuration_for_fal
 async fn counterparties_are_typed_public_records_and_merchants_stay_compatible() {
     let records = serde_json::from_value(json!([
         {"id":"bank", "name":"Example Bank", "type":"financial_institution", "aliases":["BANK FEE"], "sources":["https://internal.example"]},
-        {"id":"cafe", "name":"Cafe"}
+        {"id":"cafe", "name":"Cafe"},
+        {"id":"processor", "name":"Example Payments", "type":"payment_processor"}
     ])).unwrap();
     let app = router(Enricher::new(None, "unused".into(), 0.95, records).unwrap());
     let response = app
@@ -565,6 +566,11 @@ async fn counterparties_are_typed_public_records_and_merchants_stay_compatible()
             "bank",
         ),
         ("/v1/counterparties?type=merchant", "counterparties", "cafe"),
+        (
+            "/v1/counterparties?type=payment_processor",
+            "counterparties",
+            "processor",
+        ),
     ] {
         let response = app
             .clone()

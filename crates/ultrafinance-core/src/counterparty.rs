@@ -8,6 +8,7 @@ pub enum CounterpartyType {
     #[default]
     Merchant,
     FinancialInstitution,
+    PaymentProcessor,
 }
 
 impl CounterpartyType {
@@ -15,6 +16,7 @@ impl CounterpartyType {
         match self {
             Self::Merchant => "merchant",
             Self::FinancialInstitution => "financial_institution",
+            Self::PaymentProcessor => "payment_processor",
         }
     }
 }
@@ -25,6 +27,7 @@ impl std::str::FromStr for CounterpartyType {
         match value {
             "merchant" => Ok(Self::Merchant),
             "financial_institution" => Ok(Self::FinancialInstitution),
+            "payment_processor" => Ok(Self::PaymentProcessor),
             _ => anyhow::bail!("unsupported counterparty type: {value}"),
         }
     }
@@ -151,6 +154,31 @@ mod tests {
                 .merchant
                 .counterparty_type,
             CounterpartyType::FinancialInstitution
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn processors_are_typed_and_keep_merchant_unresolved() -> anyhow::Result<()> {
+        let processor = serde_json::from_value(
+            json!({"id":"processor", "name":"Example Payments", "type":"payment_processor"}),
+        )?;
+        let enricher = Enricher::new(None, "unused".into(), 0.95, vec![processor])?;
+        let response = enricher
+            .enrich(&serde_json::from_value(
+                json!({"description":"Example Payments"}),
+            )?)
+            .await?;
+        assert_eq!(
+            response.counterparties[0].counterparty_type,
+            CounterpartyType::PaymentProcessor
+        );
+        assert!(matches!(
+            response.merchant,
+            MerchantResult::Unresolved { .. }
+        ));
+        assert_eq!(
+            "payment_processor".parse::<CounterpartyType>()?,
+            CounterpartyType::PaymentProcessor
         );
         Ok(())
     }

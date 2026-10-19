@@ -15,7 +15,7 @@ pub use search_pipeline::{RetrievalEvidence, SearchTrace};
 
 pub const LOCAL_DATABASE_URL: &str =
     "postgresql://ultrafinance@127.0.0.1:55432/ultrafinance?sslmode=disable";
-pub const POSTGRES_SCHEMA_VERSION: i32 = 20;
+pub const POSTGRES_SCHEMA_VERSION: i32 = 21;
 
 #[derive(Debug)]
 pub struct SchemaMismatch {
@@ -517,6 +517,19 @@ impl MerchantStore {
         limit: usize,
     ) -> Result<Vec<Candidate>> {
         let mut candidates = self.0.search(description, country, limit)?;
+        self.apply_logos(candidates.iter_mut().map(|c| &mut c.merchant))?;
+        Ok(candidates)
+    }
+    pub fn search_typed(
+        &self,
+        description: &str,
+        country: Option<&str>,
+        limit: usize,
+        entity_type: Option<crate::CounterpartyType>,
+    ) -> Result<Vec<Candidate>> {
+        let mut candidates = self
+            .0
+            .search_typed(description, country, limit, entity_type)?;
         self.apply_logos(candidates.iter_mut().map(|c| &mut c.merchant))?;
         Ok(candidates)
     }
