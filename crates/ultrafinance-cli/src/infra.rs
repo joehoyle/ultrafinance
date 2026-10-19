@@ -6,13 +6,16 @@ use std::{
 };
 mod aws;
 mod cleanup;
+mod dump_progress;
 mod example;
 mod import_db;
 mod persistent;
+mod progress;
 mod release;
 mod sessions;
 mod shell;
 mod terminal;
+mod upload_db;
 
 #[derive(Args)]
 pub struct InfraArgs {
@@ -74,6 +77,8 @@ enum InfraCommand {
     },
     /// Copy the full production database into the default local PostgreSQL database.
     ImportDb,
+    /// Replace production with the local PostgreSQL database. Deletes the old data after cutover.
+    UploadDb(upload_db::Options),
     /// Stop all production CLI tasks, including any active shell sessions.
     CliCleanup,
     /// Read Lambda application logs from CloudWatch (not enrichment history).
@@ -198,6 +203,7 @@ pub fn run(args: InfraArgs) -> Result<()> {
             wait_hours.unwrap_or(6),
         ),
         InfraCommand::ImportDb => import_db::run(&root),
+        InfraCommand::UploadDb(options) => upload_db::run(&root, options),
         InfraCommand::CliCleanup => cleanup::run(&root),
         InfraCommand::Logs { since, follow } => {
             let profile = output(&root, "aws_profile")?;

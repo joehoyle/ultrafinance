@@ -218,7 +218,11 @@ pub async fn run(options: Options) -> Result<()> {
             eprint!("\r\x1b[2K");
         }
         match outcome {
-            Ok(report) => {
+            Ok(mut report) => {
+                if job.name == "dataset/lunchmoney" || job.name.starts_with("dataset/lunchmoney/") {
+                    report.purchases_only();
+                    print_purchase_filter(&report);
+                }
                 let path = directory.join(format!("{:02}.json", index + 1));
                 fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
                 table.add_row(row(&job.name, &report.metrics));
@@ -279,6 +283,7 @@ pub async fn run(options: Options) -> Result<()> {
 
 /// Shared single-suite runner for file-based and registered-source evaluations.
 pub struct FileOptions {
+    pub purchases_only: bool,
     pub file: PathBuf,
     pub samples: bool,
     pub details: bool,
@@ -291,6 +296,7 @@ pub struct FileOptions {
 }
 pub async fn run_file(options: FileOptions) -> Result<()> {
     let FileOptions {
+        purchases_only,
         file,
         samples,
         details,
@@ -302,7 +308,7 @@ pub async fn run_file(options: FileOptions) -> Result<()> {
         threshold,
     } = options;
     let contents = contents(&file, samples, limit)?;
-    let report = ultrafinance_core::eval::run(
+    let mut report = ultrafinance_core::eval::run(
         &contents,
         MerchantStore::configured(database_url.as_deref())?,
         mode,
@@ -311,6 +317,10 @@ pub async fn run_file(options: FileOptions) -> Result<()> {
         threshold,
     )
     .await?;
+    if purchases_only {
+        report.purchases_only();
+        print_purchase_filter(&report);
+    }
     let json = serde_json::to_string_pretty(&report)?;
     if let Some(path) = output {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -324,49 +334,137 @@ pub async fn run_file(options: FileOptions) -> Result<()> {
     if details {
         print_details(&report)?;
     }
-    if report.metrics.labeled_merchants > 0 {
-        eprintln!(
-            "{} cases: retrieved expected merchant for {}/{} known cases; {} errors",
-            report.metrics.cases,
-            report.metrics.retrieval_hits,
-            report.metrics.labeled_merchants,
-            report.metrics.errors
-        );
-    } else {
-        eprintln!(
-            "{} cases; {} errors",
-            report.metrics.cases, report.metrics.errors
-        );
-    }
-    if report.metrics.unlabeled > 0 {
-        eprintln!(
-            "{} unlabeled cases; candidate coverage {:.1}%",
-            report.metrics.unlabeled,
-            report.metrics.candidate_coverage.unwrap_or(0.0) * 100.0
-        );
-    }
-    if let Some(rate) = report.metrics.match_rate {
-        eprintln!(
-            "Match rate {:.1}% · {} matched · {} unresolved · {} errors",
-            rate * 100.0,
-            report.metrics.matches.unwrap_or(0),
-            report.metrics.unresolved.unwrap_or(0),
-            report.metrics.errors
-        );
-    }
-    if let Some(accuracy) = report.metrics.accuracy {
-        eprintln!(
-            "Accuracy {:.1}% · match rate {:.1}% · match precision {}",
-            accuracy * 100.0,
-            report.metrics.match_rate.unwrap_or(0.0) * 100.0,
-            report
-                .metrics
-                .match_precision
-                .map(|p| format!("{:.1}%", p * 100.0))
-                .unwrap_or_else(|| "n/a".into())
-        );
-    }
+    eprintln!("{}", render_eval_tables(&report));
     Ok(())
+}
+
+fn render_eval_tables(report: &eval::Report) -> String {
+    let mut results = Table::new();
+    results
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_width(140)
+        .set_header([
+            "Description",
+            "Kind",
+            "Merchant",
+            "Outcome",
+            "Stopped at",
+            "Reason",
+        ]);
+    for case in &report.results {
+        let detail = case.enrichment.as_ref().unwrap_or(&Value::Null);
+        let merchant = detail["response"]["merchant"]["data"]["name"]
+            .as_str()
+            .or_else(|| {
+                case.candidates
+                    .iter()
+                    .find(|candidate| Some(&candidate.merchant.id) == case.predicted_id.as_ref())
+                    .map(|candidate| candidate.merchant.name.as_str())
+            })
+            .unwrap_or("—");
+        let outcome = if case.error.is_some() {
+            "Error"
+        } else if report.mode == Mode::Search {
+            "Search only"
+        } else if case.predicted_id.is_some() {
+            "Matched"
+        } else {
+            "Unresolved"
+        };
+        results.add_row([
+            crate::output::text(&case.description),
+            crate::output::text(detail["response"]["kind"].as_str().unwrap_or("—")),
+            crate::output::text(merchant),
+            outcome.into(),
+            case.failure
+                .as_ref()
+                .map(|f| f.stage.replace('_', " "))
+                .unwrap_or_else(|| "—".into()),
+            case.failure
+                .as_ref()
+                .map(|f| f.reason.replace('_', " "))
+                .unwrap_or_else(|| "—".into()),
+        ]);
+    }
+    let m = &report.metrics;
+    let mut summary = Table::new();
+    summary
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_header(["Metric", "Result"]);
+    if let Some(filter) = &report.purchase_filter {
+        summary.add_row(["Total inputs".into(), filter.total_cases.to_string()]);
+        summary.add_row([
+            "Excluded (non-purchase / unknown / error)".into(),
+            filter.excluded_results.len().to_string(),
+        ]);
+        summary.add_row([
+            "Errors among excluded".into(),
+            filter.excluded_errors.to_string(),
+        ]);
+    }
+    summary.add_row([
+        if report.purchase_filter.is_some() {
+            "Predicted purchases"
+        } else {
+            "Evaluated cases"
+        }
+        .into(),
+        m.cases.to_string(),
+    ]);
+    if let Some(matches) = m.matches {
+        summary.add_row(["Matched".into(), matches.to_string()]);
+        summary.add_row(["Unresolved".into(), m.unresolved.unwrap_or(0).to_string()]);
+        summary.add_row(["Match coverage".into(), percentage(m.match_rate)]);
+    }
+    summary.add_row(["Errors".into(), m.errors.to_string()]);
+    summary.add_row([
+        "Candidate coverage".into(),
+        percentage(m.candidate_coverage),
+    ]);
+    if m.labeled_merchants + m.labeled_unresolved > 0 {
+        summary.add_row(["Accuracy".into(), percentage(m.accuracy)]);
+        summary.add_row(["Match precision".into(), percentage(m.match_precision)]);
+        summary.add_row(["Candidate recall".into(), percentage(m.candidate_recall)]);
+    }
+    let note = if m.unlabeled > 0 {
+        "\nUnlabeled cases measure coverage, not accuracy."
+    } else {
+        ""
+    };
+    let mut funnel = Table::new();
+    funnel.load_style(UTF8_FULL_CONDENSED).set_header([
+        "Matching funnel",
+        "Remaining",
+        "Dropped",
+        "% of evaluated",
+    ]);
+    for step in &m.funnel {
+        funnel.add_row([
+            step.stage.replace('_', " "),
+            step.remaining.to_string(),
+            step.dropped.to_string(),
+            percentage((m.cases > 0).then(|| step.remaining as f64 / m.cases as f64)),
+        ]);
+    }
+    let mut stages = Table::new();
+    stages
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_header(["Stopped at", "Reason", "Cases"]);
+    for (key, count) in &m.failures_by_reason {
+        let (stage, reason) = key.split_once(':').unwrap();
+        stages.add_row([
+            stage.replace('_', " "),
+            reason.replace('_', " "),
+            count.to_string(),
+        ]);
+    }
+    let breakdown = if m.failures_by_reason.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{stages}")
+    };
+    format!("{results}\n\n{summary}\n\n{funnel}{breakdown}{note}")
 }
 
 /// Render retrieval scores separately from the provider's assessment.
@@ -562,3 +660,15 @@ fn render_case(index: usize, result: &eval::CaseResult, mode: Mode) -> Result<St
 #[cfg(test)]
 #[path = "../tests/unit/batch/detail_tests.rs"]
 mod detail_tests;
+
+fn print_purchase_filter(report: &eval::Report) {
+    if let Some(filter) = &report.purchase_filter {
+        eprintln!(
+            "Purchase-only metrics: {} of {} inputs; {} excluded (including {} errors). Excluded evidence is retained in the report.",
+            report.metrics.cases,
+            filter.total_cases,
+            filter.excluded_results.len(),
+            filter.excluded_errors
+        );
+    }
+}

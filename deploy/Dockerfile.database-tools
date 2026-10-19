@@ -1,0 +1,20 @@
+# Add database transfer tools to an existing immutable Ultrafinance image.
+# This preserves its application binaries; use the resulting digest with
+# infra upload-db --resume TRANSFER_ID --image DIGEST, without promoting Lambda.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER root
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates python3 \
+    && curl -fsS https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/postgresql.asc \
+    && echo 'deb [signed-by=/usr/share/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-17 \
+    && rm -rf /var/lib/apt/lists/*
+RUN pg_restore --version \
+    && psql --version \
+    && vacuumdb --version \
+    && python3 --version \
+    && curl --version \
+    && command -v sha256sum

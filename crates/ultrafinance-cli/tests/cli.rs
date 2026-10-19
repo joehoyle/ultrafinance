@@ -2055,3 +2055,73 @@ fn enrich_research_flag_is_opt_in_and_preserved_in_json_input() {
     let batch: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(batch["transactions"][0]["research"], true);
 }
+
+#[test]
+fn infra_upload_db_documents_replacement_and_bounds_all_worker_counts() {
+    let output = run(&["infra", "upload-db", "--help"], None);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("Replace production"));
+    for flag in [
+        "--bucket",
+        "--image",
+        "--postgres-bin",
+        "--dump-jobs",
+        "--restore-jobs",
+        "--transfer-jobs",
+    ] {
+        assert!(help.contains(flag), "missing {flag}");
+    }
+    for flag in ["--dump-jobs", "--restore-jobs", "--transfer-jobs"] {
+        for value in ["0", "129"] {
+            let output = run(&["infra", "upload-db", flag, value], None);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value"));
+        }
+    }
+}
+
+#[test]
+fn infra_upload_db_resume_flags_are_documented_and_cannot_redump() {
+    let output = run(&["infra", "upload-db", "--help"], None);
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--resume"));
+    assert!(help.contains("--check-only"));
+    for args in [
+        vec!["infra", "upload-db", "--check-only"],
+        vec!["infra", "upload-db", "--resume", "a", "--dump-jobs", "4"],
+        vec![
+            "infra",
+            "upload-db",
+            "--resume",
+            "a",
+            "--postgres-bin",
+            "/absent",
+        ],
+    ] {
+        let output = run(&args, None);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    }
+}
+
+#[test]
+fn infra_upload_db_latest_is_documented_and_conflicts_with_explicit_image() {
+    let output = run(&["infra", "upload-db", "--help"], None);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--latest"));
+    let output = run(
+        &[
+            "infra",
+            "upload-db",
+            "--resume",
+            "de99eb69f82046c1ad53ca7129be5a55",
+            "--latest",
+            "--image",
+            "example",
+        ],
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}

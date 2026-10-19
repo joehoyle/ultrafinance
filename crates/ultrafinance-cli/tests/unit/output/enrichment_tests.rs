@@ -70,3 +70,50 @@ fn trading_name_abstention_explains_why_identity_was_not_evaluated() {
         name_answer(&answer, Some(&candidates), Some(0.9)).contains("No trading name selected")
     );
 }
+
+#[test]
+fn detail_stages_separate_kind_name_and_deterministic_identity() {
+    let details = serde_json::json!({
+        "interpretation":{"original":"THAI EXPRESS","hypotheses":[{"merchant_text":"THAI EXPRESS"}]},
+        "threshold":0.75,"model":"fixture","method":"provider","status":"matched",
+        "response":{"merchant":{"status":"matched","data":{"name":"Thai Express"}},"kind":"purchase","location":{"status":"unresolved"}},
+        "provider_choices":[{"merchant":{"name":"Thai Express"},"records":[{"id":"mer_ca","name":"Thai Express","website":"https://thaiexpress.ca","markets":["CA"]}]}],
+        "provider_answer":{"choice":"candidate_0","identity_method":"deterministic","decision_stage":"identity","identity_choices":["candidate_0"],"identity_country":"CA",
+            "name_answer":{"choice":"candidate_0","confidence":0.98,"probabilities":{"candidate_0":0.99,"none":0.01}},
+            "kind":{"choice":"purchase","confidence":0.99,"probabilities":{"purchase":0.99,"unknown":0.01}}},
+        "provider_requests":[{"body":{"secret_marker":"do not render"}}]
+    });
+    let rendered = render_enrichment_details(&details).unwrap();
+    let headings = [
+        "1. Interpret descriptor",
+        "2. Retrieve candidates",
+        "3. Classify transaction kind",
+        "4. Select merchant name",
+        "5. Resolve catalog identity",
+        "6. Fallbacks",
+        "7. Resolve location independently",
+    ];
+    let positions: Vec<_> = headings
+        .iter()
+        .map(|heading| rendered.find(heading).unwrap())
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(rendered.starts_with("Enrichment details: THAI EXPRESS\nMerchant: Thai Express"));
+    assert!(rendered.contains("No second Jev call"));
+    assert_eq!(rendered.matches("mer_ca").count(), 1);
+    assert!(!rendered.contains("secret_marker"));
+    assert!(!rendered.contains("100.0%"));
+}
+
+#[test]
+fn detail_name_failure_still_shows_independent_kind_and_skipped_identity() {
+    let details = serde_json::json!({"threshold":0.75,"provider_answer":{
+        "decision_stage":"name","name_answer":{"choice":"none","probabilities":{"none":1.0}},
+        "kind":{"choice":"purchase","probabilities":{"purchase":0.98}}},
+        "response":{"kind":"purchase","merchant":{"status":"unresolved"},"location":{"status":"unresolved"}}});
+    let rendered = render_enrichment_details(&details).unwrap();
+    assert!(rendered.contains("Outcome: purchase"));
+    assert!(rendered.contains("Skipped: name selection"));
+    assert!(!rendered.contains("Identity selection"));
+    assert!(rendered.contains("no merchant outlet selected"));
+}

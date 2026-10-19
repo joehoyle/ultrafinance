@@ -35,6 +35,7 @@ fn discovery_choices_use_their_own_shortlist_and_null_context_is_omitted() {
         correct: None,
         error: None,
         latency_ms: 1.0,
+        failure: None,
         enrichment: Some(json!({"method":"discovery", "threshold":0.95,
             "candidates":[{"merchant":{"id":"discovered","name":"New Shop"},"score":0.7}],
             "provider_answer":{"choice":"candidate_0", "confidence":0.99, "probabilities":{"candidate_0":0.98}}})),

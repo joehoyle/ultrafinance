@@ -116,7 +116,7 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
         model: String,
-        #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
+        #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.75")]
         threshold: f64,
     },
     /// Prepare repeatable dataset snapshots, development data, and evals.
@@ -277,6 +277,9 @@ enum DatasetSource {
 
 #[derive(Subcommand)]
 enum MerchantCommand {
+    /// Get a stored merchant by ID as JSON, without calling Jev.
+    #[command(alias = "show")]
+    Get { id: String },
     /// Apply the exact ordered merges in an import preview; reject stale plans.
     ApplyDedupePlan { file: PathBuf },
     /// Merge duplicates using name/website rules, then Jev for ambiguous pairs.
@@ -466,7 +469,7 @@ struct EnrichArgs {
     #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
     model: String,
     /// Minimum selected probability; provisional, not measured accuracy.
-    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
+    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.75")]
     threshold: f64,
     /// Validate and print the request without reading a catalog or calling Jev.
     #[arg(long)]
@@ -486,7 +489,7 @@ struct BatchEnrichArgs {
     input: PathBuf,
     #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
     model: String,
-    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.90")]
+    #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.75")]
     threshold: f64,
     #[arg(long)]
     dry_run: bool,
@@ -911,6 +914,7 @@ async fn main() -> Result<()> {
             }
             let file = file.context("eval requires a file or --all")?;
             batch::run_file(batch::FileOptions {
+                purchases_only: false,
                 file,
                 samples,
                 details: false,
@@ -1077,6 +1081,12 @@ async fn main() -> Result<()> {
                             report.errors
                         );
                     }
+                }
+                MerchantCommand::Get { id } => {
+                    let merchant = store
+                        .get(&id)?
+                        .with_context(|| format!("merchant not found: {id}"))?;
+                    println!("{}", serde_json::to_string_pretty(&merchant)?);
                 }
                 MerchantCommand::Stats { json } => {
                     output::merchant_stats(&store.stats()?, json)?;

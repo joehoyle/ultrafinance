@@ -77,3 +77,59 @@ impl Drop for TerminalState {
 #[cfg(all(test, unix))]
 #[path = "../../tests/unit/infra/terminal/tests.rs"]
 mod tests;
+
+/// A grouped child still needs foreground ownership for interactive ECS Exec.
+/// Keep SIGTTOU blocked on this thread while delegated so progress writes and
+/// restoring the original foreground group cannot suspend the launcher.
+pub(super) struct ForegroundGroup {
+    #[cfg(unix)]
+    original: libc::pid_t,
+    #[cfg(unix)]
+    mask: libc::sigset_t,
+}
+
+impl ForegroundGroup {
+    pub(super) fn give_to(group: u32) -> std::io::Result<Option<Self>> {
+        #[cfg(unix)]
+        unsafe {
+            if libc::isatty(libc::STDIN_FILENO) != 1 {
+                return Ok(None);
+            }
+            let original = libc::tcgetpgrp(libc::STDIN_FILENO);
+            if original == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut blocked: libc::sigset_t = std::mem::zeroed();
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut blocked);
+            libc::sigaddset(&mut blocked, libc::SIGTTOU);
+            let error = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut mask);
+            if error != 0 {
+                return Err(std::io::Error::from_raw_os_error(error));
+            }
+            if libc::tcsetpgrp(libc::STDIN_FILENO, group as libc::pid_t) != 0 {
+                let error = std::io::Error::last_os_error();
+                libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                return Err(error);
+            }
+            // The plugin may already have hit SIGTTIN/SIGTTOU before the parent
+            // handed over the terminal. Resume only our new child group.
+            libc::kill(-(group as libc::pid_t), libc::SIGCONT);
+            Ok(Some(Self { original, mask }))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = group;
+            Ok(None)
+        }
+    }
+}
+impl Drop for ForegroundGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::tcsetpgrp(libc::STDIN_FILENO, self.original);
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.mask, std::ptr::null_mut());
+        }
+    }
+}

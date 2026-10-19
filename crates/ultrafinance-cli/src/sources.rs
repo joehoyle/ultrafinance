@@ -13,6 +13,8 @@ use ultrafinance_core::{
     store::MerchantStore,
 };
 
+mod resume;
+
 #[derive(ClapArgs)]
 pub struct Args {
     /// Show detailed per-batch import diagnostics.
@@ -71,7 +73,7 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(long, env = "JEV_MODEL", default_value = "jev-latest")]
         model: String,
-        #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.95")]
+        #[arg(long, env = "ULTRAFINANCE_MATCH_THRESHOLD", default_value = "0.75")]
         threshold: f64,
     },
     /// List the built-in source registry (no database or network required).
@@ -110,9 +112,9 @@ enum Command {
         examples: Option<PathBuf>,
         #[arg(long, default_value = "data/datasets")]
         output: PathBuf,
-        /// Resume a Foursquare import checkpoint directory without the original CSV.
-        #[arg(long, conflicts_with_all = ["input", "examples", "offline", "dry_run", "dedupe_dry_run"])]
-        resume: Option<PathBuf>,
+        /// Resume a Foursquare checkpoint; omit PATH to choose one under --output.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with_all = ["input", "examples", "offline", "dry_run", "dedupe_dry_run"])]
+        resume: Option<Option<PathBuf>>,
         /// Prepare a bundle and report its size without changing the database.
         #[arg(long)]
         dry_run: bool,
@@ -811,6 +813,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 );
             }
             batch::run_file(batch::FileOptions {
+                purchases_only: matches!(r.source, Source::LunchMoney),
                 file: path.join("holdout.jsonl"),
                 samples: true,
                 details,
@@ -936,6 +939,10 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 if !matches!(r.source, Source::Foursquare) {
                     bail!("--resume is supported only for Foursquare imports");
                 }
+                let checkpoint = match checkpoint {
+                    Some(path) => path,
+                    None => resume::choose(&output, &region, merchants_only)?,
+                };
                 let report = datasets::resume_foursquare_import(
                     checkpoint,
                     region,

@@ -43,6 +43,7 @@ output "cli_runner" {
     cluster         = aws_ecs_cluster.cli[0].arn
     task_definition = aws_ecs_task_definition.cli[0].arn
     database_secret = aws_rds_cluster.database[0].master_user_secret[0].secret_arn
+    upload_bucket   = aws_s3_bucket.database_transfer[0].id
     subnets         = aws_subnet.database[*].id
     security_groups = [aws_security_group.database_client[0].id]
     log_group       = aws_cloudwatch_log_group.cli[0].name

@@ -70,10 +70,76 @@ pub struct CaseResult {
     /// In-memory enrichment evidence, including Jev answers and discovery shortlists.
     pub enrichment: Option<serde_json::Value>,
     pub latency_ms: f64,
+    pub failure: Option<MatchFailure>,
+}
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MatchFailure {
+    pub stage: &'static str,
+    pub reason: &'static str,
+}
+impl CaseResult {
+    fn matching_failure(&self, mode: Mode) -> Option<MatchFailure> {
+        let fail = |stage, reason| Some(MatchFailure { stage, reason });
+        if self.error.is_some() {
+            return fail("enrichment", "execution_error");
+        }
+        if self.predicted_id.is_some() {
+            return None;
+        }
+        if self.candidate_ids.is_empty() {
+            return fail("retrieval", "no_candidates");
+        }
+        if mode == Mode::Search {
+            return None;
+        }
+        let detail = self.enrichment.as_ref().unwrap_or(&serde_json::Value::Null);
+        let answer = &detail["provider_answer"];
+        let stage = match answer["decision_stage"].as_str() {
+            Some("name") => "name_recognition",
+            Some("identity") => "identity_resolution",
+            _ => "merchant_selection",
+        };
+        let Some(choice) = answer["choice"].as_str() else {
+            return fail("unclassified", "insufficient_trace");
+        };
+        if choice == "none" {
+            return fail(stage, "no_match_selected");
+        }
+        if let (Some(probability), Some(threshold)) = (
+            answer["probabilities"][choice].as_f64(),
+            detail["threshold"].as_f64(),
+        ) {
+            if probability < threshold {
+                return fail(stage, "below_threshold");
+            }
+        } else {
+            return fail("unclassified", "insufficient_trace");
+        }
+        if answer["catalog_resolution"] == "ambiguous" {
+            return fail("identity_resolution", "ambiguous_catalog_records");
+        }
+        // A matched financial counterparty is not a matched merchant.
+        if detail["response"]["counterparties"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            return fail("merchant_selection", "non_merchant_counterparty");
+        }
+        fail("unclassified", "insufficient_trace")
+    }
+}
+#[derive(Debug, Serialize)]
+pub struct FunnelStep {
+    pub stage: &'static str,
+    pub remaining: usize,
+    pub dropped: usize,
 }
 #[derive(Debug, Serialize)]
 pub struct Metrics {
     pub cases: usize,
+    pub funnel: Vec<FunnelStep>,
+    pub failures_by_stage: std::collections::BTreeMap<String, usize>,
+    pub failures_by_reason: std::collections::BTreeMap<String, usize>,
     pub labeled_merchants: usize,
     pub labeled_unresolved: usize,
     pub unlabeled: usize,
@@ -110,6 +176,44 @@ pub struct Report {
     pub threshold: Option<f64>,
     pub metrics: Metrics,
     pub results: Vec<CaseResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purchase_filter: Option<PurchaseFilter>,
+}
+#[derive(Debug, Serialize)]
+pub struct PurchaseFilter {
+    pub basis: &'static str,
+    pub total_cases: usize,
+    pub excluded_errors: usize,
+    pub excluded_results: Vec<CaseResult>,
+}
+impl Report {
+    /// Restrict metrics to predicted purchases, retaining all excluded evidence.
+    pub fn purchases_only(&mut self) {
+        if self.mode != Mode::Enrich || self.purchase_filter.is_some() {
+            return;
+        }
+        let total_cases = self.results.len();
+        let (included, excluded): (Vec<_>, Vec<_>) = std::mem::take(&mut self.results)
+            .into_iter()
+            .partition(|result| {
+                result.error.is_none()
+                    && result
+                        .enrichment
+                        .as_ref()
+                        .is_some_and(|detail| detail["response"]["kind"] == "purchase")
+            });
+        self.metrics = summarize(&included, self.mode);
+        self.results = included;
+        self.purchase_filter = Some(PurchaseFilter {
+            basis: "predicted_kind_purchase",
+            total_cases,
+            excluded_errors: excluded
+                .iter()
+                .filter(|result| result.error.is_some())
+                .count(),
+            excluded_results: excluded,
+        });
+    }
 }
 
 // Stable snapshot identifier, not a cryptographic integrity check.
@@ -245,6 +349,7 @@ pub async fn run_with_progress(
                 matched: None,
                 correct: None,
                 error: None,
+                failure: None,
                 enrichment: None,
                 latency_ms: if enricher.is_none() {
                     started.elapsed().as_secs_f64() * 1000.0
@@ -287,6 +392,7 @@ pub async fn run_with_progress(
             if enricher.is_some() {
                 result.latency_ms = started.elapsed().as_secs_f64() * 1000.0;
             }
+            result.failure = result.matching_failure(mode);
             results.push(result);
             if let Some(progress) = progress {
                 progress.store(results.len(), std::sync::atomic::Ordering::Relaxed);
@@ -327,6 +433,7 @@ pub async fn run_with_progress(
         threshold: (mode == Mode::Enrich).then_some(threshold),
         metrics,
         results,
+        purchase_filter: None,
     })
 }
 fn ratio(n: usize, d: usize) -> Option<f64> {
@@ -359,7 +466,76 @@ pub fn summarize(results: &[CaseResult], mode: Mode) -> Metrics {
     let mut latencies: Vec<_> = results.iter().map(|r| r.latency_ms).collect();
     latencies.sort_by(f64::total_cmp);
     let enrich = mode == Mode::Enrich;
+    let mut failures_by_stage = std::collections::BTreeMap::new();
+    let mut failures_by_reason = std::collections::BTreeMap::new();
+    for result in results {
+        if let Some(failure) = result.matching_failure(mode) {
+            *failures_by_stage
+                .entry(failure.stage.to_owned())
+                .or_insert(0) += 1;
+            *failures_by_reason
+                .entry(format!("{}:{}", failure.stage, failure.reason))
+                .or_insert(0) += 1;
+        }
+    }
+    let retrieved = results
+        .iter()
+        .filter(|r| !r.candidate_ids.is_empty() || r.predicted_id.is_some())
+        .count();
+    let accepted = results
+        .iter()
+        .filter(|r| {
+            if r.predicted_id.is_some() {
+                return true;
+            }
+            if r.candidate_ids.is_empty() {
+                return false;
+            }
+            let detail = r.enrichment.as_ref().unwrap_or(&serde_json::Value::Null);
+            let final_answer = &detail["provider_answer"];
+            let answer = final_answer
+                .get("name_answer")
+                .filter(|answer| answer.is_object())
+                .unwrap_or(final_answer);
+            answer["choice"]
+                .as_str()
+                .filter(|choice| choice.starts_with("candidate_"))
+                .is_some_and(|choice| {
+                    answer["probabilities"][choice]
+                        .as_f64()
+                        .zip(detail["threshold"].as_f64())
+                        .is_some_and(|(probability, threshold)| probability >= threshold)
+                })
+        })
+        .count();
+    let mut funnel = vec![
+        FunnelStep {
+            stage: "evaluated",
+            remaining: results.len(),
+            dropped: 0,
+        },
+        FunnelStep {
+            stage: "candidates_found",
+            remaining: retrieved,
+            dropped: results.len() - retrieved,
+        },
+    ];
+    if enrich {
+        funnel.push(FunnelStep {
+            stage: "name_or_selection_accepted",
+            remaining: accepted,
+            dropped: retrieved - accepted,
+        });
+        funnel.push(FunnelStep {
+            stage: "merchant_resolved",
+            remaining: matches,
+            dropped: accepted - matches,
+        });
+    }
     Metrics {
+        funnel,
+        failures_by_stage,
+        failures_by_reason,
         cases: results.len(),
         labeled_merchants: known,
         labeled_unresolved,
@@ -414,8 +590,11 @@ pub fn summarize(results: &[CaseResult], mode: Mode) -> Metrics {
             .flatten(),
         merchant_recall: enrich.then(|| ratio(correct_matches, known)).flatten(),
         match_rate: enrich.then(|| ratio(matches, results.len())).flatten(),
-        median_latency_ms: latencies[latencies.len() / 2],
-        p95_latency_ms: latencies[(latencies.len() * 95).div_ceil(100).saturating_sub(1)],
+        median_latency_ms: latencies.get(latencies.len() / 2).copied().unwrap_or(0.0),
+        p95_latency_ms: latencies
+            .get((latencies.len() * 95).div_ceil(100).saturating_sub(1))
+            .copied()
+            .unwrap_or(0.0),
     }
 }
 

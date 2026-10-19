@@ -299,3 +299,136 @@ already permits SSM channels. No infrastructure change or application release is
 needed. A temporary ECS task provides the tunnel to private Aurora. Production
 is only read; the local restore strips ownership/grants and uses one transaction.
 Temporary dumps, the tunnel, and the ECS task are cleaned up when the command ends.
+
+## Upload the local database to production
+
+Run from an interactive terminal with PostgreSQL **17** `pg_dump` and `psql`,
+AWS CLI, and the Session Manager plugin on PATH:
+
+```sh
+cargo run --release -- infra upload-db
+# Optional worker overrides or an existing private transfer bucket:
+cargo run --release -- infra upload-db --dump-jobs 12 --restore-jobs 16 --transfer-jobs 24
+cargo run --release -- infra upload-db --bucket YOUR_PRIVATE_TRANSFER_BUCKET
+```
+
+**This replaces all production data with the local snapshot and deletes the old
+production database after cutover.** Production writes made after the local
+snapshot are not merged. Schedule a maintenance window if those writes matter.
+There is no interactive confirmation and no retained database backup.
+
+Fresh uploads always read `127.0.0.1:55432/ultrafinance`, ignoring application
+URL overrides. The command uses the configured AWS profile/region and defaults
+to the live image. The snapshot must match the selected application image; the
+existing production schema may be older. The restored staging database is checked
+before cutover. The image must include PostgreSQL 17 clients; `--image IMMUTABLE_ECR_DIGEST`
+can select a compatible published image without promoting it to Lambda.
+Use `--latest` to select the highest numbered published Lambda version, including
+one awaiting database migration before promotion. It ignores mutable `$LATEST`,
+works for fresh uploads and resumes, and cannot be combined with `--image`:
+
+```sh
+cargo run -- infra upload-db --resume TRANSFER_ID --latest
+```
+
+The operator needs `lambda:ListVersionsByFunction` for this selection.
+The command finds a matching PostgreSQL 17 `pg_dump`/`psql` pair on PATH,
+in Homebrew's versioned `libpq@17`/`postgresql@17` bin directories, or in
+`/usr/lib/postgresql/17/bin`. On macOS, install client tools with
+`brew install libpq@17`; no server or global relinking is needed. Use
+`--postgres-bin PATH` to select a different installation explicitly. Allow disk space for a compressed copy of the local database
+(`TMPDIR` selects the temporary directory).
+
+A directory-format dump uses a consistent PostgreSQL snapshot, local CPU-count
+workers and Zstandard level 1 compression when supported by the local client.
+A schema-only probe automatically selects fast gzip level 1 when Zstandard is
+unavailable, or no compression when neither codec is built in. Other probe
+failures stop the upload with a sanitized reason. While dumping, a live terminal
+line shows elapsed time, archive size, average compressed output rate and
+completed table-data items. Dump size has no known compressed total, so it does
+not claim a percentage. Checksumming and S3 upload have concurrent byte bars;
+upload progress includes individual multipart files, with aggregate percentage,
+rate, elapsed time and estimated time remaining. A file counts fully uploaded
+only after AWS CLI reports success. Downloads have a verified-byte bar and
+restore has a completed-archive-object bar. Restore objects vary greatly in
+size, so its percentage and ETA do not estimate remaining database work. Analyze,
+validation, cutover and cleanup show activity spinners with elapsed time.
+Redirected output emits status lines every 15 seconds without terminal escapes.
+Up to 16 archive files upload
+concurrently by default; each uses AWS CLI's multipart transfer support when
+appropriate. An on-demand Fargate task downloads them to `/scratch`, verifies
+SHA-256 checksums, then restores into a fresh temporary database. Restore workers
+default to twice the task's CPU count (normally 16), capped at 32 and database
+connection headroom with 16 connections reserved. Explicit `--restore-jobs` is
+also checked against current headroom. These are throughput-oriented defaults,
+not a measured optimum: `pg_dump`/`pg_restore` parallelize across tables and
+indexes, not chunks of a single large table. Workers are configurable up to 128.
+
+The task restores tables before indexes/constraints, preserves the existing
+production database/object/column/default grants and database role settings,
+runs parallel ANALYZE and checks compatibility using the selected image's CLI.
+Production remains available during preparation. Cutover briefly blocks new
+connections, terminates existing connections, transactionally swaps the database
+names, then deletes the old database. Permissions for objects absent from the
+local snapshot fail validation before cutover. The current implementation
+requires a libc-locale production database; ICU/builtin locale databases are
+rejected before creation. Local object ownership is intentionally not copied.
+
+Infrastructure in `database-transfer.tf` provides a private encrypted S3 bucket,
+one-day archive expiration and incomplete-multipart cleanup, plus a free S3
+Gateway endpoint on the private route table. Apply these infrastructure changes
+with `./infra/tofu.sh apply` when setting this feature up. Normal uploads do not
+run OpenTofu apply. No task-role S3 permissions are needed: downloads use signed
+URLs from the operator profile, valid for at most 24 hours or until those AWS
+credentials expire. The task still has its existing configured lifetime.
+
+The operator needs the usual CLI launch permissions plus `sts:GetCallerIdentity`,
+`s3:GetBucketLocation`, `s3:GetBucketPublicAccessBlock`, `s3:GetBucketVersioning`,
+`s3:ListBucket`, and `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`,
+`s3:AbortMultipartUpload` for the transfer prefix. A custom bucket must be in the
+configured region, enable all four Block Public Access settings, allow AES256
+encryption and have versioning disabled (or suspended). Successful runs and failures before a complete manifest attempt removal of only
+their own random `ultrafinance-upload/UUID/` prefix;
+a cleanup failure prints that prefix. Never use the public logo delivery path
+for database archives.
+
+Once all archive files are uploaded, the command saves a checksum/size manifest
+and prints a resume ID. Later failures retain those S3 objects until the bucket's
+one-day expiry. Resume skips all local database access, dumping and archive
+upload, validates object sizes, refreshes signed URLs and starts a fresh task:
+
+```sh
+cargo run --release -- infra upload-db --resume TRANSFER_ID --check-only
+cargo run --release -- infra upload-db --resume TRANSFER_ID
+```
+
+`--check-only` validates S3 objects without launching a task. Resume also reads
+manifest data from older `upload.sh` objects without executing that saved script.
+A fresh script and staging database name are generated for each attempt. Stop
+the original uploader before resuming to avoid overlapping restores. Older
+binaries delete their prefix when cancelled: make an independent server-side S3
+copy before cancelling an old run. Successful resume deletes its transfer prefix;
+failed resume retains it. Partial archive uploads still need a fresh dump/upload.
+The resume ID is the S3 transfer ID, distinct from the Fargate session ID.
+
+An interrupted upload is not automatically retried or rolled back. Before
+cutover, failures discard the temporary database and leave production intact.
+A disconnection during cutover has an uncertain outcome: inspect production
+and the `uf_upload_UUID` / `uf_old_UUID` names reported in the error before
+retrying. Error handling attempts to re-enable connections to the production
+name, but abrupt task termination can prevent cleanup. If necessary, connect
+to `postgres` as the administrator and run `ALTER DATABASE ultrafinance
+ALLOW_CONNECTIONS true;`. A failure to delete the old database after a successful
+switch leaves it disconnected and requires explicit administrator cleanup.
+Diagnostics remain private on task scratch; only fixed stage names are printed.
+
+Local verification (no AWS calls):
+
+```sh
+cargo test --locked -p ultrafinance-cli infra
+bash crates/ultrafinance-cli/tests/unit/infra/upload_db/integration.sh
+```
+
+The latter creates and deletes its own PostgreSQL 17 Docker container and checks
+checksum failures, failed validation/cutover, permission preservation, identity
+sequences, active-session termination and successful replacement.

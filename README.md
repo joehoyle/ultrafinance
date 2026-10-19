@@ -933,7 +933,7 @@ or future training; this importer does not train a model.
 | `ULTRAFINANCE_REQUIRE_POSTGRES` | unset locally; `true` in Docker | Refuse API startup without PostgreSQL |
 | `TYPESAFE_API_KEY` | unset | Jev credential |
 | `JEV_MODEL` | `jev-latest` | Jev model |
-| `ULTRAFINANCE_MATCH_THRESHOLD` | `0.90` | Minimum selected probability for merchant and kind enrichment |
+| `ULTRAFINANCE_MATCH_THRESHOLD` | `0.75` | Minimum selected probability for merchant and kind enrichment |
 | `OPENAI_API_KEY` | unset | OpenAI credential for the separate `research` CLI |
 | `ULTRAFINANCE_RESEARCH_MODEL` | `gpt-6.1-sol` | Model for merchant research with web search |
 
@@ -947,6 +947,13 @@ The database can contain more than 254 merchants; Jev receives at most 254
 candidates, reserving its final choice for insufficient evidence.
 
 ## PostgreSQL and production imports
+
+To replace production with the full local PostgreSQL snapshot, run
+`cargo run --release -- infra upload-db`. It uses parallel dump, S3 transfers,
+restore and ANALYZE inside AWS, verifies the replacement before switching, and
+deletes the old production database. See [upload prerequisites, worker controls
+and failure recovery](infra/README.md#upload-the-local-database-to-production).
+This command overwrites production; it does not merge records.
 
 Set `ULTRAFINANCE_DATABASE_URL` securely in your environment. Production URLs
 should require TLS (`sslmode=require`) and use the provider's trusted certificate.
@@ -1581,7 +1588,21 @@ Account identifiers, notes and arbitrary metadata are excluded. Currency does no
 imply a transaction country. Existing description-based holdout membership remains
 unchanged. The source
 imports no merchant knowledge; evaluation reports matches/coverage, not accuracy.
+Lunch Money enrichment evals (including `eval --all`) report metrics only for
+transactions whose predicted kind is `purchase`. All inputs are still enriched;
+`purchase_filter` in the report retains excluded results and their error count.
+Unknown kinds are excluded, and an empty purchase cohort has no match rate.
+Search-only evals remain unfiltered because they do not classify transaction kind.
+Reports include a matching funnel (evaluated → candidates found → name or selection
+accepted → merchant resolved) and counts by stopping stage and reason. The funnel
+uses the evaluated cohort, so Lunch Money enrichment funnels contain purchases only.
+Single-stage decisions combine name and identity selection; errors without precise
+stage evidence are reported as enrichment errors rather than attributed to a guessed
+stage. These diagnostics describe observed stopping points, not verified accuracy.
 
+Single-suite evaluations print a transaction table (description, predicted kind,
+merchant, outcome, stopping stage and reason) and a summary table, including purchase exclusions where
+applicable. Tables go to stderr so JSON stdout and saved reports remain usable.
 Evaluation `--details` prints each description above a candidate table with
 separate search similarity and Jev probability columns. Enrich mode also shows
 Jev's choice, confidence and the match threshold, including why a choice was

@@ -54,7 +54,7 @@ variable "jev_model" {
 }
 variable "match_threshold" {
   type    = number
-  default = 0.90
+  default = 0.75
   validation {
     condition     = var.match_threshold >= 0 && var.match_threshold <= 1
     error_message = "Match threshold must be between 0 and 1."

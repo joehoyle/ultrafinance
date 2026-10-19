@@ -74,3 +74,65 @@ fn redirected_output_is_not_polluted_with_terminal_escape_codes() {
     ));
     assert!(std::fs::read(path).unwrap().is_empty());
 }
+
+#[test]
+fn grouped_interactive_child_can_use_a_controlling_terminal() {
+    let script = r#"
+import fcntl,os,pty,subprocess,sys,termios
+master,slave=pty.openpty()
+def setup():
+    os.setsid()
+    fcntl.ioctl(0,termios.TIOCSCTTY,0)
+    os.tcsetpgrp(0,os.getpgrp())
+process=subprocess.Popen([sys.argv[1],'--exact','infra::terminal::tests::foreground_group_helper','--ignored','--nocapture'],stdin=slave,stdout=subprocess.PIPE,stderr=subprocess.PIPE,preexec_fn=setup)
+try:
+    out,err=process.communicate(timeout=10)
+except subprocess.TimeoutExpired:
+    process.kill()
+    process.communicate()
+    raise
+finally:
+    os.close(master)
+    os.close(slave)
+sys.stdout.buffer.write(out)
+sys.stderr.buffer.write(err)
+sys.exit(process.returncode)
+"#;
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .arg(std::env::current_exe().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "invoked by grouped_interactive_child_can_use_a_controlling_terminal in an isolated PTY"]
+fn foreground_group_helper() {
+    let original = unsafe { libc::tcgetpgrp(0) };
+    assert_eq!(original, unsafe { libc::getpgrp() });
+    let mut process = super::super::import_db::spawn(
+        std::process::Command::new("python3").args(["-c", "import os,tty; tty.setraw(0); assert os.tcgetpgrp(0)==os.getpgrp(); print('foreground-ok')"])
+            .stdout(std::process::Stdio::piped()),
+    ).unwrap();
+    {
+        let _terminal = TerminalState::capture();
+        let _foreground = ForegroundGroup::give_to(process.0.id()).unwrap().unwrap();
+        let mut output = String::new();
+        process
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        assert!(process.0.wait().unwrap().success());
+        assert!(output.contains("foreground-ok"));
+    }
+    assert_eq!(unsafe { libc::tcgetpgrp(0) }, original);
+}

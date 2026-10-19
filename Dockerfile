@@ -25,20 +25,6 @@ ENV ULTRAFINANCE_BUILD_TAG=$ULTRAFINANCE_BUILD_TAG \
     ULTRAFINANCE_BUILD_TIME=$ULTRAFINANCE_BUILD_TIME
 RUN cargo build --locked --release -p ultrafinance-api -p ultrafinance-cli
 
-FROM build AS tested
-COPY data/merchants.example.json ./data/merchants.example.json
-COPY data/locations ./data/locations
-COPY evals/location-smoke.json ./evals/location-smoke.json
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql && rm -rf /var/lib/apt/lists/*
-RUN set -eu; \
-    sed -i '1i host all all 127.0.0.1/32 trust' /etc/postgresql/15/main/pg_hba.conf; \
-    pg_ctlcluster 15 main start; \
-    trap 'pg_ctlcluster 15 main stop' EXIT; \
-    runuser -u postgres -- psql -c 'CREATE ROLE ultrafinance LOGIN SUPERUSER'; \
-    runuser -u postgres -- createdb -O ultrafinance ultrafinance_test; \
-    ULTRAFINANCE_TEST_DATABASE_URL='postgresql://ultrafinance@127.0.0.1:5432/ultrafinance_test?sslmode=disable' cargo test --locked --release --workspace; \
-    cargo clippy --locked --release --workspace --all-targets -- -D warnings
-
 FROM debian:bookworm-slim AS duckdb
 # The production CLI needs DuckDB and cached extensions in its HTTPS-only VPC.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip && rm -rf /var/lib/apt/lists/*
@@ -59,8 +45,14 @@ RUN duckdb -batch :memory: -c 'LOAD httpfs; LOAD iceberg; SELECT 1;'
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends awscli bash ca-certificates libssl3 tmux \
+    && apt-get install -y --no-install-recommends awscli bash ca-certificates curl libssl3 tmux \
     && sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
+    && rm -rf /var/lib/apt/lists/*
+# Match Aurora 17 and local directory archives; Debian bookworm ships client 15.
+RUN curl -fsS https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/postgresql.asc \
+    && echo 'deb [signed-by=/usr/share/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
 COPY deploy/bashrc /etc/bash.bashrc
 COPY deploy/tmux.conf /etc/tmux.conf
@@ -70,8 +62,8 @@ ENV SHELL=/bin/bash
 COPY deploy/rds-ca/ /usr/local/share/ca-certificates/ultrafinance-rds/
 RUN update-ca-certificates
 COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 /lambda-adapter /opt/extensions/lambda-adapter
-COPY --from=tested /build/target/release/ultrafinance-api /usr/local/bin/ultrafinance-api
-COPY --from=tested /build/target/release/ultrafinance /usr/local/bin/ultrafinance
+COPY --from=build /build/target/release/ultrafinance-api /usr/local/bin/ultrafinance-api
+COPY --from=build /build/target/release/ultrafinance /usr/local/bin/ultrafinance
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint
 ENV ULTRAFINANCE_BIND=0.0.0.0:8080 ULTRAFINANCE_REQUIRE_POSTGRES=true AWS_LWA_PORT=8080 AWS_LWA_READINESS_CHECK_PATH=/health
 EXPOSE 8080

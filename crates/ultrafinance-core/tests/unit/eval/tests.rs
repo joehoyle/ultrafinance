@@ -132,6 +132,7 @@ async fn unlabeled_outcomes_measure_coverage_without_claiming_accuracy() {
             matched: Some(false),
             correct: Some(true),
             error: None,
+            failure: None,
             enrichment: None,
             latency_ms: 1.0,
         },
@@ -149,6 +150,7 @@ async fn unlabeled_outcomes_measure_coverage_without_claiming_accuracy() {
             matched: Some(true),
             correct: None,
             error: None,
+            failure: None,
             enrichment: None,
             latency_ms: 1.0,
         },
@@ -182,6 +184,7 @@ fn missing_labels_are_rejected_and_wrong_matches_are_penalized() {
         matched: Some(true),
         correct: Some(false),
         error: None,
+        failure: None,
         enrichment: None,
         latency_ms: 1.0,
     };
@@ -190,4 +193,129 @@ fn missing_labels_are_rejected_and_wrong_matches_are_penalized() {
     assert_eq!(metrics.accuracy, Some(0.0));
     assert_eq!(metrics.match_precision, Some(0.0));
     assert_eq!(metrics.merchant_recall, None);
+}
+
+#[tokio::test]
+async fn purchase_filter_keeps_unresolved_purchases_and_audits_exclusions() {
+    let cases = serde_json::json!({"version":1,"name":"purchase-filter","cases":
+        (0..6).map(|i| serde_json::json!({"id":i.to_string(),"request":{"description":"fixture"},"expected":{"status":"unlabeled"}})).collect::<Vec<_>>()});
+    let mut report = run(
+        &cases.to_string(),
+        MerchantStore::temporary().unwrap(),
+        Mode::Search,
+        None,
+        "test".into(),
+        0.75,
+    )
+    .await
+    .unwrap();
+    report.purchases_only();
+    assert_eq!(report.results.len(), 6);
+    assert!(report.purchase_filter.is_none());
+    report.mode = Mode::Enrich;
+    for (result, kind) in report.results.iter_mut().zip([
+        "purchase", "purchase", "transfer", "unknown", "purchase", "",
+    ]) {
+        result.enrichment = Some(serde_json::json!({"response":{"kind":kind}}));
+        result.matched = Some(false);
+    }
+    report.results[0].predicted_id = Some("merchant".into());
+    report.results[0].matched = Some(true);
+    report.results[4].error = Some("provider failure".into());
+    report.purchases_only();
+    assert_eq!(report.metrics.cases, 2);
+    assert_eq!(report.metrics.matches, Some(1));
+    assert_eq!(report.metrics.unresolved, Some(1));
+    assert_eq!(report.metrics.match_rate, Some(0.5));
+    let filter = report.purchase_filter.as_ref().unwrap();
+    assert_eq!(filter.total_cases, 6);
+    assert_eq!(filter.excluded_results.len(), 4);
+    assert_eq!(filter.excluded_errors, 1);
+    report.purchases_only();
+    assert_eq!(report.purchase_filter.as_ref().unwrap().total_cases, 6);
+    report.purchase_filter = None;
+    for result in &mut report.results {
+        result.enrichment = None;
+    }
+    report.purchases_only();
+    assert_eq!(report.metrics.cases, 0);
+    assert_eq!(report.metrics.match_rate, None);
+}
+
+#[test]
+fn matching_stages_and_funnel_distinguish_selection_from_identity() {
+    let case = |stage: &str, choice: &str, probability: f64, ambiguous: bool| CaseResult {
+        id: "fixture".into(),
+        description: "Fixture".into(),
+        request: serde_json::from_value(serde_json::json!({"description":"Fixture"})).unwrap(),
+        candidates: vec![],
+        search_trace: Default::default(),
+        expected: Expected::Unlabeled,
+        expected_local_id: None,
+        candidate_ids: vec!["a".into()],
+        expected_rank: None,
+        predicted_id: None,
+        matched: Some(false),
+        correct: None,
+        error: None,
+        failure: None,
+        enrichment: Some(serde_json::json!({"threshold":0.75,"provider_answer":{
+            "decision_stage":stage,"choice":choice,"probabilities":{choice:probability},
+            "catalog_resolution":if ambiguous {"ambiguous"} else {"resolved"}
+        }})),
+        latency_ms: 0.0,
+    };
+    let mut retrieval = case("name", "none", 1.0, false);
+    retrieval.candidate_ids.clear();
+    let low = case("name", "candidate_0", 0.74, false);
+    let mut identity = case("identity", "none", 0.8, false);
+    identity.enrichment.as_mut().unwrap()["provider_answer"]["name_answer"] =
+        serde_json::json!({"choice":"candidate_0","probabilities":{"candidate_0":0.9}});
+    let ambiguous = case("", "candidate_0", 0.9, true);
+    let mut matched = case("identity", "candidate_0", 0.9, false);
+    matched.predicted_id = Some("a".into());
+    let mut error = case("", "none", 1.0, false);
+    error.error = Some("provider failed".into());
+    let cases = [retrieval, low, identity, ambiguous, matched, error];
+    assert_eq!(
+        cases[0].matching_failure(Mode::Enrich).unwrap().reason,
+        "no_candidates"
+    );
+    assert_eq!(
+        cases[1].matching_failure(Mode::Enrich).unwrap().reason,
+        "below_threshold"
+    );
+    assert_eq!(
+        cases[2].matching_failure(Mode::Enrich).unwrap().stage,
+        "identity_resolution"
+    );
+    assert_eq!(
+        cases[3].matching_failure(Mode::Enrich).unwrap().reason,
+        "ambiguous_catalog_records"
+    );
+    assert!(cases[4].matching_failure(Mode::Enrich).is_none());
+    assert_eq!(
+        cases[5].matching_failure(Mode::Enrich).unwrap().stage,
+        "enrichment"
+    );
+    let metrics = summarize(&cases, Mode::Enrich);
+    assert_eq!(
+        metrics
+            .funnel
+            .iter()
+            .map(|step| step.remaining)
+            .collect::<Vec<_>>(),
+        vec![6, 5, 3, 1]
+    );
+    assert_eq!(
+        metrics
+            .funnel
+            .iter()
+            .map(|step| step.dropped)
+            .sum::<usize>(),
+        5
+    );
+    assert_eq!(metrics.failures_by_stage.values().sum::<usize>(), 5);
+    assert_eq!(metrics.failures_by_stage["identity_resolution"], 2);
+    assert_eq!(summarize(&cases, Mode::Search).funnel.len(), 2);
 }

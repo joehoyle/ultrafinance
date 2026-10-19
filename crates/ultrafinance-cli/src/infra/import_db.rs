@@ -13,7 +13,7 @@ use std::{
 use ultrafinance_core::store::LOCAL_DATABASE_URL;
 
 // A separate process group also includes the Session Manager plugin started by AWS CLI.
-struct Process(Child);
+pub(super) struct Process(pub(super) Child);
 impl Drop for Process {
     fn drop(&mut self) {
         #[cfg(unix)]
@@ -25,7 +25,7 @@ impl Drop for Process {
     }
 }
 
-fn spawn(command: &mut Command) -> Result<Process> {
+pub(super) fn spawn(command: &mut Command) -> Result<Process> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -43,7 +43,7 @@ fn spawn(command: &mut Command) -> Result<Process> {
     ))
 }
 
-fn checked(command: &mut Command, interrupts: &Interrupts, label: &str) -> Result<()> {
+pub(super) fn checked(command: &mut Command, interrupts: &Interrupts, label: &str) -> Result<()> {
     // Database diagnostics can contain data or connection details; do not echo them.
     let mut child = spawn(command.stdout(Stdio::null()).stderr(Stdio::null()))?;
     loop {
@@ -60,7 +60,7 @@ fn checked(command: &mut Command, interrupts: &Interrupts, label: &str) -> Resul
     }
 }
 
-fn local_command(program: &str) -> Command {
+pub(super) fn local_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
     command
         .args(["--no-password", "--dbname", LOCAL_DATABASE_URL])

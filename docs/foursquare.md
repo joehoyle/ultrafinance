@@ -243,6 +243,19 @@ with `--input`, `--offline`, `--examples`, or either dry-run mode; consumed rows
 are not available for a fresh preview. Use the normal input-based command for
 new snapshots or full refreshes.
 
+Omit the path to choose an interrupted import interactively:
+
+```sh
+cargo run --release -- sources import foursquare --resume
+```
+
+Use the arrow keys to move, type to filter, Enter to resume, or Esc to cancel.
+The picker searches `--output` (default `data/datasets`) and lists saved row counts
+for unfinished imports matching `--region` and the `--merchants-only` setting.
+Initial loads and previews are excluded. Use `--resume PATH` in scripts without
+a terminal. The selected checkpoint still undergoes normal database and version
+validation before the import resumes.
+
 File metadata identifies the input; completed sorting and application are reused. The
 cursor advances only after a chunk commits. If the commit succeeds but saving
 the cursor fails, the next run replays that chunk through delta reconciliation.

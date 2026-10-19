@@ -28,6 +28,7 @@ scraper = "0.24"
 resvg = { version = "0.48.1", default-features = false }
 calamine = { version = "0.35", default-features = false }
 zip = { version = "7", default-features = false, features = ["deflate"] }
+inquire = { version = "0.9.4", default-features = false, features = ["crossterm", "fuzzy"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

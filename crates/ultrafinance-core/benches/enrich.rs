@@ -24,7 +24,7 @@ fn measure_jev(
         .context("set TYPESAFE_API_KEY to run --jev")?;
     let model = std::env::var("JEV_MODEL").unwrap_or_else(|_| "jev-latest".into());
     let threshold = std::env::var("ULTRAFINANCE_MATCH_THRESHOLD")
-        .unwrap_or_else(|_| "0.90".into())
+        .unwrap_or_else(|_| "0.75".into())
         .parse()
         .context("invalid match threshold")?;
     let enricher = Enricher::with_store(Some(key), model, threshold, store)?;

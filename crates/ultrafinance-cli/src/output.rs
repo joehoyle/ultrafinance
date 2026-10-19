@@ -338,285 +338,311 @@ fn name_answer(
 }
 
 pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
-    let mut rendered = String::from("1. Interpret descriptor\n");
-    let interpretation = &details["interpretation"];
-    if let Some(processor) = interpretation["processor_hint"].as_str() {
-        rendered.push_str(&format!("   Processor: {}\n", text(processor)));
-    }
-    if let Some(tokens) = interpretation["unverified_tokens"].as_array()
-        && !tokens.is_empty()
-    {
-        rendered.push_str(&format!(
-            "   Unverified metadata: {}\n",
-            serde_json::to_string(tokens)?
-        ));
-    }
-    if let Some(hypotheses) = interpretation["hypotheses"].as_array() {
-        for hypothesis in hypotheses {
-            rendered.push_str(&format!(
-                "   Name: {}",
-                text(hypothesis["merchant_text"].as_str().unwrap_or(""))
-            ));
-            if let Some(location) = hypothesis["possible_location"].as_str() {
-                let validated = if hypothesis.get("location_hint").is_some() {
-                    "validated place clue"
-                } else {
-                    "unvalidated text guess"
-                };
-                rendered.push_str(&format!(" · location: {} ({validated})", text(location)));
-            }
-            rendered.push('\n');
-            if let Some(hint) = hypothesis.get("location_hint") {
-                rendered.push_str(&format!("      Hint: {hint}"));
-                if let Some(ids) = hypothesis.get("geoname_ids") {
-                    rendered.push_str(&format!(" · GeoNames IDs: {ids}"));
-                }
-                rendered.push('\n');
-            }
-        }
-    }
-    rendered.push_str("\n2. Retrieve merchant candidates\n");
+    let rendered = render_enrichment_details(details)?;
+    io::stderr().lock().write_all(rendered.as_bytes())?;
+    Ok(())
+}
+
+fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
+    let response = &details["response"];
+    let answer = &details["provider_answer"];
     let candidates = details["catalog_candidates"]
         .as_array()
         .or_else(|| details["candidates"].as_array());
-    if let Some(candidates) = candidates {
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED).set_header([
-            if details.get("provider_choices").is_some() {
-                "Record"
-            } else {
-                "Choice"
-            },
-            "Merchant",
-            "Similarity",
-            "Exact",
-            "Trusted",
-            "Outlet evidence",
-        ]);
-        for (index, candidate) in candidates.iter().enumerate() {
-            let outlets = candidate["interpretation_evidence"]
-                .as_array()
-                .map_or(0, |support| {
-                    support
-                        .iter()
-                        .filter(|support| support["outlet"].is_object())
-                        .count()
-                });
-            table.add_row([
-                if details.get("provider_choices").is_some() {
-                    format!("record_{index}")
-                } else {
-                    format!("candidate_{index}")
-                },
-                text(candidate["merchant"]["name"].as_str().unwrap_or("")),
-                format!("{:.3}", candidate["score"].as_f64().unwrap_or(0.0)),
-                candidate["exact"].to_string(),
-                candidate["trusted"].to_string(),
-                outlets.to_string(),
-            ]);
-        }
-        rendered.push_str(&format!(
-            "   {} shortlisted; similarity is not match confidence.\n{table}\n",
-            candidates.len()
-        ));
-    }
-    rendered.push_str("\n3. Evaluate merchant match\n");
-    let method = details["method"].as_str().unwrap_or("unavailable");
-    rendered.push_str(&format!("   Method: {}\n", text(method)));
-    if matches!(method, "provider" | "discovery") {
-        rendered.push_str(&format!(
-            "   Model: {} · minimum selected probability: {}\n",
-            text(details["model"].as_str().unwrap_or("")),
-            details["threshold"]
-        ));
-    }
-    if let Some(choices) = details["provider_choices"].as_array() {
-        let mut table = Table::new();
-        table.load_style(UTF8_FULL_CONDENSED).set_header([
-            "Business choice",
-            "Merchant",
-            "Website",
-            "Catalog records",
-            "Record resolution",
-        ]);
-        for (index, choice) in choices.iter().enumerate() {
-            table.add_row([
-                format!("candidate_{index}"),
-                text(choice["merchant"]["name"].as_str().unwrap_or("")),
-                text(choice["merchant"]["website"].as_str().unwrap_or("—")),
-                choice["record_ids"]
-                    .as_array()
-                    .map_or(0, Vec::len)
-                    .to_string(),
-                text(choice["catalog_resolution"].as_str().unwrap_or("")),
-            ]);
-        }
-        rendered.push_str(&format!(
-            "   {} business identity choices:\n{table}\n",
-            choices.len()
-        ));
-    }
-    if details["provider_requests"]
+    let choices = details["provider_choices"]
         .as_array()
-        .is_none_or(Vec::is_empty)
-    {
-        rendered.push_str("   No Jev request was sent.\n");
-    }
-    for (key, label) in [
-        ("catalog_provider_answer", "Catalog answer"),
-        ("provider_answer", "Provider answer"),
-        ("kind_provider_answer", "Transaction kind answer"),
-    ] {
-        if let Some(answer) = details.get(key).filter(|answer| !answer.is_null()) {
-            if key == "kind_provider_answer" {
-                rendered.push_str(&kind_answer(answer, details["threshold"].as_f64()));
-                continue;
-            }
-            let answer_candidates = if key == "catalog_provider_answer" {
-                details["catalog_provider_choices"]
-                    .as_array()
-                    .or(candidates)
-            } else {
-                details["provider_choices"]
-                    .as_array()
-                    .or_else(|| details["candidates"].as_array())
-            };
-            if let Some(name) = answer.get("name_answer") {
-                rendered.push_str(&name_answer(
-                    name,
-                    answer_candidates,
-                    details["threshold"].as_f64(),
-                ));
-                if answer["decision_stage"] == "name" {
-                    continue;
-                }
-                rendered.push_str("   Resolve catalog identity conditional on the recognized name; this does not identify the outlet.\n");
-            }
-            if let Some(choices) = answer["identity_choices"].as_array() {
-                rendered.push_str(&format!(
-                    "   Identity candidates after country and website refinement · country: {}\n",
-                    text(answer["identity_country"].as_str().unwrap_or("unspecified"))
-                ));
-                for id in choices.iter().filter_map(serde_json::Value::as_str) {
-                    if let Some(choice) = id
-                        .strip_prefix("candidate_")
-                        .and_then(|n| n.parse::<usize>().ok())
-                        .and_then(|n| answer_candidates.and_then(|choices| choices.get(n)))
-                    {
-                        rendered.push_str(&format!("   {}\n", text(id)));
-                        rendered.push_str(&selected_catalog_records(choice));
-                    }
-                }
-            }
-            rendered.push_str(&provider_answer(
-                if answer["identity_method"] == "deterministic" {
-                    "Deterministic catalog identity resolution"
-                } else if answer["decision_stage"] == "identity" {
-                    "Catalog identity answer"
-                } else {
-                    label
-                },
-                answer,
-                answer_candidates,
-                "Merchant",
-            ));
-            if let Some(choice) = answer["choice"]
+        .or_else(|| details["candidates"].as_array());
+    let threshold = details["threshold"].as_f64();
+    let description = details["interpretation"]["original"]
+        .as_str()
+        .or_else(|| details["request"]["description"].as_str())
+        .unwrap_or("—");
+    let merchant = response["merchant"]["data"]["name"]
+        .as_str()
+        .or_else(|| response["merchant"]["status"].as_str())
+        .or_else(|| details["status"].as_str())
+        .unwrap_or("unavailable");
+    let mut rendered = format!(
+        "Enrichment details: {}\nMerchant: {} · Kind: {} · Location: {}\n",
+        text(description),
+        text(merchant),
+        text(response["kind"].as_str().unwrap_or("unknown")),
+        text(
+            response["location"]["status"]
                 .as_str()
-                .and_then(|choice| choice.strip_prefix("candidate_"))
-                .and_then(|index| index.parse::<usize>().ok())
-                .and_then(|index| answer_candidates.and_then(|choices| choices.get(index)))
-            {
-                rendered.push_str(&selected_catalog_records(choice));
-                if let Some(evidence) = choice["business_evidence"].as_array() {
-                    let mut seen = std::collections::HashSet::new();
-                    for summary in evidence.iter().filter(|value| !value.is_null()) {
-                        if seen.insert(summary.to_string()) {
-                            rendered.push_str(&format!(
-                                "   Catalog outlet evidence (coverage is incomplete):\n{}\n",
-                                serde_json::to_string_pretty(summary)?
-                            ));
-                        }
-                    }
-                }
-            }
-            if answer["catalog_resolution"] == "ambiguous" {
-                rendered.push_str("   Merchant name selected, but catalog identity is ambiguous; no record matched.\n");
-            }
-            if let (Some(choice), Some(threshold)) =
-                (answer["choice"].as_str(), details["threshold"].as_f64())
-                && choice != "none"
-                && let Some(probability) = answer["probabilities"][choice].as_f64()
-                && probability < threshold
-            {
-                rendered.push_str(&format!(
-                    "   Below match threshold: selected probability {:.1}% must reach {:.1}%.\n",
-                    probability * 100.0,
-                    threshold * 100.0
-                ));
-            }
-        }
+                .unwrap_or("unavailable")
+        )
+    );
+    if let Some(error) = details["error"].as_str() {
+        rendered.push_str(&format!("Error: {}\n", text(error)));
     }
-    if details["discovery_attempted"] == true {
-        rendered.push_str("   Discovery fallback attempted.\n");
-        if let Some(candidates) = details["candidates"].as_array() {
-            for (index, candidate) in candidates.iter().enumerate() {
-                rendered.push_str(&format!(
-                    "   Discovery candidate_{index}: {}\n",
-                    text(candidate["merchant"]["name"].as_str().unwrap_or(""))
-                ));
-            }
-        }
+    if let Some(threshold) = threshold {
+        rendered.push_str(&format!(
+            "Acceptance threshold: {:.0}% selected probability · Model: {}\n",
+            threshold * 100.0,
+            text(details["model"].as_str().unwrap_or("—"))
+        ));
     }
-    if details["research_attempted"] == true {
-        rendered.push_str("\n   Web research fallback attempted.\n");
-        if let Some(research) = details.get("research") {
-            rendered.push_str(&format!(
-                "   Research model: {} · catalog saved: {} · verified: false\n",
-                text(research["model"].as_str().unwrap_or("unavailable")),
-                research["saved"]
-            ));
-            rendered.push_str(&format!(
-                "   Research decision: {}\n",
-                text(
-                    research["proposal"]["explanation"]
-                        .as_str()
-                        .unwrap_or("unavailable")
-                )
-            ));
-            for evidence in research["proposal"]["evidence"]
+    rendered.push_str("\n1. Interpret descriptor\n");
+    let interpretation = &details["interpretation"];
+    if let Some(processor) = interpretation["processor_hint"].as_str() {
+        rendered.push_str(&format!("Processor hint: {}\n", text(processor)));
+    }
+    let mut hypotheses = Table::new();
+    hypotheses
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_width(120)
+        .set_header(["Possible merchant", "Possible location", "Place validation"]);
+    for hypothesis in interpretation["hypotheses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        hypotheses.add_row([
+            text(hypothesis["merchant_text"].as_str().unwrap_or("—")),
+            text(hypothesis["possible_location"].as_str().unwrap_or("—")),
+            if hypothesis["location_hint"].is_object() {
+                "Validated clue"
+            } else if hypothesis["possible_location"].is_string() {
+                "Unverified"
+            } else {
+                "—"
+            }
+            .into(),
+        ]);
+    }
+    rendered.push_str(&format!("{hypotheses}\n"));
+    if let Some(tokens) = interpretation["unverified_tokens"]
+        .as_array()
+        .filter(|tokens| !tokens.is_empty())
+    {
+        rendered.push_str(&format!(
+            "Unverified metadata: {}\n",
+            tokens
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    rendered.push_str("\n2. Retrieve candidates\n");
+    if let Some(candidates) = candidates.filter(|candidates| !candidates.is_empty()) {
+        let mut table = Table::new();
+        table
+            .load_style(UTF8_FULL_CONDENSED)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_width(140)
+            .set_header(["Merchant", "Search score", "Markets", "Website", "Evidence"]);
+        for candidate in candidates {
+            let markets = candidate["merchant"]["markets"]
                 .as_array()
                 .into_iter()
                 .flatten()
+                .filter_map(|v| v.as_str())
+                .map(text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let evidence = if candidate["trusted"] == true {
+                "Trusted exact match"
+            } else if candidate["exact"] == true {
+                "Exact name"
+            } else {
+                "Search match"
+            };
+            table.add_row([
+                text(candidate["merchant"]["name"].as_str().unwrap_or("—")),
+                candidate["score"]
+                    .as_f64()
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "—".into()),
+                markets,
+                text(candidate["merchant"]["website"].as_str().unwrap_or("—")),
+                evidence.into(),
+            ]);
+        }
+        rendered.push_str(&format!(
+            "{} catalog records shortlisted. Search scores are not match probabilities.\n{table}\n",
+            candidates.len()
+        ));
+    } else {
+        rendered.push_str("No catalog candidates found.\n");
+    }
+
+    rendered.push_str("\n3. Classify transaction kind\n");
+    if let Some(kind) = details
+        .get("kind_provider_answer")
+        .filter(|v| v.is_object())
+        .or_else(|| answer.get("kind").filter(|v| v.is_object()))
+    {
+        rendered.push_str(&kind_answer(kind, threshold));
+    } else {
+        rendered.push_str("No classification answer available.\n");
+    }
+    rendered.push_str(&format!(
+        "Outcome: {}\n",
+        text(response["kind"].as_str().unwrap_or("unknown"))
+    ));
+
+    rendered.push_str("\n4. Select merchant name\n");
+    if let Some(catalog_answer) = details
+        .get("catalog_provider_answer")
+        .filter(|v| v.is_object())
+    {
+        rendered.push_str(&provider_answer(
+            "Initial catalog selection (before discovery)",
+            catalog_answer,
+            details["catalog_provider_choices"]
+                .as_array()
+                .or(candidates),
+            "Merchant",
+        ));
+    }
+    if let Some(name) = answer.get("name_answer").filter(|v| v.is_object()) {
+        rendered.push_str(&name_answer(name, choices, threshold));
+    } else if answer["choice"].is_string() {
+        rendered.push_str("Name and identity were evaluated in one selection.\n");
+        rendered.push_str(&provider_answer(
+            "Merchant selection",
+            answer,
+            choices,
+            "Merchant",
+        ));
+    } else {
+        rendered.push_str(&format!(
+            "Method: {}. No merchant selection answer.\n",
+            text(details["method"].as_str().unwrap_or("unavailable"))
+        ));
+    }
+
+    rendered.push_str("\n5. Resolve catalog identity\n");
+    if answer["decision_stage"] == "name" {
+        rendered.push_str(
+            "Skipped: name selection did not meet the acceptance threshold or selected no match.\n",
+        );
+    } else {
+        if let Some(ids) = answer["identity_choices"].as_array() {
+            rendered.push_str(&format!(
+                "After country and website refinement: {} choices · country hint: {}\n",
+                ids.len(),
+                text(answer["identity_country"].as_str().unwrap_or("none"))
+            ));
+            // Keep record IDs, markets and websites together in one identity table.
+            let mut records = Vec::new();
+            let mut scores = Vec::new();
+            for id in ids.iter().filter_map(|v| v.as_str()) {
+                if let Some(choice) = catalog_choice(id, choices) {
+                    for (index, record) in choice["records"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
+                        records.push(record.clone());
+                        scores.push(choice["record_scores"][index].clone());
+                    }
+                }
+            }
+            rendered.push_str(
+                &selected_catalog_records(
+                    &serde_json::json!({"records":records,"record_scores":scores}),
+                )
+                .replace("for the selected business", "remaining after refinement"),
+            );
+        } else if let Some(choice) = answer["choice"]
+            .as_str()
+            .and_then(|id| catalog_choice(id, choices))
+        {
+            rendered.push_str(&selected_catalog_records(choice));
+        }
+        if answer["identity_method"] == "deterministic" {
+            rendered.push_str("Resolved deterministically: one eligible catalog identity remains. No second Jev call.\n");
+        } else if answer["decision_stage"] == "identity" {
+            rendered.push_str(&provider_answer(
+                "Identity selection",
+                answer,
+                choices,
+                "Merchant",
+            ));
+        }
+        if answer["choice"] == "none" {
+            rendered.push_str("Stopped: no match selected.\n");
+        }
+        if let Some(choice) = answer["choice"].as_str().filter(|choice| *choice != "none") {
+            if let (Some(probability), Some(threshold)) =
+                (answer["probabilities"][choice].as_f64(), threshold)
+                && probability < threshold
             {
                 rendered.push_str(&format!(
-                    "   Source: {}\n",
-                    text(evidence["url"].as_str().unwrap_or(""))
+                    "Stopped: selected probability {:.1}% is below {:.1}%.\n",
+                    probability * 100.0,
+                    threshold * 100.0
                 ));
+            } else if answer["catalog_resolution"] == "ambiguous" {
+                rendered
+                    .push_str("Stopped: selected business still has ambiguous catalog records.\n");
             }
         }
     }
+
+    rendered.push_str("\n6. Fallbacks\n");
+    if details["discovery_attempted"] == true {
+        rendered.push_str(
+            "Discovery attempted; its candidates were used for the final selection above.\n",
+        );
+    }
     if let Some(reason) = details["discovery_skipped"].as_str() {
-        rendered.push_str(&format!("   Discovery skipped: {}\n", text(reason)));
+        rendered.push_str(&format!("Discovery skipped: {}\n", text(reason)));
     }
-    rendered.push_str(&format!(
-        "   Merchant outcome: {}\n",
-        text(details["status"].as_str().unwrap_or("unavailable"))
-    ));
-    if let Some(error) = details["error"].as_str() {
-        rendered.push_str(&format!("   Error: {}\n", text(error)));
-    }
-    if let Some(status) = details["response"]["location"]["status"].as_str() {
+    if details["research_attempted"] == true {
+        let research = &details["research"];
         rendered.push_str(&format!(
-            "\n4. Resolve location independently\n   Outcome: {}\n",
-            text(status)
+            "Web research attempted · Model: {} · Saved: {}\n{}\n",
+            text(research["model"].as_str().unwrap_or("unavailable")),
+            research["saved"],
+            text(
+                research["proposal"]["explanation"]
+                    .as_str()
+                    .unwrap_or("No supported result available.")
+            )
         ));
-        if status == "unresolved" && details["response"]["merchant"]["status"] == "unresolved" {
-            rendered.push_str("   Merchant unresolved; no merchant outlet selected.\n");
+        for evidence in research["proposal"]["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            rendered.push_str(&format!(
+                "Source: {}\n",
+                text(evidence["url"].as_str().unwrap_or("—"))
+            ));
         }
+    } else if details["discovery_attempted"] != true {
+        rendered.push_str("No fallback attempted.\n");
     }
-    let mut stderr = io::stderr().lock();
-    stderr.write_all(rendered.as_bytes())?;
-    Ok(())
+    rendered.push_str(&format!("Final merchant outcome: {}\n", text(merchant)));
+    rendered.push_str("\n7. Resolve location independently\n");
+    rendered.push_str(&format!(
+        "Outcome: {}\n",
+        text(
+            response["location"]["status"]
+                .as_str()
+                .unwrap_or("unavailable")
+        )
+    ));
+    if response["merchant"]["status"] == "unresolved" {
+        rendered.push_str("Merchant unresolved; no merchant outlet selected.\n");
+    }
+    Ok(rendered)
+}
+
+fn catalog_choice<'a>(
+    id: &str,
+    choices: Option<&'a Vec<serde_json::Value>>,
+) -> Option<&'a serde_json::Value> {
+    id.strip_prefix("candidate_")
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|n| choices.and_then(|choices| choices.get(n)))
 }
 
 pub fn enrichment_logs(logs: &[serde_json::Value], json: bool, offset: usize) -> Result<()> {
