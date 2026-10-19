@@ -309,19 +309,30 @@ async fn payment_providers(client: &reqwest::Client) -> Result<(&'static str, St
             .map(|id| format!("wd:{id}"))
             .collect::<Vec<_>>()
             .join(" ");
+        let classes = fi::PAYMENT_PROVIDER_CLASSES
+            .iter()
+            .map(|id| format!("wd:{id}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let query = format!(
-            r#"SELECT DISTINCT ?item ?name ?country ?website ?lei ?alias ?paymentProviderCategory ?organization WHERE {{
+            r#"SELECT DISTINCT ?item ?name ?country ?website ?lei ?alias ?paymentProviderCategory ?providerKind ?instanceOf ?dissolved WHERE {{
           hint:Query hint:optimizer "None" .
           VALUES ?item {{ {values} }}
-          ?item wdt:P31 ?class .
-          ?class wdt:P279* wd:Q43229 . hint:Prior hint:gearing "forward" .
-          ?item rdfs:label ?name.
-          FILTER(LANG(?name)="en") FILTER NOT EXISTS {{ ?item wdt:P576 ?end }}
-          BIND(<{}> AS ?paymentProviderCategory) BIND(wd:Q43229 AS ?organization)
+          BIND(<{}> AS ?paymentProviderCategory)
+          OPTIONAL {{ ?item rdfs:label ?englishName FILTER(LANG(?englishName)="en") }}
+          OPTIONAL {{ ?item rdfs:label ?defaultName FILTER(LANG(?defaultName)="mul") }}
+          BIND(COALESCE(?englishName, ?defaultName) AS ?name)
+          OPTIONAL {{ ?item wdt:P576 ?dissolved }}
+          OPTIONAL {{ ?item wdt:P31 ?instanceOf }}
+          OPTIONAL {{
+            ?item wdt:P31 ?class .
+            VALUES ?providerKind {{ {classes} }}
+            ?class wdt:P279* ?providerKind . hint:Prior hint:gearing "forward" .
+          }}
           OPTIONAL {{ ?item wdt:P17/wdt:P297 ?country }}
           OPTIONAL {{ ?item wdt:P856 ?website }} OPTIONAL {{ ?item wdt:P1278 ?lei }}
           OPTIONAL {{ ?item skos:altLabel ?alias FILTER(LANG(?alias)="en") }}
-        }} ORDER BY ?item ?name ?country ?website ?lei ?alias"#,
+        }} ORDER BY ?item ?name ?country ?website ?lei ?alias ?providerKind ?instanceOf ?dissolved"#,
             fi::PAYMENTS_URL
         );
         let mut url = reqwest::Url::parse("https://query.wikidata.org/sparql")?;
@@ -338,7 +349,22 @@ async fn payment_providers(client: &reqwest::Client) -> Result<(&'static str, St
                 .cloned(),
         );
     }
-    let data = json!({"category":{"query":{"categorymembers":category_members}},"members":members,"results":{"bindings":bindings}});
+    let mut data = json!({"selection_version":2,"category":{"query":{"categorymembers":category_members}},"members":members,"results":{"bindings":bindings}});
+    let (records, excluded) = fi::payment_provider_selection(&data)?;
+    eprintln!(
+        "Payment providers: imported {} identities; excluded {} category pages",
+        records.len(),
+        excluded.len()
+    );
+    for entry in &excluded {
+        eprintln!(
+            "Payment providers: excluded {} ({}): {}",
+            entry["title"].as_str().unwrap_or("?"),
+            entry["qid"].as_str().unwrap_or("no QID"),
+            entry["reason"].as_str().unwrap_or("?")
+        );
+    }
+    data["selection_report"] = json!({"imported":records.len(),"excluded":excluded});
     fi::prepare(Source::WikidataPayments, &data.to_string(), "global")?;
     Ok((
         "input.json",

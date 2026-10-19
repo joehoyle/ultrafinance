@@ -32,6 +32,8 @@ mod logos;
 mod merchant_provenance;
 #[path = "postgres_store/numeric_ids.rs"]
 mod numeric_ids;
+#[path = "postgres_store/processor_formats.rs"]
+mod processor_formats;
 #[path = "postgres_store/read_cache.rs"]
 mod read_cache;
 #[cfg(test)]
@@ -297,6 +299,25 @@ impl PostgresStore {
                         tx.batch_execute(include_str!("../migrations/021_payment_processors.sql"))
                             .context("schema migration 21 (payment processor type) failed")?;
                     }
+                    if version < 22 {
+                        // Building an index over the full catalog may exceed the
+                        // normal migration deadline. Runtime limits reset at commit.
+                        tx.batch_execute("SET LOCAL statement_timeout='0'")?;
+                        tx.batch_execute(include_str!("../migrations/022_merchant_type_index.sql"))
+                            .context("schema migration 22 (merchant type index) failed")?;
+                    }
+                    if version < 23 {
+                        tx.batch_execute(include_str!("../migrations/023_processor_formats.sql"))
+                            .context("schema migration 23 (processor descriptor formats) failed")?;
+                    }
+                    if version < 24 {
+                        tx.batch_execute(include_str!("../migrations/024_processor_format_fixtures.sql"))
+                            .context("schema migration 24 (processor format fixture separation) failed")?;
+                    }
+                    if version < 25 {
+                        tx.batch_execute(include_str!("../migrations/025_processor_format_revision.sql"))
+                            .context("schema migration 25 (processor format cache invalidation) failed")?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     // Run historical normalizer backfills after key conversion.
                     if version < 12 { indexed_import::backfill(&mut tx)?; }
@@ -425,6 +446,25 @@ impl PostgresStore {
     pub fn locations(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
         Ok(self.cached_locations(merchant_id)?.as_ref().clone())
     }
+    pub fn cached_locations_many(&self, mut ids: Vec<String>) -> Result<HashMap<String, Arc<Vec<LocationRecord>>>> {
+        if ids.is_empty() { return Ok(HashMap::new()); }
+        ids.sort_unstable(); ids.dedup();
+        let owner = self.0.clone();
+        self.run(move |client| {
+            let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
+            let active: HashSet<String> = tx.query("SELECT id FROM merchants WHERE id=ANY($1)", &[&ids])?.iter().map(|r|r.get(0)).collect();
+            let missing: Vec<_> = ids.iter().filter(|id| !active.contains(*id)).cloned().collect();
+            let mut redirects: HashMap<String,String> = HashMap::new();
+            if !missing.is_empty() && tx.query_one("SELECT to_regclass('public.merchant_redirects') IS NOT NULL", &[])?.get::<_,bool>(0) {
+                redirects = tx.query("SELECT retired_id,merchant_id FROM merchant_redirects WHERE retired_id=ANY($1)", &[&missing])?.iter().map(|r|(r.get(0),r.get(1))).collect();
+            }
+            let resolved: Vec<_> = ids.iter().map(|id|redirects.get(id).unwrap_or(id).clone()).collect();
+            let output = owner.reads.lock().unwrap().outlets_many(&mut tx, &resolved)?;
+            tx.commit()?;
+            Ok(ids.into_iter().zip(resolved).map(|(id,resolved)| (id,output[&resolved].clone())).collect())
+        })
+    }
+
     pub fn cached_locations(&self, merchant_id: &str) -> Result<Arc<Vec<LocationRecord>>> {
         let merchant_id = merchant_id.to_owned();
         let owner = self.0.clone();
@@ -893,6 +933,28 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             Ok(page)
         })
     }
+    pub fn cached_searches(&self, descriptions: Vec<String>, country: Option<String>, limit: usize, primary: bool) -> Result<Option<HashMap<String, Vec<Candidate>>>> {
+        let owner = self.0.clone();
+        self.run(move |client| {
+            let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
+            let mut reads = owner.reads.lock().unwrap();
+            reads.refresh(&mut tx)?;
+            let types: Vec<_> = if primary { vec![Some("merchant"),Some("financial_institution")] } else { vec![None] };
+            let mut output = HashMap::new();
+            for description in descriptions {
+                let mut pool = Vec::new();
+                for entity_type in &types {
+                    let key = read_cache::SearchKey { description: description.clone(), country: country.clone(), limit, entity_type:entity_type.map(str::to_owned) };
+                    let Some(candidates) = reads.cached_search(&key) else { return Ok(None); };
+                    pool.extend(candidates);
+                }
+                output.insert(description, pool);
+            }
+            tx.commit()?;
+            Ok(Some(output))
+        })
+    }
+
     pub fn search(
         &self,
         description: &str,
@@ -920,7 +982,16 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
             // LIMIT does not bound a sequential scan for an absent term. Prefer
             // the existing alias/GIN indexes for these small, independent pools.
-            tx.batch_execute("SET LOCAL enable_seqscan=off")?;
+            tx.batch_execute("SET LOCAL enable_seqscan=off; SET LOCAL jit=off")?;
+            let cache_key = read_cache::SearchKey { description:description.clone(), country:country.clone(), limit, entity_type:entity_type.map(str::to_owned) };
+            {
+                let mut reads = owner.reads.lock().unwrap();
+                reads.refresh(&mut tx)?;
+                if let Some(cached) = reads.cached_search(&cache_key) {
+                    tx.commit()?;
+                    return Ok(cached);
+                }
+            }
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
             let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.merchant_key WHERE a.normalized=$1 AND ($2::text IS NULL OR m.counterparty_type=$2) ORDER BY m.id LIMIT 255", &[&query, &entity_type])?;
@@ -943,19 +1014,47 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             }
             // Alias spans have their own indexed budget, independent of common
             // full-text posting lists. A span is retrieval evidence, never trust.
-            let spans = search_pipeline::alias_spans(&query);
+            let mut spans = search_pipeline::alias_spans(&query);
+            if entity_type == Some(crate::CounterpartyType::PaymentProcessor.as_str()) {
+                // Short catalog aliases are useful processor mentions too. This
+                // is type-scoped and does not depend on a named prefix registry.
+                for token in query.split_whitespace().take(16).filter(|token| token.chars().count() >= 2 && token.chars().any(char::is_alphabetic)) {
+                    if !spans.iter().any(|span| span == token) { spans.push(token.to_owned()); }
+                }
+            }
             if !spans.is_empty() {
-                for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases,m.markets,span.text FROM unnest($1::text[]) span(text)
-                     CROSS JOIN LATERAL (
-                         SELECT merchant_id FROM aliases WHERE normalized=span.text
-                         AND ($2::text IS NULL OR merchant_id IN (SELECT merchant_key FROM merchants WHERE counterparty_type=$2))
-                         ORDER BY merchant_id LIMIT 64
-                     ) a JOIN merchants m ON m.merchant_key=a.merchant_id",
-                    &[&spans, &entity_type],
-                )? {
-                    add_candidate(&mut found, &row, false, None, &mut scorer,
-                        ("alias_span", row.get::<_, &str>(4)))?;
+                // Keep typed membership as a join. An optional-type OR around
+                // an IN subquery prevents a semi-join and can materialize every
+                // merchant key before returning even one bounded alias span.
+                let rows = if let Some(entity_type) = entity_type {
+                    tx.query(
+                        "SELECT m.id,m.name,m.aliases,m.markets,span.text FROM unnest($1::text[]) span(text)
+                         CROSS JOIN LATERAL (
+                             SELECT a.merchant_id FROM aliases a
+                             JOIN merchants typed ON typed.merchant_key=a.merchant_id
+                             WHERE a.normalized=span.text AND typed.counterparty_type=$2
+                             ORDER BY a.merchant_id LIMIT 64
+                         ) a JOIN merchants m ON m.merchant_key=a.merchant_id",
+                        &[&spans, &entity_type],
+                    )?
+                } else {
+                    tx.query(
+                        "SELECT m.id,m.name,m.aliases,m.markets,span.text FROM unnest($1::text[]) span(text)
+                         CROSS JOIN LATERAL (
+                             SELECT merchant_id FROM aliases WHERE normalized=span.text
+                             ORDER BY merchant_id LIMIT 64
+                         ) a JOIN merchants m ON m.merchant_key=a.merchant_id",
+                        &[&spans],
+                    )?
+                };
+                for row in rows {
+                    let span = row.get::<_, &str>(4);
+                    if entity_type == Some(crate::CounterpartyType::PaymentProcessor.as_str()) {
+                        let mut span_scorer = crate::search_score::Scorer::new(span);
+                        add_candidate(&mut found, &row, false, None, &mut span_scorer, ("alias_span", span))?;
+                    } else {
+                        add_candidate(&mut found, &row, false, None, &mut scorer, ("alias_span", span))?;
+                    }
                 }
             }
             let tokens: Vec<_> = query.split_whitespace().filter(|t| t.chars().count()>=3).take(16).collect();
@@ -1026,6 +1125,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                     .context("shortlisted merchant disappeared within its snapshot")?;
                 candidate.provenance = sources.remove(&candidate.merchant.id).unwrap_or_default();
             }
+            owner.reads.lock().unwrap().cache_search(cache_key, shortlisted.clone());
             tx.commit()?;
             Ok(shortlisted)
         })

@@ -1,0 +1,63 @@
+BEGIN
+SET
+SET
+SET
+SET
+SET
+SET
+                                                                            QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=187584.98..375170.15 rows=8 width=48) (actual time=9.739..73.194 rows=8 loops=1)
+   Buffers: shared hit=13355
+   ->  Function Scan on unnest query  (cost=0.00..0.02 rows=2 width=32) (actual time=0.008..0.009 rows=2 loops=1)
+   ->  Limit  (cost=187584.98..187584.99 rows=4 width=20) (actual time=36.588..36.588 rows=4 loops=2)
+         Buffers: shared hit=13355
+         ->  Sort  (cost=187584.98..187910.70 rows=130290 width=20) (actual time=36.586..36.586 rows=4 loops=2)
+               Sort Key: (similarity(merchant_search_words.word, query.word)) DESC, merchant_search_words.word
+               Sort Method: top-N heapsort  Memory: 25kB
+               Buffers: shared hit=13355
+               ->  Bitmap Heap Scan on merchant_search_words  (cost=929.02..185630.63 rows=130290 width=20) (actual time=10.131..36.492 rows=286 loops=2)
+                     Recheck Cond: (word % query.word)
+                     Rows Removed by Index Recheck: 7220
+                     Filter: (word <> query.word)
+                     Rows Removed by Filter: 1
+                     Heap Blocks: exact=12949
+                     Buffers: shared hit=13349
+                     ->  Bitmap Index Scan on merchant_search_words_trigrams  (cost=0.00..896.45 rows=130291 width=0) (actual time=8.952..8.952 rows=7507 loops=2)
+                           Index Cond: (word % query.word)
+                           Buffers: shared hit=400
+ Planning:
+   Buffers: shared hit=175
+ Planning Time: 1.601 ms
+ Execution Time: 73.294 ms
+(23 rows)
+
+SET
+                                                                              QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=187584.98..375170.15 rows=8 width=48) (actual time=14.456..261.730 rows=8 loops=1)
+   Buffers: shared hit=40502
+   ->  Function Scan on unnest query  (cost=0.00..0.02 rows=2 width=32) (actual time=0.003..0.005 rows=2 loops=1)
+   ->  Limit  (cost=187584.98..187584.99 rows=4 width=20) (actual time=130.857..130.857 rows=4 loops=2)
+         Buffers: shared hit=40502
+         ->  Sort  (cost=187584.98..187910.70 rows=130290 width=20) (actual time=130.853..130.853 rows=4 loops=2)
+               Sort Key: (similarity(merchant_search_words.word, query.word)) DESC, merchant_search_words.word
+               Sort Method: top-N heapsort  Memory: 25kB
+               Buffers: shared hit=40502
+               ->  Bitmap Heap Scan on merchant_search_words  (cost=929.02..185630.63 rows=130290 width=20) (actual time=13.589..130.373 rows=3766 loops=2)
+                     Recheck Cond: (word % query.word)
+                     Rows Removed by Index Recheck: 60168
+                     Filter: (word <> query.word)
+                     Rows Removed by Filter: 1
+                     Heap Blocks: exact=40129
+                     Buffers: shared hit=40502
+                     ->  Bitmap Index Scan on merchant_search_words_trigrams  (cost=0.00..896.45 rows=130291 width=0) (actual time=11.410..11.410 rows=63936 loops=2)
+                           Index Cond: (word % query.word)
+                           Buffers: shared hit=373
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.110 ms
+ Execution Time: 261.874 ms
+(23 rows)
+
+ROLLBACK

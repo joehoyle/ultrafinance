@@ -1,0 +1,2047 @@
+{
+  "reviewed_on": "2026-10-19",
+  "catalog_processors": 113,
+  "research_method": "Three GPT-6 Luna subagents searched the 110 remaining catalog identities. The primary agent reviewed enableable formats, rejected generic PF*/PP* inference, and checked identity ambiguities. Three initial formats are included from the preceding official-source review. Searches are a bounded public-documentation pass, not proof of absence. Source summaries are paraphrases. Rule examples are synthetic regression cases unless explicitly stated otherwise.",
+  "status_definitions": {
+    "supported": "An explicit processor-identifying prefix and merchant suffix is documented by a primary source; a scoped rule is enabled.",
+    "unsupported": "Reviewed material did not establish a safe extraction rule, for example because descriptors are merchant-configurable, generic, or describe settlements rather than purchases. This does not prove no supported product-specific format exists.",
+    "inconclusive": "No sufficient primary-source format evidence was found in this search pass, or the catalog identity could not be verified.",
+    "not_applicable": "Reviewed sources describe an issuing bank, network, infrastructure, or other product role rather than an applicable acquiring descriptor. No catalog reclassification was performed; this is limited to the reviewed evidence."
+  },
+  "status_counts": {
+    "unsupported": 45,
+    "inconclusive": 52,
+    "not_applicable": 11,
+    "supported": 5
+  },
+  "processors": [
+    {
+      "processor": "2C2P",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "2C2P statement descriptor card statement merchant; 2C2P official statementDescriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://t.2c2p.com/Manuals/android/reference/nonuirequest.html",
+          "summary": "2C2P docs expose a merchant-supplied dynamic statement description, but no processor prefix or merchant-suffix pattern."
+        }
+      ],
+      "findings": "Official integration documentation exposes a merchant-supplied dynamic statement description. No universal processor marker or suffix extraction format was found.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official integration documentation exposes a merchant-supplied dynamic statement description. No universal processor marker or suffix extraction format was found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "ACI Worldwide",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:aciworldwide.com statement descriptor payment API merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.aciworldwide.com/sites/default/files/eposyaml/payments_api.yaml",
+          "summary": "The published API describes transaction fields, not a processor-owned card-statement prefix."
+        }
+      ],
+      "findings": "Targeted official search found no ACI-specific prefix or suffix format. Generic payment API fields cannot identify ACI from a statement.",
+      "scope": "Merchant card statement descriptors.",
+      "reason": "No ACI-specific merchant suffix extraction convention established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Adyen",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Adyen official card statement descriptor merchant name prefix format"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.adyen.com/account/transaction-description/",
+          "summary": "Adyen says statements use the configured merchant name and city; merchants may customize static or dynamic values."
+        }
+      ],
+      "findings": "Official docs show configurable merchant-specific statements and do not define a processor-wide merchant-suffix format.",
+      "scope": "Card payment statements processed by Adyen.",
+      "reason": "No fixed identifying prefix or delimiter; configured descriptor content varies by merchant and payment request.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "AfriGO",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "AfriGO card payment statement descriptor transaction"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not identify official statement-descriptor documentation or a verifiable merchant suffix convention.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not identify official statement-descriptor documentation or a verifiable merchant suffix convention.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Airtel Payments Bank Limited",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:airtel.in payments bank merchant statement descriptor card transaction"
+      ],
+      "sources": [
+        {
+          "url": "https://www.airtel.in/bank/static/terms-conditions-debit-card",
+          "summary": "The terms describe Airtel Payments Bank as the card issuer/bank and cardholder purchases at merchant establishments."
+        }
+      ],
+      "findings": "Official documentation concerns the bank's own debit cards and issuer statements; no processor-owned merchant naming convention was found.",
+      "scope": "Bank and card issuer; not a merchant-acquiring processor descriptor format.",
+      "reason": "Not applicable to processor merchant suffix extraction based on the documented product role.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Airwallex",
+      "status": "supported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [],
+      "sources": [
+        {
+          "url": "https://www.airwallex.com/docs/payments/merchant-of-record",
+          "summary": "Airwallex Merchant of Record transactions, whose documentation specifies an AWX* prefix."
+        }
+      ],
+      "findings": "Documented format reviewed in the initial research pass; see enabled rule airwallex-mor-awx-star.",
+      "scope": "Airwallex Merchant of Record transactions, whose documentation specifies an AWX* prefix.",
+      "reason": "This is not a universal Airwallex Payments descriptor. Merchant of Record is a payment-platform role, not evidence of a physical outlet.",
+      "enabled_rule_ids": [
+        "airwallex-mor-awx-star"
+      ]
+    },
+    {
+      "processor": "Align Commerce",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Align Commerce official statement descriptor card statement merchant",
+        "Align Commerce statement descriptor Veem official"
+      ],
+      "sources": [
+        {
+          "url": "https://help.veem.com/debit-and-credit-descriptor-for-ach-payments",
+          "summary": "Veem says statements display sender and receiver names; its former generic descriptor was ‘Veem’."
+        }
+      ],
+      "findings": "Align Commerce is associated with Veem; Veem's current ACH statement description is sender/receiver names, not a fixed merchant suffix.",
+      "scope": "Veem ACH debit and credit payments; not necessarily all legacy Align Commerce products.",
+      "reason": "Names are transaction parties and can vary; no stable processor prefix/suffix syntax documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Antom",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Antom card statement descriptor merchant bank statement"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.antom.com/ac/aba/inquirystatement",
+          "summary": "Antom documentation describes its own account statement query; it does not specify a cardholder descriptor or merchant suffix format."
+        }
+      ],
+      "findings": "Official Antom statement/reconciliation materials concern Antom-side account reporting and do not document a universal cardholder descriptor format.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official Antom statement/reconciliation materials concern Antom-side account reporting and do not document a universal cardholder descriptor format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Aspire",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:aspireapp.com card statement merchant descriptor transaction format"
+      ],
+      "sources": [
+        {
+          "url": "https://support.aspireapp.com/hubfs/Cardholder%20Letter%20of%20Dispute.pdf?hsLang=en",
+          "summary": "The dispute form asks for the merchant name as it appears on the statement; it specifies no Aspire prefix."
+        }
+      ],
+      "findings": "Official material describes statement merchant names generically and provides no processor-specific merchant suffix rule.",
+      "scope": "Card and financial-services product descriptors.",
+      "reason": "No fixed Aspire marker that can delimit merchant text.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Automatic Bank Services",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Automatic Bank Services official statement descriptor payment processor",
+        "Automatic Bank Services SHVA descriptor cardholder merchant statement official"
+      ],
+      "sources": [
+        {
+          "url": "https://www.boi.org.il/en/communication-and-publications/press-releases/declaration-of-controlled-payment-systems/",
+          "summary": "Bank of Israel identifies Shva as operating debit-card services and ATM systems."
+        }
+      ],
+      "findings": "Official regulator source establishes Shva's payment-system role, but targeted searches did not locate public merchant statement-format documentation.",
+      "scope": "Israeli card-processing infrastructure.",
+      "reason": "No official statement samples or stable merchant-suffix syntax found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Bancontact Payconiq Company",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Bancontact Payconiq bank statement merchant payment statement"
+      ],
+      "sources": [
+        {
+          "url": "https://www.bancontact.com/en/faq/can-i-find-my-customer-s-name-on-my-bank-statements",
+          "summary": "Merchant bank statement shows one daily aggregate under “Bancontact Company”; individual transactions are available in Bancontact Pro."
+        }
+      ],
+      "findings": "Official Bancontact guidance establishes aggregated merchant-side settlement naming (“Bancontact Company”), not an individual customer charge descriptor with a merchant suffix.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official Bancontact guidance establishes aggregated merchant-side settlement naming (“Bancontact Company”), not an individual customer charge descriptor with a merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Bank Clearing Center",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:masav.co.il transaction statement descriptor payment merchant MASAV"
+      ],
+      "sources": [
+        {
+          "url": "https://www.masav.co.il/en/tariff/",
+          "summary": "MASAV lists clearing services for credit and debit transfers among system participants and banks."
+        }
+      ],
+      "findings": "Official site describes bank-to-bank clearing and participant services; no customer merchant prefix/suffix format is presented.",
+      "scope": "Interbank clearing infrastructure (MASAV), not a card merchant processor descriptor.",
+      "reason": "Not applicable to merchant suffix extraction for processor descriptors.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Belkart",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Belkart official statement descriptor merchant payment",
+        "Belkart payment merchant bank statement descriptor official"
+      ],
+      "sources": [],
+      "findings": "Targeted searches of the named provider and its site did not surface official statement-format evidence.",
+      "scope": "Belkart card payment network/provider.",
+      "reason": "No primary source establishes an identifiable prefix and merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Bill.com, LLC",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "BILL.com card statement descriptor BILL bank statement"
+      ],
+      "sources": [
+        {
+          "url": "https://developer.bill.com/docs/ap-payment-funding-methods",
+          "summary": "BILL says its verification ACH statement description shows the company name and BILL; this is a test deposit description, not a universal purchase format."
+        }
+      ],
+      "findings": "Official docs describe company-name-plus-BILL for a test ACH verification deposit, which does not establish a general consumer purchase format.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official docs describe company-name-plus-BILL for a test ACH verification deposit, which does not establish a general consumer purchase format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Bilt",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site: Bilt card statement merchant descriptor payment name transaction",
+        "site: bilt.com card statement merchant descriptor payment name transaction"
+      ],
+      "sources": [
+        {
+          "url": "https://www.bilt.com/terms/bilt-card-offer-terms",
+          "summary": "Bilt terms discuss purchases posted to the Bilt Card Account and statement credits, not merchant acquiring descriptors."
+        }
+      ],
+      "findings": "Targeted official search returned card-account and rewards material, not a payment processor statement format.",
+      "scope": "Consumer card/rewards product, not established as a merchant processor.",
+      "reason": "Not applicable based on the documented consumer-card role.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "BitPay",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "BitPay official statement descriptor merchant transaction bank statement",
+        "site:bitpay.com statement descriptor card statement merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://www.bitpay.com/brand/payment-mark",
+          "summary": "BitPay's official page describes its payment mark as a way to show BitPay is an available payment option."
+        }
+      ],
+      "findings": "Official materials found describe BitPay as a payment option, but no statement descriptor format was established.",
+      "scope": "BitPay checkout and card/payment services.",
+      "reason": "A brand mark does not show how a merchant suffix appears on a cardholder statement.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "bKash",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "bKash merchant payment bank statement descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://www.bkash.com/en/page/personal-retail-account",
+          "summary": "bKash describes internal account statements and merchant-payment notifications, not a cardholder descriptor convention identifying merchant suffixes."
+        }
+      ],
+      "findings": "Official materials describe mobile-money account statement/notification contents, but not a standardized processor-prefixed format suitable for extraction.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official materials describe mobile-money account statement/notification contents, but not a standardized processor-prefixed format suitable for extraction.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "BPAY",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:bpay.com.au bill payment bank statement description BPAY reference merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://www.bpay.com.au/bpay-for-you/",
+          "summary": "BPAY payments are made within online banking; customers find bill payments in bank statement/history."
+        }
+      ],
+      "findings": "BPAY is a bill-payment service routed through financial institutions; biller and bank statement rendering are not described as a BPAY merchant prefix format.",
+      "scope": "Australian bill-payment scheme/rail.",
+      "reason": "Not applicable to processor merchant suffix extraction.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Braintree",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Braintree official statement descriptor merchant card statement descriptor",
+        "site:developer.paypal.com/braintree descriptors statement descriptor merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://developer.paypal.com/braintree/articles/aib-bf/transactions/descriptors/",
+          "summary": "Braintree describes hard descriptors and merchant trading names; dynamic descriptors are passed for individual transactions."
+        }
+      ],
+      "findings": "Braintree docs describe merchant-configured hard and dynamic descriptors.",
+      "scope": "Braintree card processing, with provider- and network-specific behavior.",
+      "reason": "No universal Braintree prefix or delimiter identifies a merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "bunq",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "bunq card statement merchant payment name transaction descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://help.bunq.com/en-de/articles/export-statement-of-a-single-transaction",
+          "summary": "bunq documents exports of its own account transactions; no descriptor pattern identifying a payment processor and merchant suffix is specified."
+        }
+      ],
+      "findings": "Official materials describe bunq bank-account and card transaction records; no processor-identifying merchant-suffix statement pattern was established.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official materials describe bunq bank-account and card transaction records; no processor-identifying merchant-suffix statement pattern was established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Cardsave",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Cardsave merchant statement descriptor format official"
+      ],
+      "sources": [
+        {
+          "url": "https://www.card-saver.co.uk/wp-content/uploads/2019/04/Payment_Page_Hosted_Form_V10.pdf",
+          "summary": "Often the merchant name is shortened to three letters, followed by an asterisk and a short description."
+        }
+      ],
+      "findings": "The guide says the merchant/acquirer controls a variable format and that dynamic descriptors vary by acquirer; the example structure is generic, not a Cardsave marker.",
+      "scope": "Card Saver merchant accounts and optional dynamic descriptors.",
+      "reason": "Three-letter prefix is merchant-defined, so it cannot identify Cardsave.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "CDS Global",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "CDS Global official payment statement descriptor merchant",
+        "\"CDS Global\" merchant payment statement descriptor official"
+      ],
+      "sources": [
+        {
+          "url": "https://knowledge.cds-global.com/hc/en-us/article_attachments/39183360798747",
+          "summary": "CDS Global payment documentation lists payment types and card fields; it does not specify cardholder descriptor syntax."
+        }
+      ],
+      "findings": "Official payment documentation was located, but it describes payment integration fields rather than statement formats.",
+      "scope": "CDS Global subscription and donation payment services.",
+      "reason": "No processor-identifying descriptor pattern documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Change Healthcare",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Change Healthcare payment statement descriptor patient charge"
+      ],
+      "sources": [
+        {
+          "url": "https://clientservices.changehealthcare.com/Content/Lyra_User_Manual_Patient_Inquiry.pdf",
+          "summary": "Change Healthcare manual covers patient billing and charge records; it does not establish a consumer payment processor statement format."
+        }
+      ],
+      "findings": "Targeted official results concerned healthcare billing/claims and patient statement services; no card-processing descriptor format was established.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted official results concerned healthcare billing/claims and patient statement services; no card-processing descriptor format was established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Chase Paymentech",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:chase.com Paymentech merchant statement descriptor format merchant name statement"
+      ],
+      "sources": [
+        {
+          "url": "https://merchantservices.chase.com/content/dam/chase/merchant-services/support/us/documents/statementreaderguide.pdf",
+          "summary": "The guide explains merchant funding statements and deposits funded by Chase Paymentech; it does not specify cardholder descriptor prefixes."
+        }
+      ],
+      "findings": "Official result concerns the merchant's settlement statement, not a fixed cardholder descriptor marker and merchant suffix.",
+      "scope": "Chase Paymentech merchant processing.",
+      "reason": "No fixed Paymentech-specific card statement prefix established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Checkout.com",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Checkout.com official statement descriptor merchant card statement",
+        "site:checkout.com/docs statement descriptor merchant configurable",
+        "site:support.checkout.com dynamic billing descriptors merchant name",
+        "site:checkout.com \"CKO*\" statement descriptor",
+        "site:support.checkout.com \"CKO*\"",
+        "site:checkout.com \"CKO\" \"billing descriptor\"",
+        "\"CKO*\" checkout.com bank statement"
+      ],
+      "sources": [
+        {
+          "url": "https://support.checkout.com/hc/en-us/articles/20362183788178-Difference-between-static-and-dynamic-billing-descriptors",
+          "summary": "Checkout.com says static descriptors combine a merchant name and city; dynamic descriptors can be customized per transaction."
+        },
+        {
+          "url": "https://api-reference.cko-prod.ckotech.co/tag/payments",
+          "summary": "Checkout.com API describes billing_descriptor as an optional description displayed on the customer statement."
+        }
+      ],
+      "findings": "Checkout.com official API documents an optional merchant-provided billing descriptor. Targeted searches for `CKO*` found no official Checkout.com statement template establishing it as a fixed prefix; the observed claim was largely third-party or partner guidance. The company abbreviation/legal entity name is not itself evidence of a card statement marker.",
+      "scope": "Checkout.com card payment statements.",
+      "reason": "The official API permits a supplied description and does not establish `CKO*` as a provider-wide prefix. Do not infer a processor rule from the corporate abbreviation or third-party examples; this is a bounded source review, not proof no regional/acquirer-specific form exists.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Clinkle",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Clinkle statement descriptor bank statement payment"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not locate current, official descriptor documentation sufficient to establish a merchant-suffix rule.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not locate current, official descriptor documentation sufficient to establish a merchant-suffix rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "CloudWalk (company)",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "CloudWalk InfinitePay statement descriptor official merchant card statement"
+      ],
+      "sources": [
+        {
+          "url": "https://www.cloudwalk.io/",
+          "summary": "CloudWalk presents InfinitePay as one of its brands and financial services."
+        }
+      ],
+      "findings": "Targeted official search did not establish a statement format or processor-specific prefix for merchant payments.",
+      "scope": "CloudWalk/InfinitePay products.",
+      "reason": "No source-defined extractable merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Comgate",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Comgate official bank statement payment descriptor merchant",
+        "site:comgate.cz statement transaction descriptor merchant",
+        "site:apidoc.comgate.cz Comgate payment label fullName statement"
+      ],
+      "sources": [
+        {
+          "url": "https://apidoc.comgate.cz/en/api/post/",
+          "summary": "Comgate's create-payment API accepts a merchant-provided label and payer fullName; it does not define a card statement prefix."
+        }
+      ],
+      "findings": "Official API describes payment and payer fields, not an identifying cardholder statement pattern.",
+      "scope": "Comgate payment gateway transactions.",
+      "reason": "No standardized processor prefix and merchant suffix documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Creditcall",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Creditcall statement descriptor bank statement merchant"
+      ],
+      "sources": [],
+      "findings": "Targeted official search did not establish a statement descriptor format that identifies Creditcall and a following merchant suffix.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted official search did not establish a statement descriptor format that identifies Creditcall and a following merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Credorax",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Credorax statement descriptor format official Finaro merchant statement"
+      ],
+      "sources": [],
+      "findings": "Targeted search did not locate an official Credorax-owned merchant statement pattern. A third-party gateway manual describes a configurable merchant DBA followed by `*` and merchant-supplied additional text, which would not identify Credorax and was excluded as non-primary evidence.",
+      "scope": "Credorax (also searched under Finaro) acquiring descriptors.",
+      "reason": "No Credorax-owned source proves a stable processor prefix; the encountered format is merchant-controlled.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "CyberSource Corporation",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "CyberSource official statement descriptor merchant transaction",
+        "site:docs.cybersource.com statement descriptor merchant configurable"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.cybersource.com/content/dam/new-documentation/documentation/en/merchant-descriptors/developer/all/so/merchant-descriptors-so-all.pdf",
+          "summary": "CyberSource documents merchant-supplied descriptor fields that may appear on the cardholder statement."
+        }
+      ],
+      "findings": "CyberSource descriptor fields are supplied by the merchant and may be displayed on statements.",
+      "scope": "CyberSource card processing where merchant descriptors are supported.",
+      "reason": "The format is merchant-configurable, with no fixed processor prefix or separator.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "E-Clear",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "E-Clear statement descriptor card statement payment"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not locate official statement-descriptor evidence sufficient to establish a merchant-suffix rule.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not locate official statement-descriptor evidence sufficient to establish a merchant-suffix rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Easypaisa",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:easypaisa.com.pk transaction statement descriptor merchant payment receipt statement"
+      ],
+      "sources": [
+        {
+          "url": "https://easypaystg.easypaisa.com.pk/easypay-merchant/faces/pg/site/Login.jsf",
+          "summary": "Merchant payment receipts include merchant Order ID, Easypay Transaction ID, and amount."
+        }
+      ],
+      "findings": "Official merchant material identifies transaction/order reference fields, not a card-statement prefix or a merchant suffix extraction format.",
+      "scope": "Easypaisa merchant payments and wallet.",
+      "reason": "Transaction IDs and references are not a processor-identifying statement prefix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Edenred",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Edenred official payment statement descriptor merchant card",
+        "site:edenred.com statement card merchant payment descriptor"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not locate official cardholder statement-format documentation for the Edenred payment identity.",
+      "scope": "Edenred payment and benefits products.",
+      "reason": "No primary source established a fixed merchant-suffix pattern.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "EFD",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "EFD payment processor statement descriptor merchant"
+      ],
+      "sources": [],
+      "findings": "The catalog label is ambiguous and targeted searches did not establish which product/entity or any official descriptor format applies.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "The catalog label is ambiguous and targeted searches did not establish which product/entity or any official descriptor format applies.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Euronet Worldwide",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:euronetworldwide.com card statement merchant descriptor merchant name transaction descriptor"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not surface merchant card statement descriptor documentation.",
+      "scope": "Euronet payment products.",
+      "reason": "No qualifying source evidence found; absence of a source is not proof that no format exists.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Eway",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Eway official credit card statement descriptor merchant",
+        "site:eway.io statement descriptor merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://go.eway.io/success/resource/1475278403000/rego_resources/images/document-example/BNZDirectDebitAuthorityMerchantFees.pdf",
+          "summary": "A bank direct-debit form asks the merchant to supply the name that appears on its own bank statement; it is not an eWAY cardholder format."
+        }
+      ],
+      "findings": "Searches found no official standardized eWAY cardholder statement format; an unrelated merchant-fee debit form was excluded as evidence for an eWAY descriptor.",
+      "scope": "eWAY online payment gateway.",
+      "reason": "No official descriptor example supports a suffix extraction rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "FreedomPay",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "FreedomPay statement descriptor card statement"
+      ],
+      "sources": [
+        {
+          "url": "https://portal.freedompay.com/Docs/VTUserGuide.pdf",
+          "summary": "FreedomPay terminal guide exposes a merchant-controlled “Merchant Descriptor” field; it does not document a stable processor prefix."
+        }
+      ],
+      "findings": "Official terminal documentation contains a merchant-controlled descriptor field; this does not establish a stable FreedomPay prefix or suffix pattern.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official terminal documentation contains a merchant-controlled descriptor field; this does not establish a stable FreedomPay prefix or suffix pattern.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Global Payments",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:globalpayments.com statement descriptor merchant card statement prefix format"
+      ],
+      "sources": [
+        {
+          "url": "https://developer.globalpayments.com/ecommerce/hpp-reference/dynamic-descriptor",
+          "summary": "Merchants pass an alternative DBA name in Charge Description; the submitted text appears on the bank statement."
+        }
+      ],
+      "findings": "Official docs make the statement name a merchant-selected DBA, with no Global Payments-specific prefix or suffix boundary.",
+      "scope": "Global Payments card processing with optional dynamic descriptor.",
+      "reason": "Merchant-configured descriptor cannot identify processor from the statement.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Heartland Payment Systems",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Heartland Payment Systems official merchant bank statement descriptor",
+        "site:heartland.us merchant statement descriptor card"
+      ],
+      "sources": [
+        {
+          "url": "https://www.heartland.us/products/payments-plus/credit-card-processing",
+          "summary": "Heartland's page explains merchant processing statements, including fees, chargebacks, and settlement costs."
+        }
+      ],
+      "findings": "The official result concerns statements sent to merchants about processing costs, not cardholder transaction descriptors.",
+      "scope": "Heartland merchant acquiring.",
+      "reason": "No cardholder statement pattern with an identifiable suffix was found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Hubtel",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Hubtel bank statement descriptor merchant payment"
+      ],
+      "sources": [
+        {
+          "url": "https://archive.hubtel.com/wp-content/uploads/2018/02/HPOS-Starter-Kit.pdf",
+          "summary": "Hubtel guide describes merchants receiving payments and transaction receipts, without a statement descriptor format."
+        }
+      ],
+      "findings": "Official materials cover merchant payment acceptance, internal dashboards and receipts, but do not establish a card/bank statement suffix format.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official materials cover merchant payment acceptance, internal dashboards and receipts, but do not establish a card/bank statement suffix format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Ingenico Group",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:ingenico.com statement descriptor merchant name card statement format"
+      ],
+      "sources": [
+        {
+          "url": "https://cdn.ingenico.com/binaries/content/assets/uk-website/user-guides/desk3500_quick_start_guide.pdf",
+          "summary": "Ingenico sample receipt shows merchant name, address, merchant ID, terminal ID, and card transaction details."
+        }
+      ],
+      "findings": "Official Ingenico results included terminal receipt guides, but no source established a merchant card-statement format or resolved the descriptor role of Ingenico gateway/acquiring products.",
+      "scope": "Ingenico Group payment products; terminal guides are insufficient to classify descriptor formats.",
+      "reason": "No qualifying source establishing an Ingenico-specific merchant suffix rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "IP Payments",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "IP Payments official card statement descriptor merchant",
+        "\"IP Payments\" \"statement descriptor\" official"
+      ],
+      "sources": [],
+      "findings": "The targeted search surfaced an NVP API page on tnspayments.com with merchant-supplied statement descriptor fields, but I could not establish that this domain or API belongs to the catalog identity “IP Payments”; excluded it as evidence.",
+      "scope": "Catalog identity “IP Payments”; provider ownership and product scope remain unresolved.",
+      "reason": "No primary source tied to this exact catalog identity establishes its statement format. The unrelated or unverified TNS result cannot support a rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Jio Payments Bank Limited",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Jio Payments Bank statement descriptor card statement"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not establish official payment statement-descriptor documentation for this catalog identity.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not establish official payment statement-descriptor documentation for this catalog identity.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Kora",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:korapay.com statement descriptor transaction descriptor card statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not surface statement-format documentation that specifies a Kora marker and merchant suffix.",
+      "scope": "Kora payments.",
+      "reason": "No qualifying primary source found; more documentation or transaction evidence would be needed.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "LianLian DigiTech",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "LianLian DigiTech official statement descriptor merchant payments",
+        "site:lianlianpay.com statement descriptor merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://global.lianlianpay.com/channel/43-34024.html",
+          "summary": "Official LianLian merchant material describes store currency settings and payment operations, not cardholder statement text."
+        }
+      ],
+      "findings": "The official merchant page found does not define statement descriptor behavior.",
+      "scope": "LianLian cross-border payment and merchant services.",
+      "reason": "No primary source establishes a provider-identifying merchant suffix format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Live group",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "\"Live group\" payments processor statement descriptor",
+        "site:livepayments.com \"statement\" \"descriptor\" merchant",
+        "site:livegroup.com.au \"statement\" payments merchant descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://help.livepayments.com/portal/en/kb/articles/why-customers-see-a-different-business-name-on-their-bank-statement",
+          "summary": "Live Payments says it passes the merchant’s registered trading name through to card networks; banks may format or enrich it differently."
+        }
+      ],
+      "findings": "Live Payments official guidance says it passes registered trading names to networks and banks may reformat or override the statement display. It documents no fixed Live Payments prefix or merchant suffix.",
+      "scope": "No universal Live Payments merchant suffix extraction rule established.",
+      "reason": "The documented statement value is the merchant trading name passed through the card networks and modified by issuer display rules; no processor prefix is established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Mangopay",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:mangopay.com statement descriptor card statement transaction description merchant"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search returned no source establishing a fixed MangoPay statement prefix and merchant suffix.",
+      "scope": "MangoPay platform payments.",
+      "reason": "No qualifying evidence for a processor-identifying extraction rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Maya",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Maya official bank statement descriptor merchant",
+        "site:maya.ph statement descriptor merchant card"
+      ],
+      "sources": [
+        {
+          "url": "https://www.maya.ph/business/terms-conditions",
+          "summary": "Maya's business terms require the merchant's trade name to appear as the cardholder statement name."
+        }
+      ],
+      "findings": "Maya documentation identifies the displayed name as the merchant's own trade name.",
+      "scope": "Maya Business card transactions.",
+      "reason": "Merchant names vary and are not preceded by a documented Maya marker.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Midpoint",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Midpoint payment gateway statement descriptor merchant"
+      ],
+      "sources": [],
+      "findings": "Targeted searches returned no official evidence establishing this identity’s statement descriptor format.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches returned no official evidence establishing this identity’s statement descriptor format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Mir",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Mir payment system statement descriptor card transaction merchant name official"
+      ],
+      "sources": [
+        {
+          "url": "https://www.nspk.ru/cards-mir/terms-and-tariffs/",
+          "summary": "NSPK describes rules and tariffs for the Mir payment system."
+        }
+      ],
+      "findings": "Official Mir source documents network rules and tariffs, not a merchant processor-specific statement descriptor marker.",
+      "scope": "Card payment network/system.",
+      "reason": "Network brand is not an acquiring processor format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "MobiKwik",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "MobiKwik official bank statement descriptor transaction merchant",
+        "site:mobikwik.com merchant statement transaction descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://www.mobikwik.com/blog/creating-the-buzz-with-our-merchant-biz/",
+          "summary": "MobiKwik distinguishes merchant transactions made through its wallet or ZaakPay gateway."
+        }
+      ],
+      "findings": "Official material confirms wallet/gateway merchant transactions but does not specify cardholder statement text.",
+      "scope": "MobiKwik wallet and ZaakPay transactions.",
+      "reason": "No stable statement prefix and merchant suffix established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Moneris Solutions",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Moneris bank statement descriptor merchant card statement"
+      ],
+      "sources": [
+        {
+          "url": "https://legacy-developer.moneris.com/en/Documentation/NA/E-Commerce%20Solutions/API/Pre-Authorization",
+          "summary": "Moneris describes a merchant-defined dynamic descriptor appended after the merchant business name with `/`; issuer-dependent and transaction-description suffix, not merchant identity."
+        }
+      ],
+      "findings": "Official docs describe an optional slash-delimited dynamic descriptor after the merchant’s registered name; the suffix is a merchant-provided transaction description and issuer behavior varies, so it is not a merchant identity extraction rule.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official docs describe an optional slash-delimited dynamic descriptor after the merchant’s registered name; the suffix is a merchant-provided transaction description and issuer behavior varies, so it is not a merchant identity extraction rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Monzo",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:monzo.com card statement merchant name transaction descriptor card payment"
+      ],
+      "sources": [],
+      "findings": "Official search did not establish a fixed statement descriptor format or enough evidence to classify the catalog identity as not applicable.",
+      "scope": "Monzo catalog identity; merchant/acquiring role and descriptor format unverified.",
+      "reason": "Targeted search found no official statement-format source; the catalog label alone is insufficient to classify Monzo as out of scope or support a rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "N26",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "N26 official statement card transaction merchant",
+        "site:support.n26.com transaction statement merchant payment card"
+      ],
+      "sources": [
+        {
+          "url": "https://support.n26.com/en-fr/account-and-personal-details/bank-statements-and-confirmations/bank-documents-payment-confirmation-bank-fees?flags=noscript",
+          "summary": "N26 describes account statements as listing incoming and outgoing transactions and card payment details."
+        }
+      ],
+      "findings": "N26 is a banking/issuing identity in this catalog context, not a merchant payment processor with a shared acquiring descriptor format.",
+      "scope": "N26 customer account and card statements.",
+      "reason": "Card statement transaction names identify individual merchants and vary by transaction.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Neteller",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Neteller bank statement charge descriptor statement"
+      ],
+      "sources": [
+        {
+          "url": "https://www.neteller.com/en/support/question/144/",
+          "summary": "NETELLER says it aims to provide merchants’ names on statements and sometimes appears as recipient; it gives no stable separator or prefix format."
+        }
+      ],
+      "findings": "Official support says merchant names may be shown and NETELLER may sometimes appear as recipient; no stable separator or merchant-suffix format is documented.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official support says merchant names may be shown and NETELLER may sometimes appear as recipient; no stable separator or merchant-suffix format is documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "New Payments Platform",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "New Payments Platform Australia statement descriptor payment transaction description official"
+      ],
+      "sources": [
+        {
+          "url": "https://www.rba.gov.au/payments-and-infrastructure/new-payments-platform/functionality-and-access-report/introduction.html",
+          "summary": "NPP is clearing and settlement infrastructure through which financial institutions provide fast payments."
+        }
+      ],
+      "findings": "Official RBA description identifies NPP as shared payment infrastructure, not a merchant processor descriptor source.",
+      "scope": "Australian account-to-account clearing and settlement rail.",
+      "reason": "Not applicable to merchant-card descriptor parsing.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Nexi",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Nexi official card statement descriptor merchant",
+        "site:developer.nexigroup.com statement descriptor merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://developer.nexigroup.com/payengine/en-EU/docs/payengine-notifications/",
+          "summary": "Nexi's API exposes an order.statementDescription field for the payment statement descriptor."
+        }
+      ],
+      "findings": "The API carries a transaction-specific statementDescription supplied for an order.",
+      "scope": "Nexi PayEngine payment notifications.",
+      "reason": "No invariant processor prefix or suffix boundary is specified.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Nium",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Nium statement descriptor cardholder statement merchant name"
+      ],
+      "sources": [
+        {
+          "url": "https://www.nium.com/",
+          "summary": "Targeted official-site searches did not establish a published statement descriptor convention with an identifiable merchant suffix."
+        }
+      ],
+      "findings": "Targeted official searches did not establish a processor marker plus merchant suffix convention.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted official searches did not establish a processor marker plus merchant suffix convention.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "North",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:north.com statement descriptor merchant transaction description card statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not return documentation establishing a North-specific statement prefix and merchant suffix.",
+      "scope": "North payment services.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Novalnet",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Novalnet official statement descriptor merchant",
+        "site:novalnet.com bank statement descriptor merchant Novalnet",
+        "site:novalnet.com NOVALNET statement merchant",
+        "site:novalnet.com \"Novalnet*\" statement merchant bank statement",
+        "site:novalnet.com \"NOVALNET\" \"credit card statement\" merchant",
+        "site:novalnet.com \"NOVALNET AG\" bank statement \"merchant\"",
+        "site:novalnet.com \"bank statement\" merchant name transaction id"
+      ],
+      "sources": [
+        {
+          "url": "https://www.novalnet.com/services/end-customer-support/",
+          "summary": "Novalnet says the merchant's shop or company name can be displayed as the payee; a transaction ID appears on statements."
+        },
+        {
+          "url": "https://www.novalnet.com/why-do-i-pay-novalnet/",
+          "summary": "Novalnet explains that statements can show its name, the shop/web portal name, and a 17-digit transaction ID."
+        },
+        {
+          "url": "https://www.novalnet.com/paymentsolution/end-user-support/",
+          "summary": "Novalnet says a merchant company name may be shown as payee and the TID appears on the statement."
+        }
+      ],
+      "findings": "Official Novalnet help explains that statements may show Novalnet, the online shop/web portal name, and a 17-digit transaction ID; the merchant/payee display can vary. Targeted searches for a fixed delimiter or `NOVALNET*<merchant>` template did not establish a universal suffix pattern.",
+      "scope": "Novalnet online payment services.",
+      "reason": "Provider and merchant names can appear in statement details, but no fixed boundary or processor-wide merchant-suffix syntax was documented. This source-specific finding does not establish that no other formats exist.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Octagonal (company)",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Octagonal payment processor card statement descriptor"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not resolve the payment-processing identity or establish an official statement descriptor format.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not resolve the payment-processing identity or establish an official statement descriptor format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "OpenEdge",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:openedgepayments.com statement descriptor merchant statement card transaction"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not surface a processor-specific statement descriptor format.",
+      "scope": "OpenEdge payments.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Passport",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Passport payment processor official statement descriptor card transaction",
+        "site:passportinc.com bank statement transaction cardholder merchant payment"
+      ],
+      "sources": [
+        {
+          "url": "https://www.passportinc.com/releases/fall-2026-release/",
+          "summary": "Passport describes merchant statements as summaries of Passport Payments activity for client operators."
+        }
+      ],
+      "findings": "Official Passport material found describes statements sent to merchants, not cardholder descriptor formats.",
+      "scope": "Passport parking and mobility payments.",
+      "reason": "No customer-facing processor prefix or suffix convention found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Paya, Inc.",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Paya bank statement descriptor merchant name"
+      ],
+      "sources": [
+        {
+          "url": "https://support.paya.com/49444-paya-services/check-and-ach-processing-best-practices-guide",
+          "summary": "Paya describes ACH descriptions based on the business name; no stable transaction descriptor prefix identifying Paya was established."
+        }
+      ],
+      "findings": "Official Paya material describes business-name ACH descriptors and configurable micro-entry descriptions; it does not establish a stable Paya marker followed by merchant text.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official Paya material describes business-name ACH descriptors and configurable micro-entry descriptions; it does not establish a stable Paya marker followed by merchant text.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Payments Network Malaysia",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Payments Network Malaysia FPX statement transaction description merchant official"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.developer.paynet.my/docs/fpx/browser-redirection",
+          "summary": "FPX merchant receipts display transaction date, amount, seller order number, FPX transaction ID, buyer bank, and status."
+        }
+      ],
+      "findings": "Official docs specify transaction/receipt fields, not a merchant statement prefix that identifies PayNet as processor.",
+      "scope": "PayNet/FPX payment network and bank-transfer rail.",
+      "reason": "Not applicable to card processor merchant suffix extraction.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Payoneer",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Payoneer official bank statement descriptor merchant payments",
+        "site:payoneer.com card statement appears transaction descriptor business payments"
+      ],
+      "sources": [
+        {
+          "url": "https://www1.payoneer.com/downloads/complaints-form-v2.pdf",
+          "summary": "Payoneer's cardholder dispute form contains fields for the merchant and transaction reference, not a statement format."
+        }
+      ],
+      "findings": "Official searches did not establish a merchant-facing acquiring descriptor pattern for Payoneer.",
+      "scope": "Payoneer business payments and cards.",
+      "reason": "No stable merchant suffix syntax found; provider identity alone is insufficient.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "PayPoint",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "PayPoint bank statement payment descriptor merchant statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official searches did not establish a customer bank/card statement format containing an identifiable PayPoint prefix and merchant suffix.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted official searches did not establish a customer bank/card statement format containing an identifiable PayPoint prefix and merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Paysafe Group",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:paysafe.com statement descriptor format merchant name statement",
+        "site:paysafe.com \"NBX*\" statement merchant",
+        "site:developer.paysafe.com \"NBX*\" statement",
+        "site:paysafe.com \"Netbanx\" \"descriptor\" merchant statement"
+      ],
+      "sources": [
+        {
+          "url": "https://www.paysafe.com/fileadmin/user_upload/Platform_Portal/MFD-0018_CA_Paysafe_Glossary_for_Merchants.pdf",
+          "summary": "Billing Descriptor outlines how a merchant’s name appears; example: `NBX*DARRELSDONUTS`."
+        },
+        {
+          "url": "https://www.paysafe.com/fileadmin/user_upload/Platform_Portal/Paysafe_Glossary_for_Platform_Partners.pdf",
+          "summary": "The platform-partner glossary repeats the illustrative `NBX*DARRELSDONUTS` billing descriptor."
+        },
+        {
+          "url": "https://www.paysafe.com/fileadmin/user_upload/Platform_Portal/Paysafe_FAQs_for_Merchants_Final_December_2018.pdf",
+          "summary": "Paysafe describes Netbanx as the name of its payments platform."
+        }
+      ],
+      "findings": "The official glossaries make NBX* plausible as a NETBANX prefix, but provide only the same illustrative example; docs do not say that it is a stable or universal output format. Other Paysafe APIs expose configurable merchant descriptors.",
+      "scope": "Potential legacy NETBANX descriptor form only.",
+      "reason": "Single repeated example does not establish a reliable format rule or delimit merchant text across Paysafe products.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Paytm",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Paytm official bank statement descriptor transaction merchant",
+        "site:paytm.com bank statement descriptor merchant",
+        "Paytm VPA narration statement official"
+      ],
+      "sources": [
+        {
+          "url": "https://paytm.com/faqs/upi/how-is-vpa-narration-helpful-for-tracking-transactions",
+          "summary": "Paytm says UPI narration can show a sender or recipient VPA, with examples such as ‘Payment to xyz@paytm’."
+        }
+      ],
+      "findings": "An official example documents VPA narration, but that is a UPI identifier and does not establish a universal Paytm merchant suffix or gateway attribution.",
+      "scope": "Paytm UPI and wallet-related transactions.",
+      "reason": "The VPA example may refer to a user or merchant and is not a processor-specific merchant extraction rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "PayU",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:payu.in statement descriptor card statement merchant name",
+        "site:payu.com.mx OR site:payu.com.co OR site:payu.com.ar descriptor extracto bancario PayU comercio",
+        "site:payu.in \"descriptor\" \"statement\" merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.payu.in/docs/general-faqs",
+          "summary": "PayU India describes a dynamic descriptor as merchant text that may appear on the card statement; this is merchant-configured, not a fixed PayU prefix."
+        }
+      ],
+      "findings": "PayU India documentation confirms a merchant-controlled dynamic card statement descriptor, not a fixed PayU prefix followed by a merchant suffix. The PayU Europe materials previously found describe merchant-provided order descriptions and configured payout titles. No exact fixed prefix with suffix semantics was established for India or the searched Latin American markets.",
+      "scope": "No universal PayU card-statement prefix or merchant-suffix extraction rule established; merchant-controlled descriptor text varies by account and market.",
+      "reason": "The official India documentation describes configurable merchant text. This supports merchant-defined descriptors, not processor identification from a fixed PayU prefix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Payzone",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:payzone.co.uk card statement merchant name descriptor payment",
+        "site:payzone.ie card statement merchant descriptor format"
+      ],
+      "sources": [],
+      "findings": "Targeted searches against the catalog website and UK site found no source specifying a fixed cardholder descriptor prefix and merchant suffix.",
+      "scope": "Payzone services.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "PhonePe",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "PhonePe official bank statement merchant transaction UPI",
+        "site:phonepe.com statement merchant UPI bank descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://www.phonepe.com/pulse-static-api/v1/static/docs/Pulse_Report_2021_L_Cr.pdf",
+          "summary": "PhonePe's report distinguishes merchant transactions in the app from other transaction types, but gives no bank descriptor syntax."
+        }
+      ],
+      "findings": "Targeted searches did not surface official card or bank statement-format guidance.",
+      "scope": "PhonePe wallet and UPI payments.",
+      "reason": "No stable processor marker and merchant suffix documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Pine Labs",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Pine Labs statement descriptor card statement"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not establish official documentation for a stable Pine Labs statement marker followed by merchant name.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not establish official documentation for a stable Pine Labs statement marker followed by merchant name.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Playspan",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "PlaySpan statement descriptor card statement official",
+        "site:visa.com PlaySpan payment descriptor",
+        "site:ebayinc.com PlaySpan payment descriptor"
+      ],
+      "sources": [],
+      "findings": "Targeted search did not find official Visa/eBay documentation specifying a statement descriptor format for PlaySpan.",
+      "scope": "PlaySpan catalog identity and any legacy payment products.",
+      "reason": "No qualifying primary source for a processor-specific merchant suffix format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "POLi Payments",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "POLi Payments official statement descriptor merchant",
+        "site:polipayments.com bank statement transaction merchant"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site searches returned no results establishing how merchant payments appear on customer bank statements.",
+      "scope": "POLi online bank transfer payments.",
+      "reason": "No primary source establishes a fixed processor marker and merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Qiwi",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Qiwi card transaction statement merchant descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://developer.qiwi.com/en/payments-lk-guide/",
+          "summary": "QIWI merchant portal filters transactions by merchant site name; documentation does not establish a cardholder statement prefix/suffix convention."
+        }
+      ],
+      "findings": "Official docs expose merchant-site names inside QIWI’s transaction portal; they do not establish a cardholder statement pattern for processor assignment.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official docs expose merchant-site names inside QIWI’s transaction portal; they do not establish a cardholder statement pattern for processor assignment.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Rain",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:rain.com statement descriptor merchant payment card statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not surface merchant descriptor documentation or a fixed Rain prefix.",
+      "scope": "Rain payments.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Rapyd",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Rapyd official statement descriptor merchant card transaction",
+        "site:docs.rapyd.net statement descriptor merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.rapyd.net/en/create-application---non-sole-prop--card-not-present.html",
+          "summary": "Rapyd defines statement_descriptor as text identifying a business and allows the applicant to enter it."
+        }
+      ],
+      "findings": "Rapyd requires or accepts business-specific descriptor text in its application flow.",
+      "scope": "Rapyd card-not-present business accounts.",
+      "reason": "This is merchant-entered text, with no universal Rapyd prefix or delimiter.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Razer Inc.",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Razer Gold bank statement charge descriptor"
+      ],
+      "sources": [],
+      "findings": "Official Razer materials describe Razer Gold reload channels and receipts, but do not establish a universal card-statement descriptor format identifying Razer and a merchant suffix.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official Razer materials describe Razer Gold reload channels and receipts, but do not establish a universal card-statement descriptor format identifying Razer and a merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Red Dot Payment",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:reddotpayment.com statement descriptor transaction merchant card"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not establish a processor-identifying statement format.",
+      "scope": "Red Dot Payment.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Remita",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Remita official bank statement descriptor payment merchant",
+        "site:remita.net statement payment Remita merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://login.remita.net/remita/rrr/13494826413/1/viewFileDetails.pdf",
+          "summary": "An official Remita receipt identifies the biller and service description alongside a Remita Retrieval Reference."
+        }
+      ],
+      "findings": "Remita receipts identify the biller and payment reference, but they are not evidence of a standardized cardholder statement format.",
+      "scope": "Remita bill payment and collections.",
+      "reason": "No official statement example supports a reusable processor-plus-merchant suffix rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Sarvatra Technologies",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Sarvatra Technologies bank statement payment descriptor merchant"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not establish official card/bank statement descriptor documentation for this processor identity.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not establish official card/bank statement descriptor documentation for this processor identity.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Shift4 Payments",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:shift4.com statement descriptor merchant card statement Shift4 Payments",
+        "payment facilitator card statement descriptor \"PF*\" official acquirer",
+        "site:docs.worldpay.com \"PF*\" merchant descriptor",
+        "site:docs.shift4.com \"PF*\" statement descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://www.shift4.com/pdf/Shift4_Fraud-and-Chargebacks-Policy.pdf?refresh=20250702",
+          "summary": "Shift4 Europe requires PFs to use `PF*merchant name`."
+        },
+        {
+          "url": "https://www.mastercard.com/content/dam/mccom/sk_sk/shared/business/support/rules-pdfs/mastercard-rules.pdf",
+          "summary": "Mastercard requires a Payment Facilitator ID and Sponsored Merchant ID for PF transactions."
+        },
+        {
+          "url": "https://developer-ecomm.handpoint.com/directintegration/advancedfunctionalities/",
+          "summary": "Handpoint shows PayFac names as `PF1*Merchant1`; PayFac name is registered with the scheme."
+        },
+        {
+          "url": "https://docs.axepta.bnpparibas/display/DOCBNP/subMerchantPF%2BEN",
+          "summary": "Axepta says card schemes require `payFacName*subMIDName`, with facilitator name length 3, 7, or 12."
+        },
+        {
+          "url": "https://usa.visa.com/dam/VCOM/global/support-legal/documents/visa-acceptance-entities.pdf",
+          "summary": "Visa’s payment-facilitator example uses the generic `PF*Seller DBA Name` form."
+        }
+      ],
+      "findings": "Shift4's policy documents the format, but PF-name*merchant is a card-scheme-wide convention and other providers document the same structure. `PF*` is not sufficient to attribute a transaction to Shift4.",
+      "scope": "Shift4 Europe payment-facilitator transactions only.",
+      "reason": "Generic payment-facilitator convention is not a Shift4-specific processor marker.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Single Settlement and Information Space",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Single Settlement and Information Space official payment descriptor statement",
+        "site:raschet.by statement descriptor payment merchant"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not locate official descriptor-format documentation for the Belarus settlement/information system.",
+      "scope": "Single Settlement and Information Space / ERIP payments.",
+      "reason": "No primary-source statement pattern found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Skrill",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Skrill bank statement charge merchant name statement"
+      ],
+      "sources": [
+        {
+          "url": "https://www.skrill.com/fileadmin/content/pdf/Skrill_Quick_Checkout_Guide_v10.5.pdf",
+          "summary": "Skrill submits a descriptor containing merchant trading/brand name; the value is merchant-configured, with no universal Skrill prefix."
+        }
+      ],
+      "findings": "Official integration docs say descriptors contain the merchant’s trading/brand name and are configurable; standalone Skrill mentions or merchant names cannot be generalized into a stable extraction rule.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official integration docs say descriptors contain the merchant’s trading/brand name and are configurable; standalone Skrill mentions or merchant names cannot be generalized into a stable extraction rule.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "SparkBase",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:sparkbase.com merchant statement descriptor card payment SparkBase"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not find a customer card statement descriptor specification.",
+      "scope": "SparkBase stored-value/gift-card services.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Stripe",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Stripe official statement descriptor merchant prefix configurable",
+        "site:docs.stripe.com/get-started/account/statement-descriptors descriptor prefix suffix"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.stripe.com/get-started/account/statement-descriptors",
+          "summary": "Stripe lets businesses set their statement descriptor and suffix; values are merchant-configurable."
+        }
+      ],
+      "findings": "Stripe docs describe configurable business descriptors, including account prefix/suffix behavior.",
+      "scope": "Stripe card payments.",
+      "reason": "A generic prefix-suffix structure does not identify Stripe; merchant values vary.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "SumUp",
+      "status": "supported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [],
+      "sources": [
+        {
+          "url": "https://www.sumup.com/en-us/security/",
+          "summary": "Card statements identifying a SumUp merchant with the documented asterisk separator."
+        },
+        {
+          "url": "https://help.sumup.com/en-GB/articles/fQAR6AB9o38yT8RkGaM5H-understanding-sumup-charges-on-my-bank-statement",
+          "summary": "Card statements identifying a SumUp merchant with the documented asterisk separator."
+        }
+      ],
+      "findings": "Documented format reviewed in the initial research pass; see enabled rule sumup-card-star.",
+      "scope": "Card statements identifying a SumUp merchant with the documented asterisk separator.",
+      "reason": "Case-insensitive spelling and horizontal whitespace are normalization choices. Space-only prefixes are not documented by these sources and are deliberately excluded.",
+      "enabled_rule_ids": [
+        "sumup-card-star"
+      ]
+    },
+    {
+      "processor": "SystemSpecs",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "SystemSpecs Remita statement descriptor transaction bank statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official searches did not establish a statement descriptor convention for SystemSpecs/its payment products.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted official searches did not establish a statement descriptor convention for SystemSpecs/its payment products.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Telpay",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:telpay.ca statement description payment transaction merchant Telpay"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search found no fixed merchant statement prefix and suffix format.",
+      "scope": "Telpay payment services.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Thunes",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Thunes official bank statement descriptor payment merchant",
+        "site:thunes.com statement descriptor merchant money transfer",
+        "site:developers.thunes.com money transfer reference beneficiary statement"
+      ],
+      "sources": [
+        {
+          "url": "https://developers.thunes.com/money-transfer/v2/",
+          "summary": "Thunes documents a partner-provided reference that may appear on the beneficiary's statement."
+        }
+      ],
+      "findings": "Thunes transfer APIs expose transaction references for statements, not an invariant processor-branded merchant format.",
+      "scope": "Thunes money transfer APIs.",
+      "reason": "References and parties vary by transaction; no fixed merchant suffix syntax documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Tipalti",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Tipalti bank statement transaction descriptor payer statement"
+      ],
+      "sources": [
+        {
+          "url": "https://help.tipalti.com/hc/en-us/articles/30607225721111-Expenses-FAQs",
+          "summary": "Tipalti says “Tipalti” appears as payer on reimbursement statements; this is payout behavior, not merchant suffix extraction for purchases."
+        }
+      ],
+      "findings": "Official help says Tipalti appears as payer for reimbursements. This is a payout descriptor and does not support purchase merchant-suffix extraction.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official help says Tipalti appears as payer for reimbursements. This is a payout descriptor and does not support purchase merchant-suffix extraction.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "TSYS",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:tsys.com merchant statement descriptor format cardholder statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official search did not establish a TSYS-specific cardholder descriptor prefix. No generic processor label is evidence of merchant text boundaries.",
+      "scope": "TSYS card processing.",
+      "reason": "No source-backed TSYS-specific extraction format found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Upay",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Upay official card statement descriptor payment merchant",
+        "site:upaybd.com bank statement descriptor payment merchant"
+      ],
+      "sources": [
+        {
+          "url": "https://www.upaybd.com/Latest-offer/card-to-upay-add-money",
+          "summary": "Upay describes card-to-wallet add-money transactions, but the page does not specify statement text."
+        }
+      ],
+      "findings": "Official product material confirms a payment flow but provides no bank-statement descriptor format.",
+      "scope": "Bangladesh Upay wallet and card funding.",
+      "reason": "No primary source shows a stable merchant suffix pattern.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Venmo",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:help.venmo.com business purchase bank statement Venmo merchant name descriptor",
+        "site:help.venmo.com Venmo business profile purchases bank or card statement descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://help.venmo.com/cs/articles/paying-with-venmo-vhel375",
+          "summary": "Venmo documents business checkout using Venmo balance, linked bank/card, or Venmo Debit Card; it does not state how those purchases are labeled on statements."
+        },
+        {
+          "url": "https://help.venmo.com/cs/articles/can-i-use-venmo-to-buy-or-sell-merchandise-goods-or-services-vhel227",
+          "summary": "Venmo documents authorized business-profile purchases and card/QR payment routes; it gives no fixed statement prefix or suffix format."
+        }
+      ],
+      "findings": "Official Venmo purchase documentation confirms several distinct business-payment routes, but does not document a fixed Venmo statement prefix followed by merchant name. The routes may have different statement behavior, so no suffix extraction rule is supported.",
+      "scope": "No enableable Venmo merchant suffix extraction rule established for business purchases.",
+      "reason": "Official sources confirm business-purchase functionality but do not specify a fixed bank/card statement descriptor format.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Verifi",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:verifi.com statement descriptor merchant card statement format"
+      ],
+      "sources": [
+        {
+          "url": "https://www.verifi.com/_assets/Verifi-Seller-Terms-and-Conditions.pdf",
+          "summary": "Verifi defines a merchant descriptor as copy identifying transactions on a consumer account statement."
+        }
+      ],
+      "findings": "Official materials discuss descriptor content and merchant practices, not Verifi as the payment processor or a Verifi-owned prefix.",
+      "scope": "Visa dispute-prevention and transaction-resolution service.",
+      "reason": "Not applicable to identifying the acquiring processor from a descriptor.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "VeriFone",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "VeriFone official payment statement descriptor merchant",
+        "site:verifone.cloud statement descriptor merchant transaction"
+      ],
+      "sources": [
+        {
+          "url": "https://verifone.cloud/print/pdf/node/139",
+          "summary": "VeriFone's report fields include transaction.dynamic_descriptor, indicating the descriptor is transaction data."
+        }
+      ],
+      "findings": "VeriFone gateway documentation exposes a dynamic descriptor field.",
+      "scope": "VeriFone gateway transactions documented in the reports API.",
+      "reason": "The descriptor is dynamic and merchant-specific; no fixed VeriFone prefix is documented.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Versapay",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Versapay statement descriptor bank statement transaction"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not establish official statement descriptor documentation with a stable merchant suffix.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not establish official statement descriptor documentation with a stable merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Verve International",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:myverveworld.com statement descriptor merchant card statement Verve"
+      ],
+      "sources": [
+        {
+          "url": "https://rewards.myverveworld.com/Earn.aspx",
+          "summary": "Verve describes its cards as used for payments at POS, web, and ATM."
+        }
+      ],
+      "findings": "Official material describes Verve card acceptance and cardholder rewards; it does not define acquiring descriptors for merchants.",
+      "scope": "Card scheme/brand.",
+      "reason": "Card network brand is not a merchant processor descriptor marker.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "WebMoney",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "WebMoney official bank statement merchant payment descriptor",
+        "site:webmoney.com bank statement merchant payment descriptor"
+      ],
+      "sources": [
+        {
+          "url": "https://www.webmoney.com/eng/business/accept-payments/online-shop/merchant.shtml",
+          "summary": "WebMoney describes its merchant interface for accepting customer payments and automated order accounting."
+        }
+      ],
+      "findings": "Official merchant documentation explains payment acceptance but not a cardholder statement string.",
+      "scope": "WebMoney Merchant interface and payment options.",
+      "reason": "No processor-identifying statement prefix or merchant suffix format established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "WePay",
+      "status": "supported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "WePay card statement descriptor bank statement WPY merchant name"
+      ],
+      "sources": [
+        {
+          "url": "https://support.wepay.com/hc/en-us/articles/203609683-Unrecognized-Charge",
+          "summary": "WePay support says customers may see `WPY* [MERCHANT NAME]` on bank statements for payments through supported merchants or partners."
+        },
+        {
+          "url": "https://www.wepay.com/developer/reference/checkout-2016-03-30",
+          "summary": "WePay API defines `soft_descriptor` as the payment description shown on payer’s card statement."
+        },
+        {
+          "url": "https://www.wepay.com/developer/version/2016-12-07",
+          "summary": "WePay API change notes say account name can be used in the bank-statement descriptor."
+        }
+      ],
+      "findings": "Official support provides the explicit `WPY* [MERCHANT NAME]` pattern for charges routed through supported merchants/partners. API docs confirm statement soft descriptors are otherwise configurable, so scope should remain limited to that explicit format.",
+      "scope": "WePay bank/card statement charges routed through supported merchants or partners and explicitly rendered as WPY* followed by merchant name. Does not cover every WePay transaction or other merchant-configurable soft descriptors.",
+      "reason": "Official support provides the explicit `WPY* [MERCHANT NAME]` pattern for charges routed through supported merchants/partners. API docs confirm statement soft descriptors are otherwise configurable, so scope should remain limited to that explicit format.",
+      "enabled_rule_ids": [
+        "wepay-wpy-star-merchant"
+      ]
+    },
+    {
+      "processor": "Western Union",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:westernunion.com card statement descriptor merchant transactions statement"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search found no generic merchant suffix format that identifies Western Union as processor; its own transfer charges and merchant-initiated payments have distinct contexts.",
+      "scope": "Western Union money transfer and payment services.",
+      "reason": "No source-backed processor marker plus merchant suffix established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "WiPay",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "WiPay official bank statement descriptor card merchant",
+        "site:wipaycaribbean.com statement descriptor merchant payment"
+      ],
+      "sources": [
+        {
+          "url": "https://wipaycaribbean.com/WiPay-API-Documentation.pdf",
+          "summary": "The API guide documents payment method and fee settings but no cardholder statement descriptor format."
+        }
+      ],
+      "findings": "Official API documentation found does not specify how transactions are labeled on cardholder statements.",
+      "scope": "WiPay Caribbean payments.",
+      "reason": "No stable processor prefix and merchant suffix found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Worldline",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Worldline cardholder statement descriptor merchant name"
+      ],
+      "sources": [
+        {
+          "url": "https://support.worldline.com/content/dam/support-worldline/local/nl-be/documents/terms-and-conditions/service-conditions-acquiring-be-en-20250929.pdf",
+          "summary": "Worldline describes optional merchant-controlled dynamic descriptor information, with no universal processor prefix or stable merchant suffix format."
+        }
+      ],
+      "findings": "Official terms describe merchant-selected dynamic descriptor information, subject to PSP accreditation; no universal Worldline prefix or merchant suffix format is established.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Official terms describe merchant-selected dynamic descriptor information, subject to PSP accreditation; no universal Worldline prefix or merchant suffix format is established.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Worldpay",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:worldpay.com statement descriptor merchant statement format cardholder"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.worldpay.com/access/products/reference/formatting",
+          "summary": "Worldpay narrative line1 is a consistent merchant identifier; line2 is free-form additional context."
+        }
+      ],
+      "findings": "Official docs let each merchant set a statement narrative; they establish no fixed Worldpay-identifying prefix followed by merchant text.",
+      "scope": "Worldpay merchant card processing.",
+      "reason": "Configurable merchant descriptor is not processor-identifying.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Xoom Corporation",
+      "status": "unsupported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Xoom official bank statement descriptor payment",
+        "site:xoom.com charged by Xoom statement PayPal"
+      ],
+      "sources": [
+        {
+          "url": "https://www.xoom.com/legal/user-agreement",
+          "summary": "Xoom says funding-instrument statements may show charges by Xoom or PayPal."
+        }
+      ],
+      "findings": "Xoom's agreement names alternative charging entities and describes remittance funding, not merchant acquiring descriptors.",
+      "scope": "Xoom remittance charges to senders.",
+      "reason": "The source provides no stable merchant suffix; statement identity may be Xoom or PayPal.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Xsolla",
+      "status": "supported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [],
+      "sources": [
+        {
+          "url": "https://help.xsolla.com/en/unauthorized-charges/i-see-unknown-charges-for-xsolla",
+          "summary": "Xsolla statement examples using an explicit asterisk or underscore before a game or service label."
+        }
+      ],
+      "findings": "Documented format reviewed in the initial research pass; see enabled rule xsolla-star-or-underscore.",
+      "scope": "Xsolla statement examples using an explicit asterisk or underscore before a game or service label.",
+      "reason": "The suffix is lookup text, not a verified business identity. Do not identify Xsolla from unrelated names or standalone corporate descriptions.",
+      "enabled_rule_ids": [
+        "xsolla-star-or-underscore"
+      ]
+    },
+    {
+      "processor": "YooKassa",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "YooKassa statement bank card merchant name descriptor",
+        "банковской выписке ЮKassa название магазина",
+        "ЮKassa «в банковской выписке» название магазина платеж",
+        "ЮKassa как отображается платеж в выписке покупателя название магазина",
+        "site:yookassa.ru/docs statement descriptor банковская выписка карта магазин"
+      ],
+      "sources": [
+        {
+          "url": "https://yookassa.ru/docs/support/merchant/settings/stores",
+          "summary": "YooKassa says the shop name is shown during payment and in invoices/electronic receipts; it does not say this is a bank-statement descriptor."
+        },
+        {
+          "url": "https://yookassa.ru/docs/support/merchant/payments/reports/reports-new",
+          "summary": "YooKassa transaction registers expose merchant-side payment descriptions and identifiers, not a cardholder statement prefix format."
+        },
+        {
+          "url": "https://yookassa.ru/docs/support/payments/instructions/cards",
+          "summary": "YooKassa card-payment instructions direct the buyer back to the merchant’s shop, without specifying statement wording."
+        }
+      ],
+      "findings": "The Russian-language targeted search and official documentation found configurable shop naming for the payment flow and merchant-side transaction registers, but no statement format such as a fixed ЮKassa prefix plus shop name. No extraction rule is supported.",
+      "scope": "No enableable YooKassa merchant suffix extraction rule established.",
+      "reason": "Official sources found do not document bank-statement wording or a fixed processor prefix with shop-name suffix semantics.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Zentoshin",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:zentoshin.com payment statement merchant name transaction descriptor"
+      ],
+      "sources": [],
+      "findings": "Targeted official-site search did not yield statement descriptor documentation or a verifiable merchant processor role.",
+      "scope": "Zentoshin catalog identity.",
+      "reason": "No qualifying primary source found.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Zettle",
+      "status": "supported",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Zettle official statement descriptor merchant bank statement",
+        "site:zettle.com statement customer bank statement descriptor business name",
+        "site:zettle.com \"IZ *\" statement iZettle card statement",
+        "site:zettle.com \"IZETTLE*\" bank statement",
+        "site:izettle.com \"IZ *\" bank statement descriptor",
+        "site:izettle.com \"IZETTLE\" statement merchant",
+        "site:slc-b-origin-pointofsale.paypal.com \"PP*\" business name statement"
+      ],
+      "sources": [
+        {
+          "url": "https://www.zettle.com/gb/help/articles/1084729-taking-card-and-contactless-payments",
+          "summary": "On the customer statement, the transaction appears as ‘PayPal Point of Sale *[your company name]’."
+        },
+        {
+          "url": "https://slc-b-origin-pointofsale.paypal.com/us/cshelp/article/how-do-i-take-payments-with-point-of-sale-help919",
+          "summary": "US PayPal Point of Sale help says its statement marker is PP* next to the business name."
+        },
+        {
+          "url": "https://slc-b-origin-pointofsale.paypal.com/fr/cshelp/article/o%C3%B9-trouver-le-code-paypal-pour-confirmer-ma-carte%C2%A0-help170",
+          "summary": "A general PayPal card-confirmation debit may also use PP* followed by a numeric confirmation code."
+        }
+      ],
+      "findings": "Zettle's official card-payment help page specifies a fixed PayPal Point of Sale prefix, asterisk, and company-name suffix. A second targeted official-site search for legacy `IZ *` and `IZETTLE*` statement forms did not surface an official statement template; this is a bounded research result, not proof those legacy descriptors never existed. The current US PayPal Point of Sale documentation uses `PP*` beside the business name, while a general PayPal help page also uses `PP*` for card-confirmation debits. Do not treat `PP*` alone as a Zettle identifier; the proposed rule remains limited to the documented `PayPal Point of Sale *` form.",
+      "scope": "PayPal Point of Sale (formerly Zettle) card-reader and terminal payments in the cited UK help article.",
+      "reason": null,
+      "enabled_rule_ids": [
+        "zettle-paypal-point-of-sale-star"
+      ]
+    },
+    {
+      "processor": "Ziina",
+      "status": "inconclusive",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "Ziina bank statement descriptor payment statement"
+      ],
+      "sources": [],
+      "findings": "Targeted searches did not establish official bank/card statement descriptor documentation with a stable merchant suffix.",
+      "scope": "No enableable merchant suffix extraction rule established.",
+      "reason": "Targeted searches did not establish official bank/card statement descriptor documentation with a stable merchant suffix.",
+      "enabled_rule_ids": []
+    },
+    {
+      "processor": "Zong mobile payments",
+      "status": "not_applicable",
+      "reviewed_on": "2026-10-19",
+      "search_queries": [
+        "site:investors.ebayinc.com Zong acquisition mobile carrier billing 2011",
+        "site:ebayinc.com Zong carrier billing digital goods PayPal"
+      ],
+      "sources": [
+        {
+          "url": "https://investors.ebayinc.com/investor-news/press-release-details/2011/EBay-Inc-Completes-Acquisition-of-Zong/default.aspx",
+          "summary": "eBay says Zong provided payments through mobile carrier billing and became part of PayPal."
+        },
+        {
+          "url": "https://www.ebayinc.com/company/our-history/",
+          "summary": "eBay’s company history identifies Zong as a mobile carrier billing-based payments platform acquired in 2011."
+        }
+      ],
+      "findings": "Official eBay sources establish Zong as a carrier-billing platform, not the Pakistani telecom operator or a card statement processor. They do not provide a cardholder merchant suffix format.",
+      "scope": "Legacy mobile carrier-billing platform for digital goods, acquired by eBay and made part of PayPal in 2011.",
+      "reason": "The verified product role is carrier billing; no card-statement extraction format is documented.",
+      "enabled_rule_ids": []
+    }
+  ],
+  "follow_up": {
+    "reviewed_on": "2026-10-19",
+    "reason": "The processor-source importer previously excluded service/brand/system identities and shared default-language labels. Its corrected selection imported 19 additional identities into the local catalog.",
+    "expanded_catalog_processors": 132,
+    "newly_imported_identities": 19,
+    "newly_researched_formats": [
+      {
+        "processor": "PayPal",
+        "rule_id": "paypal-name-star",
+        "sources": [
+          "https://www.paypal.com/us/cshelp/article/how-do-i-update-my-business-name-on-customers-credit-card-statements-help336"
+        ],
+        "scope": "PayPal card statements using PayPal * followed by the configured seller statement name."
+      },
+      {
+        "processor": "Square",
+        "rule_id": "square-sq-star",
+        "sources": [
+          "https://developer.squareup.com/docs/payments-api/take-payments/card-payments/statement-descriptions"
+        ],
+        "scope": "Square-generated card statement descriptors with the documented SQ * prefix."
+      }
+    ],
+    "coverage_limit": "The original processors array covers the 113-identity catalog at the initial research pass. Only Square and PayPal of the additional identities have received format review in this follow-up; other newly discovered identities are not yet format-researched."
+  }
+}

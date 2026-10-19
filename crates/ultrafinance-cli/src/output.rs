@@ -12,37 +12,50 @@ pub fn enrichment(
     if json {
         return write_output(&serde_json::to_string_pretty(response)?);
     }
-    let mut rendered = format!("Transaction: {}\n", text(description));
+    let mut rendered = format!("Transaction\n  Description: {}\n", text(description));
     rendered.push_str(&format!(
-        "Kind:        {}\n",
+        "  Kind:        {}\n",
         serde_json::to_value(response.kind)?.as_str().unwrap()
     ));
+    rendered.push_str("\nMerchant\n");
     match &response.merchant {
         MerchantResult::Matched { data } => {
-            rendered.push_str(&format!("Merchant:    {}\n", text(&data.name)));
+            rendered.push_str(&format!("  Name:        {}\n", text(&data.name)));
             if let Some(website) = &data.website {
-                rendered.push_str(&format!("Website:     {}\n", text(website)));
+                rendered.push_str(&format!("  Website:     {}\n", text(website)));
             }
             if !data.markets.is_empty() {
                 rendered.push_str(&format!(
-                    "Markets:     {}\n",
+                    "  Markets:     {}\n",
                     text(&data.markets.join(", "))
                 ));
             }
         }
-        MerchantResult::Unresolved { .. } => rendered.push_str("Merchant:    Unresolved\n"),
+        MerchantResult::Unresolved { .. } => rendered.push_str("  Unresolved\n"),
     }
     for counterparty in &response.counterparties {
-        if counterparty.counterparty_type != ultrafinance_core::CounterpartyType::Merchant {
+        let label = match counterparty.counterparty_type {
+            ultrafinance_core::CounterpartyType::Merchant => continue,
+            ultrafinance_core::CounterpartyType::FinancialInstitution => "Financial institution",
+            ultrafinance_core::CounterpartyType::PaymentProcessor => "Payment processor",
+        };
+        rendered.push_str(&format!(
+            "\n{label}\n  Name:        {}\n",
+            text(&counterparty.name)
+        ));
+        if let Some(website) = &counterparty.website {
+            rendered.push_str(&format!("  Website:     {}\n", text(website)));
+        }
+        if !counterparty.markets.is_empty() {
             rendered.push_str(&format!(
-                "Counterparty: {} ({})\n",
-                text(&counterparty.name),
-                counterparty.counterparty_type.as_str()
+                "  Markets:     {}\n",
+                text(&counterparty.markets.join(", "))
             ));
         }
     }
+    rendered.push_str("\nLocation\n");
     match &response.location {
-        LocationResult::Unresolved { .. } => rendered.push_str("Location:    Unresolved\n"),
+        LocationResult::Unresolved { .. } => rendered.push_str("  Unresolved\n"),
         LocationResult::Matched { data } | LocationResult::Extracted { data } => {
             let label = if matches!(response.location, LocationResult::Matched { .. }) {
                 "Matched outlet"
@@ -62,12 +75,12 @@ pub fn enrichment(
             .map(|v| text(v))
             .collect::<Vec<_>>()
             .join(", ");
-            rendered.push_str(&format!("Location:    {label}\n"));
+            rendered.push_str(&format!("  Status:      {label}\n"));
             if !address.is_empty() {
-                rendered.push_str(&format!("             {address}\n"));
+                rendered.push_str(&format!("  Address:     {address}\n"));
             }
             if let Some(number) = &data.store_number {
-                rendered.push_str(&format!("Store:       {}\n", text(number)));
+                rendered.push_str(&format!("  Store:       {}\n", text(number)));
             }
         }
     }
@@ -75,7 +88,7 @@ pub fn enrichment(
     for credit in &response.attributions {
         if seen.insert(credit) {
             if seen.len() == 1 {
-                rendered.push_str("\nAttributions:\n");
+                rendered.push_str("\nAttributions\n");
             }
             rendered.push_str(&format!("  • {}\n", text(credit)));
         }
@@ -353,8 +366,9 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
         .as_array()
         .or_else(|| details["candidates"].as_array());
     let threshold = details["threshold"].as_f64();
-    let description = details["interpretation"]["original"]
+    let description = details["merchant_descriptor"]["original"]
         .as_str()
+        .or_else(|| details["interpretation"]["original"].as_str())
         .or_else(|| details["request"]["description"].as_str())
         .unwrap_or("—");
     let merchant = response["merchant"]["data"]["name"]
@@ -383,8 +397,103 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
             text(details["model"].as_str().unwrap_or("—"))
         ));
     }
-    rendered.push_str("\n1. Interpret descriptor\n");
-    let interpretation = &details["interpretation"];
+    rendered.push_str("\n1. Identify payment processor\n");
+    if let Some(processor) = details.get("processor_resolution") {
+        rendered.push_str(&format!(
+            "Outcome: {}\n",
+            text(processor["status"].as_str().unwrap_or("unavailable"))
+        ));
+        if let Some(mentions) = processor["mentions"].as_array() {
+            let mentions = mentions
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !mentions.is_empty() {
+                rendered.push_str(&format!("Descriptor mentions: {}\n", text(&mentions)));
+            }
+        }
+        if let Some(candidates) = processor["candidates"].as_array().filter(|c| !c.is_empty()) {
+            let mut table = Table::new();
+            table
+                .load_style(UTF8_FULL_CONDENSED)
+                .set_header(["Processor candidate", "Website"]);
+            for candidate in candidates {
+                table.add_row([
+                    text(candidate["merchant"]["name"].as_str().unwrap_or("—")),
+                    text(candidate["merchant"]["website"].as_str().unwrap_or("—")),
+                ]);
+            }
+            rendered.push_str(&format!("{table}\n"));
+        }
+        if let Some(name) = processor["counterparty"]["name"].as_str() {
+            rendered.push_str(&format!("Resolved processor: {}\n", text(name)));
+        }
+        if processor["method"] == "format" {
+            match processor["status"].as_str() {
+                Some("matched") => {
+                    rendered.push_str(&format!("Matched stored format: {}\nPattern: {}\nScope: {}\nNo Jev processor request.\n", text(processor["format"]["id"].as_str().unwrap_or("—")), text(processor["format"]["pattern"].as_str().unwrap_or("—")), text(processor["format"]["scope"].as_str().unwrap_or("—"))));
+                    for source in processor["format"]["sources"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str) {
+                        rendered.push_str(&format!("Source: {}\n", text(source)));
+                    }
+                }
+                Some("ambiguous_format") => rendered.push_str("Conflicting stored formats matched; descriptor retained. No Jev processor request.\n"),
+                Some("no_format") => rendered.push_str("No stored format matched; descriptor retained. No Jev processor request.\n"),
+                _ => rendered.push_str("Stored format lookup failed; descriptor retained.\n"),
+            }
+        } else if processor["method"] == "exact" {
+            rendered.push_str("Reviewed exact match for the whole descriptor.\n");
+        } else if let Some(choice) = processor["provider_answer"]["choice"].as_str()
+            && let Some(probability) =
+                processor["provider_answer"]["probabilities"][choice].as_f64()
+        {
+            rendered.push_str(&format!(
+                "Jev preferred: {} · {:.1}% selected probability\n",
+                text(choice),
+                probability * 100.0
+            ));
+            if let Some(threshold) = threshold {
+                if probability < threshold && choice != "none" {
+                    rendered.push_str(&format!("Not accepted: {:.1}% is below the {:.1}% threshold. Processor text is retained.\n", probability * 100.0, threshold * 100.0));
+                } else if choice == "none" {
+                    rendered.push_str("No processor selected. Processor text is retained.\n");
+                }
+            }
+        }
+    } else {
+        rendered.push_str("No processor decision recorded.\n");
+    }
+    rendered.push_str("\n2. Prepare merchant descriptor\n");
+    let descriptor = &details["merchant_descriptor"];
+    rendered.push_str(&format!(
+        "Original: {}\n",
+        text(descriptor["original"].as_str().unwrap_or(description))
+    ));
+    if let Some(removed) = descriptor["removed_span"]["text"].as_str() {
+        rendered.push_str(&format!(
+            "Removed confirmed processor span: {}\n",
+            text(removed)
+        ));
+    } else {
+        rendered.push_str(if descriptor["status"] == "ambiguous_span" {
+            "Kept original: processor text occurs in multiple positions.\n"
+        } else {
+            "Kept original: no confirmed processor span to remove.\n"
+        });
+    }
+    let merchant_text = descriptor["text"].as_str().unwrap_or(description);
+    rendered.push_str(&format!(
+        "Merchant lookup: {}\n",
+        if merchant_text.is_empty() {
+            "(empty; merchant lookup skipped)".into()
+        } else {
+            text(merchant_text)
+        }
+    ));
+    rendered.push_str("\n3. Interpret merchant descriptor\n");
+    let interpretation = details
+        .get("merchant_interpretation")
+        .unwrap_or(&details["interpretation"]);
     if let Some(processor) = interpretation["processor_hint"].as_str() {
         rendered.push_str(&format!("Processor hint: {}\n", text(processor)));
     }
@@ -427,7 +536,7 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
                 .join(", ")
         ));
     }
-    rendered.push_str("\n2. Retrieve candidates\n");
+    rendered.push_str("\n4. Retrieve merchant candidates\n");
     if let Some(candidates) = candidates.filter(|candidates| !candidates.is_empty()) {
         let mut table = Table::new();
         table
@@ -470,7 +579,11 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
         rendered.push_str("No catalog candidates found.\n");
     }
 
-    rendered.push_str("\n3. Classify transaction kind\n");
+    rendered.push_str("\n5. Classify transaction kind\n");
+    rendered.push_str(&format!(
+        "Using original descriptor: {}\n",
+        text(description)
+    ));
     if let Some(kind) = details
         .get("kind_provider_answer")
         .filter(|v| v.is_object())
@@ -485,7 +598,7 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
         text(response["kind"].as_str().unwrap_or("unknown"))
     ));
 
-    rendered.push_str("\n4. Select merchant name\n");
+    rendered.push_str("\n6. Select merchant name\n");
     if let Some(catalog_answer) = details
         .get("catalog_provider_answer")
         .filter(|v| v.is_object())
@@ -516,7 +629,7 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
         ));
     }
 
-    rendered.push_str("\n5. Resolve catalog identity\n");
+    rendered.push_str("\n7. Resolve catalog identity\n");
     if answer["decision_stage"] == "name" {
         rendered.push_str(
             "Skipped: name selection did not meet the acceptance threshold or selected no match.\n",
@@ -586,7 +699,7 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
         }
     }
 
-    rendered.push_str("\n6. Fallbacks\n");
+    rendered.push_str("\n8. Fallbacks\n");
     if details["discovery_attempted"] == true {
         rendered.push_str(
             "Discovery attempted; its candidates were used for the final selection above.\n",
@@ -621,7 +734,11 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
         rendered.push_str("No fallback attempted.\n");
     }
     rendered.push_str(&format!("Final merchant outcome: {}\n", text(merchant)));
-    rendered.push_str("\n7. Resolve location independently\n");
+    rendered.push_str("\n9. Resolve location independently\n");
+    rendered.push_str(&format!(
+        "Using original descriptor: {}\n",
+        text(description)
+    ));
     rendered.push_str(&format!(
         "Outcome: {}\n",
         text(

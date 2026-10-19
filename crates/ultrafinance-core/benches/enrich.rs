@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 use ultrafinance_core::{
-    EnrichRequest, Enricher, enrich_locally, interpretation,
+    CounterpartyType, EnrichRequest, Enricher, enrich_locally, interpretation,
     store::{LOCAL_DATABASE_URL, MerchantStore, normalize},
 };
 
@@ -105,6 +105,26 @@ fn measure(name: &str, mut operation: impl FnMut() -> Result<()>) -> Result<()> 
     Ok(())
 }
 
+fn local_with_processor(
+    runtime: &tokio::runtime::Runtime,
+    store: &MerchantStore,
+    request: &EnrichRequest,
+) -> Result<()> {
+    let matches = store
+        .processor_format_matches(std::slice::from_ref(&request.description))?
+        .remove(0);
+    let unique: std::collections::HashSet<_> = matches
+        .iter()
+        .map(|m| (&m.processor.id, m.capture.start, &m.capture.merchant))
+        .collect();
+    let mut merchant = request.clone();
+    if unique.len() == 1 {
+        merchant.description = matches[0].capture.merchant.clone();
+    }
+    black_box(runtime.block_on(enrich_locally(&merchant, store.clone()))?);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut jev = false;
     let mut jev_samples = 3;
@@ -178,6 +198,11 @@ fn main() -> Result<()> {
         black_box(interpretation::interpret(black_box(&request)));
         Ok(())
     })?;
+    let descriptions = vec![request.description.clone()];
+    measure("processor_formats", || {
+        black_box(store.processor_format_matches(black_box(&descriptions))?);
+        Ok(())
+    })?;
     measure("retrieve", || {
         black_box(store.search_request(black_box(&request), 10)?);
         Ok(())
@@ -186,6 +211,67 @@ fn main() -> Result<()> {
         black_box(runtime.block_on(enrich_locally(black_box(&request), store.clone()))?);
         Ok(())
     })?;
+    // Isolate the local retrieval work following a unique documented format.
+    // This does not add provider, audit, or persistence work to the local run.
+    let matches = store.processor_format_matches(&descriptions)?.remove(0);
+    let identities: std::collections::HashSet<_> = matches
+        .iter()
+        .map(|m| (&m.processor.id, m.capture.start, &m.capture.merchant))
+        .collect();
+    if identities.len() == 1 {
+        let mut merchant_request = request.clone();
+        merchant_request.description = matches[0].capture.merchant.clone();
+        println!(
+            "After documented processor removal: {:?}",
+            merchant_request.description
+        );
+        for (name, kind) in [
+            ("merchant_pool_cleaned", CounterpartyType::Merchant),
+            ("bank_pool_cleaned", CounterpartyType::FinancialInstitution),
+        ] {
+            measure(name, || {
+                black_box(store.search_typed(
+                    black_box(&merchant_request.description),
+                    None,
+                    64,
+                    Some(kind),
+                )?);
+                Ok(())
+            })?;
+        }
+        measure("enrich_locally_cleaned", || {
+            black_box(
+                runtime.block_on(enrich_locally(black_box(&merchant_request), store.clone()))?,
+            );
+            Ok(())
+        })?;
+    } else {
+        println!("No unique processor format: cleaned-descriptor stages skipped.");
+    }
+    measure("processor_plus_local", || {
+        local_with_processor(&runtime, &store, &request)
+    })?;
+    println!("Varied descriptors: one first lookup each, no provider calls or calibration:");
+    for description in [
+        "SUMUP*Example Cafe",
+        "PAYPAL *Northwind Books",
+        "AWX*Example Studio",
+        "Xsolla_Example Game",
+        "WPY*Example Shop",
+        "PayPal Point of Sale *Example Bakery",
+        "SQ *JULIUS BROMONT #0042",
+        "Example Test Merchant",
+    ] {
+        let mut input = request.clone();
+        input.description = description.into();
+        let started = Instant::now();
+        local_with_processor(&runtime, &store, &input)?;
+        println!(
+            "varied {:?}: {:.2} ms",
+            description,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     if jev {
         measure_jev(&runtime, store, &request, jev_samples)?;
     }

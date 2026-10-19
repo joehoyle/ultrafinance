@@ -85,13 +85,15 @@ fn detail_stages_separate_kind_name_and_deterministic_identity() {
     });
     let rendered = render_enrichment_details(&details).unwrap();
     let headings = [
-        "1. Interpret descriptor",
-        "2. Retrieve candidates",
-        "3. Classify transaction kind",
-        "4. Select merchant name",
-        "5. Resolve catalog identity",
-        "6. Fallbacks",
-        "7. Resolve location independently",
+        "1. Identify payment processor",
+        "2. Prepare merchant descriptor",
+        "3. Interpret merchant descriptor",
+        "4. Retrieve merchant candidates",
+        "5. Classify transaction kind",
+        "6. Select merchant name",
+        "7. Resolve catalog identity",
+        "8. Fallbacks",
+        "9. Resolve location independently",
     ];
     let positions: Vec<_> = headings
         .iter()
@@ -116,4 +118,22 @@ fn detail_name_failure_still_shows_independent_kind_and_skipped_identity() {
     assert!(rendered.contains("Skipped: name selection"));
     assert!(!rendered.contains("Identity selection"));
     assert!(rendered.contains("no merchant outlet selected"));
+}
+
+#[test]
+fn processor_details_distinguish_preferred_choice_from_accepted_match() {
+    let details = serde_json::json!({
+        "threshold":0.75,
+        "processor_resolution":{"status":"unresolved", "provider_answer":{"choice":"candidate_0", "probabilities":{"candidate_0":0.62,"none":0.38}}},
+        "merchant_descriptor":{"original":"SumUp STARBUCKS", "text":"SumUp STARBUCKS", "status":"unchanged"}
+    });
+    let rendered = render_enrichment_details(&details).unwrap();
+    assert!(rendered.contains("Jev preferred: candidate_0 · 62.0%"));
+    assert!(
+        rendered.contains(
+            "Not accepted: 62.0% is below the 75.0% threshold. Processor text is retained."
+        )
+    );
+    assert!(rendered.contains("Merchant lookup: SumUp STARBUCKS"));
+    assert!(!rendered.contains("Removed confirmed processor span:"));
 }

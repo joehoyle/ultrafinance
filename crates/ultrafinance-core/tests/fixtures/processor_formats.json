@@ -1,0 +1,158 @@
+[
+  {
+    "id": "airwallex-mor-awx-star",
+    "positive_examples": [
+      {
+        "description": "AWX*YourBusiness",
+        "merchant": "YourBusiness"
+      },
+      {
+        "description": "awx* Example Studio",
+        "merchant": "Example Studio"
+      }
+    ],
+    "negative_examples": [
+      "AWX",
+      "AWX*",
+      "AWX Example Studio",
+      "AWXYZ*Example Studio",
+      "Example Studio"
+    ]
+  },
+  {
+    "id": "paypal-name-star",
+    "positive_examples": [
+      {
+        "description": "PAYPAL*Example Cafe",
+        "merchant": "Example Cafe"
+      },
+      {
+        "description": "paypal * Northwind Books",
+        "merchant": "Northwind Books"
+      }
+    ],
+    "negative_examples": [
+      "PAYPAL",
+      "PAYPAL*",
+      "PAYPAL Example Cafe",
+      "NOTPAYPAL*Example Cafe",
+      "TRANSFER TO PAYPAL*Example Cafe",
+      "PAYPALINST XFER",
+      "PP*Example Cafe",
+      "PayPal Point of Sale *Example Cafe"
+    ]
+  },
+  {
+    "id": "square-sq-star",
+    "positive_examples": [
+      {
+        "description": "SQ*Example Cafe",
+        "merchant": "Example Cafe"
+      },
+      {
+        "description": "sq * Northwind Books",
+        "merchant": "Northwind Books"
+      },
+      {
+        "description": "SQ *Example Pharmacy*#02943",
+        "merchant": "Example Pharmacy*#02943"
+      }
+    ],
+    "negative_examples": [
+      "SQ",
+      "SQ*",
+      "SQ Example Cafe",
+      "NOTSQ*Example Cafe",
+      "TRANSFER TO SQ*Example Cafe"
+    ]
+  },
+  {
+    "id": "sumup-card-star",
+    "positive_examples": [
+      {
+        "description": "SUMUP*Example Cafe",
+        "merchant": "Example Cafe"
+      },
+      {
+        "description": "SumUp* Another Shop",
+        "merchant": "Another Shop"
+      },
+      {
+        "description": "sumup * Café Élan",
+        "merchant": "Café Élan"
+      }
+    ],
+    "negative_examples": [
+      "SUMUP",
+      "SUMUP*",
+      "SumUp STARBUCKS",
+      "SUMUPER*Example Cafe",
+      "TRANSFER TO SUMUP*Example Cafe"
+    ]
+  },
+  {
+    "id": "wepay-wpy-star-merchant",
+    "positive_examples": [
+      {
+        "description": "WPY* Example Cafe",
+        "merchant": "Example Cafe"
+      },
+      {
+        "description": "wpy*Northwind Books",
+        "merchant": "Northwind Books"
+      }
+    ],
+    "negative_examples": [
+      "WPY",
+      "WPY*",
+      "WPY* ",
+      "WPY Example Cafe",
+      "XWPY*Example Cafe",
+      "TRANSFER TO WPY*Example Cafe"
+    ]
+  },
+  {
+    "id": "xsolla-star-or-underscore",
+    "positive_examples": [
+      {
+        "description": "Xsolla_Roblox",
+        "merchant": "Roblox"
+      },
+      {
+        "description": "Xsolla*EFT",
+        "merchant": "EFT"
+      },
+      {
+        "description": "XSOLLA * Example Game",
+        "merchant": "Example Game"
+      }
+    ],
+    "negative_examples": [
+      "Xsolla Inc.",
+      "XSOLLA",
+      "XSOLLA*",
+      "XSOLLA Example Game",
+      "NOTXSOLLA*Example Game"
+    ]
+  },
+  {
+    "id": "zettle-paypal-point-of-sale-star",
+    "positive_examples": [
+      {
+        "description": "PayPal Point of Sale *Example Cafe",
+        "merchant": "Example Cafe"
+      },
+      {
+        "description": "PAYPAL POINT OF SALE*Northwind Books",
+        "merchant": "Northwind Books"
+      }
+    ],
+    "negative_examples": [
+      "PayPal Point of Sale",
+      "PayPal Point of Sale *",
+      "PayPal Point of Sale Example Cafe",
+      "PayPal *Example Cafe",
+      "TRANSFER TO PAYPAL POINT OF SALE *Example Cafe"
+    ]
+  }
+]

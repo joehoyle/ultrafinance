@@ -7,6 +7,7 @@ use postgres::{binary_copy::BinaryCopyInWriter, types::Type};
 // Build secondary indexes once after final merchant/source/location writes.
 const DEFERRED: &[&str] = &[
     "merchants_name",
+    "merchants_counterparty_type_key",
     "merchants_markets",
     "aliases_normalized",
     "merchant_search_tokens",

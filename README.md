@@ -13,13 +13,55 @@ Supported resolutions are remembered with context; only explicit review enables
 direct matching from a remembered mapping. See [interpretation, discovery and
 mapping configuration](docs/discovery.md).
 
+### Experimental description extraction
+
+`extract` tries Cloudflare's preview
+[Clairic model](https://developers.cloudflare.com/workers-ai/models/clairic/) on
+one description, alongside the existing local interpretation:
+
+```sh
+cargo run -- extract 'SQ *JULIUS CAFE BROMONT 00482' --dry-run
+# Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AUTH_TOKEN in your environment first.
+cargo run -- extract 'SQ *JULIUS CAFE BROMONT 00482'
+```
+
+The live command sends the description and ten text-field definitions to
+Cloudflare Workers AI: processor, merchant, address, city/locality,
+state/province/region (`region`), postal code, country,
+store number, reference, and website. Geographic components are independent:
+country-only or region-only descriptions do not need a city. A structured
+`location` object summarizes the five geographic components; `fields` retains
+their individual source spans and confidence. Missing parts stay null.
+For example, `TORONTO ON CANADA`
+can supply a city, region, and country, while `ON` alone must not imply Toronto
+or Canada. Country names and abbreviations remain as written, not normalized ISO
+codes. It requires a token with Workers AI
+access, incurs provider usage, and reports elapsed time and returned usage.
+`--dry-run` prints the exact payload without credentials or a network call;
+`--json` produces compact JSON. No PostgreSQL connection is needed.
+
+Results are unverified clues, not resolved merchant identities or confirmed
+purchase geography. Text remains an exact source span, including abbreviations;
+absent fields retain `null`, and provider guesses are discarded. Malformed,
+truncated, or inconsistent source spans fail the command. Extraction does not
+change normal enrichment, save history, or create aliases, locations, or merchants.
+Compare results on independently verified descriptions before integrating them
+with retrieval; model confidence alone does not establish accuracy.
+
 ## Counterparties
 
 Enrichment returns `counterparties`, an array of supported catalog identities,
-with an explicit `type`: `merchant` or `financial_institution`. Each identity has
+with an explicit `type`: `merchant`, `financial_institution`, or `payment_processor`. Each identity has
 an ID, name, and optional website, markets, and logo metadata. Public API responses
 omit internal matching aliases and source URLs. An empty array means no supported
-identity; this version resolves at most one counterparty per transaction.
+identity. Payment processor matching runs first using researched formats stored
+in PostgreSQL. A unique format match assigns the processor and extracts merchant
+lookup text without Jev. Unknown or conflicting formats retain the descriptor.
+The original descriptor is retained for kind classification, location and audit.
+`--details` shows the format ID, pattern, source documentation and extraction.
+See [processor formats](docs/processor-formats.md) for validation, source evidence,
+import/preview commands and the deliberately limited initial coverage.
+
 
 `kind` describes the operation independently. A fee or transfer can have a
 financial institution as its counterparty, while a refund can have a merchant.
@@ -289,6 +331,10 @@ threshold; `none`, weak evidence and indistinguishable identities still abstain.
 The second-stage probability is conditional on the recognized name, not an
 overall calibrated match probability. `--details` records both answers and requests.
 Cases without competing same-name identities retain the single merchant question.
+Name recognition allows omitted accents and leading articles, and favors a full
+distinctive phrase over fragment matches: `DELICES DU MONT` supports
+`Les Délices du Mont` more strongly than `Délices` or `Du Mont`. Distinctive
+suffixes and symbols still matter, including `RONA` versus `RONA+`.
 
 An opt-in live regression check covers unresolved homonyms, precise outlet
 evidence against a larger footprint, incidental transfer memos, unrelated
@@ -297,6 +343,7 @@ does not save learned mappings. With `TYPESAFE_API_KEY` exported:
 
 ```sh
 cargo test --locked -p ultrafinance-core live_identity_controls -- --ignored --nocapture
+cargo test --locked -p ultrafinance-core live_trading_name_controls -- --ignored --nocapture
 ```
 
 Each shortlisted merchant includes a bounded outlet summary: distinct identifiable
@@ -1888,13 +1935,18 @@ legacy merchant result unresolved and does not determine the transaction kind.
 This adds a catalog identity type; descriptor parsing does not yet produce a
 separate processor and underlying merchant from a single compound descriptor.
 
-The `wikidata-payments` source imports organizations selected from the English
+The `wikidata-payments` source imports provider identities selected from the English
 Wikipedia [payment service provider category](https://en.wikipedia.org/wiki/Category:Payment_service_providers),
 including SumUp where present in the published selection. It resolves every
-category page to its Wikidata QID, then requires an organization classification,
-an English label, and no dissolution date. Generic concepts, list pages and
-unmapped pages are excluded. The importer has no provider-specific entries or
-name rules. It preserves category membership and QID mappings in its JSON
+category page to its Wikidata QID, then accepts organization, payment-system,
+brand, service, financial-product or website/platform classifications, an English
+or shared default-language label, and no dissolution date. Generic concepts,
+list pages and unmapped pages are excluded. Each fresh snapshot retains a
+`selection_report` with every excluded page and its reason, also printed during
+download. This avoids silently losing brands such as Square that Wikidata does
+not classify as organizations. Older cached snapshots remain readable; download
+a fresh snapshot to apply the expanded selection. The importer has no
+provider-specific entries or name rules. It preserves category membership and QID mappings in its JSON
 snapshot alongside the Wikidata names, aliases, country hints and websites.
 Category selection is editorial, not a regulator license or exhaustive directory.
 

@@ -7,7 +7,7 @@ root, then run:
 cargo bench --locked -p ultrafinance-core --bench enrich
 ```
 
-The only transaction is `SQ* JULIUS BROMONT`, with no country or other context.
+The baseline transaction is `SQ* JULIUS BROMONT`, with no country or other context.
 The benchmark uses the existing local catalog. Set `ULTRAFINANCE_DATABASE_URL`
 to select another local catalog (only loopback hosts are accepted); the benchmark does not load `.env` files. Use the same
 catalog and machine when comparing changes. An empty catalog is supported and
@@ -25,6 +25,22 @@ database measurement. Each stage then calibrates its batch size and collects
 30 warm samples, reporting mean, p50, and p95 in microseconds per operation.
 Percentiles describe batch averages, not individual request tail latency.
 Errors fail the benchmark instead of becoming fast successful samples.
+
+Additional stages measure DB-backed processor-format matching and, when a unique
+format matches, the merchant and financial-institution search pools plus local
+enrichment of the cleaned descriptor. These stages overlap and must not be
+summed. `retrieve` uses general request search, while `enrich_locally` uses the
+primary-counterparty path. Local enrichment does not itself perform the
+production processor-resolution stage. See the
+[2026-10-19 measurements](../../../docs/benchmarks/enrich-local-2026-10-19.md)
+for a retrieval/JIT breakdown and a connection-scoped JIT comparison.
+
+`processor_plus_local` times processor matching plus read-only enrichment of
+the cleaned descriptor. The benchmark also reports one first lookup of each of
+eight varied synthetic/public descriptors, without provider calls or writes.
+These first lookups are separate from warm recurring-descriptor batch averages.
+See the [latency optimization report](../../../docs/benchmarks/enrich-latency-optimization-2026-10-19.md)
+for the 10 ms warm target, bounded caches and the remaining first-lookup cost.
 
 Include end-to-end enrichment through Jev against that same local database:
 

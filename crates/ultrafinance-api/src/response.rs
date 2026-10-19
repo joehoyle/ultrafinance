@@ -74,7 +74,7 @@ pub struct EnrichResponse {
     /// Financial operation classified independently of merchant identity; unknown when evidence is insufficient or Jev is not configured.
     kind: ultrafinance_core::TransactionKind,
     merchant: MerchantResult,
-    /// Supported counterparties; empty when unresolved. Currently at most one identity.
+    /// Independently supported merchants, institutions and payment processors; empty when unresolved.
     counterparties: Vec<Counterparty>,
     /// Independently extracted geography or a supported catalog outlet match.
     location: LocationResult,

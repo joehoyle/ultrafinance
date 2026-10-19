@@ -1,0 +1,53 @@
+{
+  "date": "2026-10-19",
+  "profile": "release",
+  "cases": 197,
+  "model": "jev-latest",
+  "threshold": 0.75,
+  "schema": 25,
+  "before_full_seconds": 100.2012571249943,
+  "before_local_seconds": 114.71582549999584,
+  "after_local_seconds": 68.77274991601007,
+  "local_runtime_reduction_percent": 40.04946604685108,
+  "local_candidates_compared": 197,
+  "local_candidate_record_mismatches": 0,
+  "after_local_median_ms": 315.14124999999996,
+  "after_local_p95_ms": 654.269833,
+  "vocabulary_equivalence": {
+    "tokens": 426,
+    "complete_at_0_5": 389,
+    "fallback_to_0_3": 37,
+    "differences_from_legacy": 0
+  },
+  "public_example_query_ms": {
+    "gin_threshold_0_5": 73.294,
+    "gin_threshold_0_3": 261.874,
+    "discarded_gist_knn": 3775.145
+  },
+  "discarded_pool_policy_experiment_seconds": 166.6262086249917,
+  "validation": {
+    "full_core_passed": 276,
+    "ignored": 5,
+    "final_eval_regressions_passed": 7,
+    "workspace_clippy": "passed",
+    "note": "An initial parallel full run hit the existing dedupe mock-server WouldBlock timeout. The complete rerun with four test workers passed."
+  },
+  "limits": [
+    "Separate fresh processes using the same local PostgreSQL catalog; database buffers are warmed and measurements are not cold-database tests.",
+    "Provider behavior varies; these are observed runs rather than a controlled latency guarantee.",
+    "197-case suite contains no documented-format processor stripping cases; duplicate-lookup removal is verified by a separate regression.",
+    "Enrich case timers include batch waiting. Use measured wall time to compare the full runs."
+  ],
+  "after_full_seconds": 77.69597200000135,
+  "full_runtime_reduction_percent": 22.460082608463814,
+  "full_comparison": {
+    "actual_enrichment_candidate_record_mismatches": 0,
+    "predicted_id_changes": 3,
+    "unique_provider_requests": {
+      "recognition": 27,
+      "identity": 20
+    },
+    "matches": 94,
+    "errors": 0
+  }
+}

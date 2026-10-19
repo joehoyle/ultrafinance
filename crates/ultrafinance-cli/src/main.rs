@@ -1,11 +1,13 @@
 mod batch;
 mod build_metadata;
 mod database;
+mod extract;
 mod financial_download;
 mod foursquare_download;
 mod infra;
 mod logos;
 mod output;
+mod processor_formats;
 mod research;
 mod sources;
 mod text_enrich;
@@ -42,6 +44,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Import or inspect researched processor descriptor formats stored in PostgreSQL.
+    ProcessorFormats(processor_formats::Args),
     /// Browse registered datasets, download snapshots, and refresh source knowledge.
     Sources(sources::Args),
     /// Discover and maintain reusable website logo assets.
@@ -90,6 +94,8 @@ enum Command {
     Enrich(Box<EnrichArgs>),
     /// Research a transaction description using web search and the merchant catalog.
     Research(research::Args),
+    /// Experiment with Clairic descriptor extraction (no catalog writes or matching).
+    Extract(extract::Args),
     /// Enrich up to 100 transactions using shared provider batches.
     EnrichBatch(BatchEnrichArgs),
     /// Benchmark labeled suites or measure coverage of dataset samples.
@@ -647,10 +653,14 @@ async fn main() -> Result<()> {
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
+        Command::ProcessorFormats(args) => {
+            processor_formats::run(args, cli.database_url.as_deref())?
+        }
         Command::Logos(args) => logos::run(args, cli.database_url.as_deref()).await?,
         Command::Sources(args) => sources::run(args, cli.database_url.as_deref()).await?,
         Command::Infra(args) => infra::run(args)?,
         Command::Research(args) => research::run(args, cli.database_url.as_deref()).await?,
+        Command::Extract(args) => extract::run(args).await?,
         Command::Interpret {
             description,
             list_formats,

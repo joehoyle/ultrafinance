@@ -1,0 +1,103 @@
+{
+  "date": "2026-10-19",
+  "target_ms": 10,
+  "schema": 25,
+  "base_revision": "e0159eb",
+  "workspace": "dirty; latency optimizations included",
+  "samples_per_stage": 30,
+  "baseline_descriptor": "SQ* JULIUS BROMONT",
+  "warm_stages": {
+    "normalize": {
+      "mean_us": 0.04,
+      "p50_us": 0.04,
+      "p95_us": 0.04,
+      "ops_per_sample": 65536
+    },
+    "interpret": {
+      "mean_us": 3.53,
+      "p50_us": 3.53,
+      "p95_us": 3.6,
+      "ops_per_sample": 4096
+    },
+    "processor_formats": {
+      "mean_us": 1666.64,
+      "p50_us": 1606.88,
+      "p95_us": 1975.35,
+      "ops_per_sample": 8
+    },
+    "retrieve": {
+      "mean_us": 5966.05,
+      "p50_us": 5716.08,
+      "p95_us": 7015.58,
+      "ops_per_sample": 1
+    },
+    "enrich_locally": {
+      "mean_us": 5948.02,
+      "p50_us": 5786.54,
+      "p95_us": 7097.12,
+      "ops_per_sample": 1
+    },
+    "merchant_pool_cleaned": {
+      "mean_us": 1906.22,
+      "p50_us": 1830.79,
+      "p95_us": 2629.17,
+      "ops_per_sample": 1
+    },
+    "bank_pool_cleaned": {
+      "mean_us": 797.11,
+      "p50_us": 746.29,
+      "p95_us": 1103.54,
+      "ops_per_sample": 1
+    },
+    "enrich_locally_cleaned": {
+      "mean_us": 5026.53,
+      "p50_us": 4955.17,
+      "p95_us": 6189.67,
+      "ops_per_sample": 1
+    },
+    "processor_plus_local": {
+      "mean_us": 6546.32,
+      "p50_us": 6615.77,
+      "p95_us": 7146.77,
+      "ops_per_sample": 2
+    }
+  },
+  "first_process_local_enrichment_ms": 2278.47,
+  "varied_first_lookups": [
+    {
+      "description": "SUMUP*Example Cafe",
+      "elapsed_ms": 2571.14
+    },
+    {
+      "description": "PAYPAL *Northwind Books",
+      "elapsed_ms": 2859.98
+    },
+    {
+      "description": "AWX*Example Studio",
+      "elapsed_ms": 601.9
+    },
+    {
+      "description": "Xsolla_Example Game",
+      "elapsed_ms": 2233.45
+    },
+    {
+      "description": "WPY*Example Shop",
+      "elapsed_ms": 660.58
+    },
+    {
+      "description": "PayPal Point of Sale *Example Bakery",
+      "elapsed_ms": 285.29
+    },
+    {
+      "description": "SQ *JULIUS BROMONT #0042",
+      "elapsed_ms": 131.54
+    },
+    {
+      "description": "Example Test Merchant",
+      "elapsed_ms": 2061.19
+    }
+  ],
+  "provider_calls": 0,
+  "persistence": false,
+  "limits": "Local read-only enrichment only; excludes audit writes, descriptor learning, HTTP and providers. Warm percentiles are calibrated batch averages, not individual-request tail latency. Varied entries are one first lookup of each new descriptor in the same warmed process. No deliberate benchmark/test workloads ran concurrently during the final measurement; other local application activity was present on shared hardware."
+}

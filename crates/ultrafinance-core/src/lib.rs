@@ -23,6 +23,7 @@ pub mod logos;
 pub mod markets;
 pub use location::{LocationData, LocationHint, LocationPrecision, LocationResult};
 mod pipeline;
+pub mod processor_formats;
 pub use pipeline::{LocalEnrichment, enrich_locally};
 mod regex_rules;
 pub mod research;
@@ -146,7 +147,7 @@ pub struct EnrichResponse {
     #[cfg_attr(feature = "openapi", schema(required = true))]
     pub kind: TransactionKind,
     pub merchant: MerchantResult,
-    /// Supported counterparties. Currently the matcher resolves at most one identity.
+    /// Independently supported merchants, institutions and payment processors.
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(required = true))]
     pub counterparties: Vec<Counterparty>,
@@ -164,7 +165,9 @@ impl EnrichResponse {
     // internal match slot. Never expose an institution as a merchant.
     fn finish_counterparties(&mut self) {
         if let MerchantResult::Matched { data } = &self.merchant {
-            self.counterparties = vec![(**data).clone()];
+            if !self.counterparties.iter().any(|party| party.id == data.id) {
+                self.counterparties.insert(0, (**data).clone());
+            }
             if data.counterparty_type != CounterpartyType::Merchant {
                 self.merchant = MerchantResult::Unresolved { data: () };
             }
@@ -314,17 +317,7 @@ impl Enricher {
         &self,
         request: &EnrichRequest,
     ) -> (Result<EnrichResponse>, Value) {
-        let candidates = match request.validate() {
-            Err(error) => Err(error),
-            Ok(()) => self.retrieve(request).await,
-        };
-        let (mut results, mut details) = self
-            .enrich_batch_candidates_traced(vec![(request.clone(), candidates)])
-            .await;
-        (
-            results.remove(0),
-            details.pop().unwrap_or_else(|| serde_json::json!({})),
-        )
+        self.enrich_request_traced(request).await
     }
 }
 

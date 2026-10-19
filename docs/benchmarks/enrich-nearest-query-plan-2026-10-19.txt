@@ -1,0 +1,33 @@
+BEGIN
+SET
+SET
+SET
+SET
+                                                                                             QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=9.38..18.96 rows=8 width=48) (actual time=2681.278..3774.441 rows=8 loops=1)
+   Buffers: shared hit=183035
+   ->  Function Scan on unnest query  (cost=0.00..0.02 rows=2 width=32) (actual time=0.008..0.011 rows=2 loops=1)
+   ->  Limit  (cost=9.38..9.39 rows=4 width=20) (actual time=1887.209..1887.210 rows=4 loops=2)
+         Buffers: shared hit=183035
+         ->  Sort  (cost=9.38..9.39 rows=4 width=20) (actual time=1887.207..1887.208 rows=4 loops=2)
+               Sort Key: (similarity(nearest.word, query.word)) DESC, nearest.word
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=183035
+               ->  Subquery Scan on nearest  (cost=0.42..9.34 rows=4 width=20) (actual time=1860.079..1887.180 rows=4 loops=2)
+                     Buffers: shared hit=183032
+                     ->  Limit  (cost=0.42..9.29 rows=4 width=20) (actual time=1860.077..1887.174 rows=4 loops=2)
+                           Buffers: shared hit=183032
+                           ->  Index Scan using merchant_search_words_nearest on merchant_search_words  (cost=0.42..289025.69 rows=130290 width=20) (actual time=1860.073..1887.166 rows=5 loops=2)
+                                 Index Cond: (word % query.word)
+                                 Order By: (word <-> query.word)
+                                 Filter: (word <> query.word)
+                                 Rows Removed by Filter: 1
+                                 Buffers: shared hit=183032
+ Planning:
+   Buffers: shared hit=183
+ Planning Time: 3.191 ms
+ Execution Time: 3775.145 ms
+(23 rows)
+
+ROLLBACK

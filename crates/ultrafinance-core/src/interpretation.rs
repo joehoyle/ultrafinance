@@ -227,11 +227,21 @@ pub(crate) fn catalog_support(
         .collect()
 }
 pub fn interpret(request: &EnrichRequest) -> Interpretation {
+    interpret_with_prefix_hints(request, true)
+}
+
+/// Merchant enrichment receives a descriptor already prepared by the verified
+/// processor stage. Legacy prefix hints must not strip unresolved processors.
+pub(crate) fn interpret_merchant(request: &EnrichRequest) -> Interpretation {
+    interpret_with_prefix_hints(request, false)
+}
+
+fn interpret_with_prefix_hints(request: &EnrichRequest, prefix_hints: bool) -> Interpretation {
     let original = request.description.clone();
     let (bank_text, mut unverified_tokens) = bank_formats::merchant_text(&original);
     let mut text = bank_text.trim();
     let mut processor_hint = None;
-    while let Some((processor, rest)) = crate::regex_rules::processor_prefix(text) {
+    while prefix_hints && let Some((processor, rest)) = crate::regex_rules::processor_prefix(text) {
         // The outermost processor is the hint; nested wrappers are retained in original.
         processor_hint.get_or_insert_with(|| processor.to_owned());
         text = rest;

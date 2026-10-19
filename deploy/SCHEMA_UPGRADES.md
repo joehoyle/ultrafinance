@@ -6,6 +6,36 @@ can succeed even when the image cannot use the database. A catalog response
 with `database_schema_mismatch` is a permanent release error, not Aurora resume.
 The release tool stops immediately and leaves an unpromoted candidate off `live`.
 
+Schema 25 adds a revision trigger on `processor_formats`. This invalidates
+compiled rule and processor caches after updates from any database writer,
+including direct SQL and other connections. Apply `database init` with the new
+binary before serving schema-25 images. Update schema-24 clients together.
+
+Schema 24 removes synthetic positive/negative examples from runtime processor
+format records. They now live in repository test fixtures. Apply `database init`
+with the new binary before serving schema-24 images. The migration preserves all
+rule patterns, processor links, research provenance and enabled states. Schema-23
+clients reject the upgraded database, so update active clients together.
+
+Schema 23 adds the processor-format catalog. Apply `database init` with the new
+binary before serving schema-23 images, then explicitly import the reviewed
+format data; migration does not invent or auto-enable processor formats.
+See [format validation and import](../docs/processor-formats.md). Schema-22
+binaries reject an upgraded database, so update active clients together.
+
+Schema 22 adds `merchants_counterparty_type_key` on
+`merchants(counterparty_type, merchant_key)` for typed catalog retrieval. Existing
+databases require `ultrafinance database init` with the new binary before serving
+schema-22 images. The index builds transactionally under the catalog writer lock
+and blocks writes to `merchants` during construction; allow time for a full-table
+index build on large catalogs. The migration removes the statement timeout for
+this build only within its transaction. Initial loads defer the index until data
+has been loaded. The migration also analyzes `counterparty_type` so ordered type
+listings can choose the new index instead of filtering the full name index.
+Databases that applied an earlier schema-22 migration without that analysis can
+refresh it with `ANALYZE merchants(counterparty_type);`.
+Existing schema-21 binaries reject the upgraded schema.
+
 ## The schema 14 → 19 cutover
 
 The failure in run 39064834793 is confirmed by the version 37 Lambda logs:

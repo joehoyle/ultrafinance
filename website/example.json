@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-10-19T18:16:49Z",
+  "captured_at": "2026-10-19T20:49:59Z",
   "endpoint": "https://ultrafinance.app/v1/enrich",
   "request": {
     "amount": "6.50",
@@ -9,23 +9,38 @@
   },
   "response": {
     "attributions": [
-      "Foursquare OS Places by Foursquare Labs, Inc. (Apache-2.0, https://docs.foursquare.com/data-products/docs/places-os-data-schema)",
-      "Enrichment from Merchant Studio by Jonathan Taveras (CC-BY-4.0, https://github.com/jtvargas/merchant-studio)",
-      "Open Enrichment by Steve Harrison (CC0-1.0, https://github.com/steveharrison/openenrichment)"
+      "Foursquare OS Places by Foursquare Labs, Inc. (Apache-2.0, https://docs.foursquare.com/data-products/docs/places-os-data-schema)"
     ],
+    "counterparties": [
+      {
+        "id": "mer_7ef5fd20e86f4237b039766ea9968b86",
+        "markets": [
+          "CA",
+          "GB",
+          "MX",
+          "US"
+        ],
+        "name": "Starbucks",
+        "type": "merchant",
+        "website": "https://www.starbucks.ca/"
+      }
+    ],
+    "kind": "purchase",
     "location": {
       "data": null,
       "status": "unresolved"
     },
     "merchant": {
       "data": {
-        "id": "mer_d1feb5eb95f1415ea7cd5df9c9f428f5",
+        "id": "mer_7ef5fd20e86f4237b039766ea9968b86",
         "markets": [
           "CA",
+          "GB",
+          "MX",
           "US"
         ],
         "name": "Starbucks",
-        "website": "https://www.starbucks.com/store-locator/store/1022254"
+        "website": "https://www.starbucks.ca/"
       },
       "status": "matched"
     }

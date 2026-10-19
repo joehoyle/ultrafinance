@@ -9,6 +9,25 @@ pub const FDIC_URL: &str = "https://api.fdic.gov/banks/docs";
 pub const NCUA_URL: &str = "https://ncua.gov/analysis/credit-union-corporate-call-report-data";
 pub const GLEIF_URL: &str = "https://www.gleif.org/en/lei-data/gleif-api";
 pub const PAYMENTS_URL: &str = "https://en.wikipedia.org/wiki/Category:Payment_service_providers";
+// These are semantic classes, not provider-specific exceptions. Category
+// membership still restricts selection to payment-service-provider pages.
+pub const PAYMENT_PROVIDER_CLASSES: &[&str] = &[
+    "Q43229",    // organization
+    "Q986008",   // payment system
+    "Q431289",   // brand
+    "Q7406919",  // service
+    "Q15809678", // financial product
+    "Q35127",    // website / online platform within the selected provider category
+];
+
+fn provider_kind(row: &Value) -> Option<&str> {
+    let uri = row["providerKind"]["value"]
+        .as_str()
+        .or_else(|| row["organization"]["value"].as_str())?;
+    let id = uri.strip_prefix("http://www.wikidata.org/entity/")?;
+    PAYMENT_PROVIDER_CLASSES.contains(&id).then_some(uri)
+}
+
 pub const WIKIDATA_URL: &str = "https://www.wikidata.org/wiki/Q650241";
 pub const WIKIDATA_QUERY: &str = r#"SELECT DISTINCT ?item ?name ?country ?website ?lei ?alias ?financialInstitution WHERE {
   ?item wdt:P31/wdt:P279* wd:Q650241; rdfs:label ?name.
@@ -45,7 +64,7 @@ pub fn metadata(source: Source) -> (&'static str, &'static str, &'static str) {
         ),
         Source::WikidataPayments => (
             "CC0-1.0 AND CC-BY-SA-4.0",
-            "Wikidata contributors; English Wikipedia payment-service-provider category selects organizations",
+            "Wikidata contributors; English Wikipedia payment-service-provider category selects organizations, payment systems, services, products, brands and online platforms",
             PAYMENTS_URL,
         ),
         Source::Wikidata => (
@@ -270,6 +289,12 @@ pub fn wikidata(data: &Value) -> Result<Vec<SourceRecord>> {
     wikidata_records(data, false)
 }
 pub fn wikidata_payments(data: &Value) -> Result<Vec<SourceRecord>> {
+    Ok(payment_provider_selection(data)?.0)
+}
+
+/// Return imported identities and an explicit, reproducible exclusion report.
+/// Version 2 snapshots retain one or more query rows for every mapped QID.
+pub fn payment_provider_selection(data: &Value) -> Result<(Vec<SourceRecord>, Vec<Value>)> {
     let category = data["category"]["query"]["categorymembers"]
         .as_array()
         .context("payment-provider category evidence missing")?;
@@ -292,12 +317,92 @@ pub fn wikidata_payments(data: &Value) -> Result<Vec<SourceRecord>> {
         );
         ids.insert(required(member, "qid")?);
     }
-    let records = wikidata_records(data, true)?;
+    let rows = data["results"]["bindings"]
+        .as_array()
+        .context("Wikidata SPARQL bindings missing")?;
+    let version = data["selection_version"].as_u64().unwrap_or(1);
     ensure!(
-        records.iter().all(|r| ids.contains(r.external_id.as_str())),
-        "payment provider missing category membership evidence"
+        matches!(version, 1 | 2),
+        "unsupported payment-provider selection version"
     );
-    Ok(records)
+    let mut grouped = BTreeMap::<String, Vec<Value>>::new();
+    for row in rows {
+        let qid = row["item"]["value"]
+            .as_str()
+            .and_then(|uri| uri.strip_prefix("http://www.wikidata.org/entity/"))
+            .context("invalid Wikidata URI")?;
+        ensure!(
+            ids.contains(qid),
+            "payment provider missing category membership evidence"
+        );
+        ensure!(
+            row["paymentProviderCategory"]["value"] == PAYMENTS_URL,
+            "payment-provider category evidence missing"
+        );
+        grouped.entry(qid.into()).or_default().push(row.clone());
+    }
+    if version == 2 {
+        ensure!(
+            ids.iter().all(|id| grouped.contains_key(*id)),
+            "incomplete payment-provider query results"
+        );
+    }
+    let mut accepted = Vec::new();
+    let mut reasons = BTreeMap::new();
+    for (qid, rows) in grouped {
+        let reason = if version == 1 {
+            None // Preserve compatibility with organization-only cached snapshots.
+        } else if rows
+            .iter()
+            .any(|r| r["dissolved"]["value"].as_str().is_some())
+        {
+            Some("dissolved")
+        } else if !rows.iter().any(|r| {
+            r["name"]["value"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+        }) {
+            Some("missing_english_or_default_label")
+        } else if !rows.iter().any(|r| provider_kind(r).is_some()) {
+            Some("unsupported_classification")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            let classes: BTreeSet<_> = rows
+                .iter()
+                .filter_map(|r| r["instanceOf"]["value"].as_str())
+                .collect();
+            reasons.insert(qid, json!({"reason":reason,"instance_of":classes}));
+        } else {
+            accepted.extend(
+                rows.into_iter()
+                    .filter(|r| version == 1 || provider_kind(r).is_some()),
+            );
+        }
+    }
+    let mut filtered = data.clone();
+    filtered["results"]["bindings"] = json!(accepted);
+    let records = wikidata_records(&filtered, true)?;
+    let imported: BTreeSet<_> = records.iter().map(|r| r.external_id.as_str()).collect();
+    let mut excluded = Vec::new();
+    for page in category {
+        let title = required(page, "title")?;
+        let qid = members
+            .iter()
+            .find(|m| m["title"] == title)
+            .and_then(|m| m["qid"].as_str());
+        if qid.is_some_and(|id| imported.contains(id)) {
+            continue;
+        }
+        let mut entry = qid.and_then(|id| reasons.get(id)).cloned().unwrap_or_else(|| json!({
+            "reason":if qid.is_none() { "missing_wikidata_mapping" } else { "legacy_selection_omission" }
+        }));
+        entry["title"] = json!(title);
+        entry["qid"] = json!(qid);
+        excluded.push(entry);
+    }
+    Ok((records, excluded))
 }
 fn wikidata_records(data: &Value, payments: bool) -> Result<Vec<SourceRecord>> {
     let rows = data["results"]["bindings"]
@@ -309,9 +414,8 @@ fn wikidata_records(data: &Value, payments: bool) -> Result<Vec<SourceRecord>> {
         let get = |key: &str| row[key]["value"].as_str().unwrap_or("").trim();
         if payments {
             ensure!(
-                get("paymentProviderCategory") == PAYMENTS_URL
-                    && get("organization") == "http://www.wikidata.org/entity/Q43229",
-                "payment-provider category/organization evidence missing"
+                get("paymentProviderCategory") == PAYMENTS_URL && provider_kind(row).is_some(),
+                "payment-provider category/classification evidence missing"
             );
         } else {
             ensure!(
@@ -343,6 +447,18 @@ fn wikidata_records(data: &Value, payments: bool) -> Result<Vec<SourceRecord>> {
         });
         if payments {
             r.merchant.counterparty_type = CounterpartyType::PaymentProcessor;
+            let kinds = r
+                .raw
+                .as_object_mut()
+                .unwrap()
+                .entry("provider_kinds")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .unwrap();
+            let kind = json!(provider_kind(row).unwrap());
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
         }
         ensure!(
             r.merchant.name == name,
@@ -365,6 +481,13 @@ fn wikidata_records(data: &Value, payments: bool) -> Result<Vec<SourceRecord>> {
         }
     }
     for (id, r) in &mut records {
+        if let Some(kinds) = r
+            .raw
+            .get_mut("provider_kinds")
+            .and_then(Value::as_array_mut)
+        {
+            kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        }
         r.merchant.markets.sort();
         r.merchant.markets.dedup();
         r.merchant.aliases.sort();
@@ -531,6 +654,86 @@ mod tests {
         assert!(prepare(Source::Gleif, &data.to_string(), "global").is_err());
         assert!(website("javascript:alert(1)").is_none());
     }
+    #[test]
+    fn payment_selection_includes_systems_brands_and_services_and_reports_exclusions() {
+        let mut data: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/wikidata-payments.json"))
+                .unwrap();
+        data["selection_version"] = json!(2);
+        let original = data["results"]["bindings"][0].clone();
+        let mut rows = Vec::new();
+        let mut pages = Vec::new();
+        let mut members = Vec::new();
+        for (index, kind) in PAYMENT_PROVIDER_CLASSES.iter().enumerate() {
+            let qid = format!("Q{}", index + 100);
+            let title = format!("Provider {index}");
+            let mut row = original.clone();
+            row.as_object_mut().unwrap().remove("organization");
+            row["item"]["value"] = json!(format!("http://www.wikidata.org/entity/{qid}"));
+            row["name"]["value"] = json!(title);
+            row["providerKind"] = json!({"value":format!("http://www.wikidata.org/entity/{kind}")});
+            rows.push(row);
+            pages.push(json!({"title":title,"pageid":index+1,"ns":0}));
+            members.push(json!({"title":title,"qid":qid}));
+        }
+        for (index, reason) in [
+            "unsupported_classification",
+            "missing_english_or_default_label",
+            "dissolved",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let qid = format!("Q{}", index + 200);
+            let mut row = rows[0].clone();
+            row["item"]["value"] = json!(format!("http://www.wikidata.org/entity/{qid}"));
+            match *reason {
+                "unsupported_classification" => {
+                    row["providerKind"] = Value::Null;
+                    row["instanceOf"] = json!({"value":"http://www.wikidata.org/entity/Q13406463"});
+                }
+                "missing_english_or_default_label" => row["name"] = Value::Null,
+                "dissolved" => row["dissolved"] = json!({"value":"2020-01-01T00:00:00Z"}),
+                _ => unreachable!(),
+            }
+            rows.push(row);
+            pages.push(json!({"title":reason,"pageid":index+100,"ns":0}));
+            members.push(json!({"title":reason,"qid":qid}));
+        }
+        pages.push(json!({"title":"Unmapped page","pageid":999,"ns":0}));
+        data["results"]["bindings"] = json!(rows);
+        data["members"] = json!(members);
+        data["category"]["query"]["categorymembers"] = json!(pages);
+        let (records, excluded) = payment_provider_selection(&data).unwrap();
+        assert_eq!(records.len(), PAYMENT_PROVIDER_CLASSES.len());
+        assert!(
+            records
+                .iter()
+                .all(|r| r.merchant.counterparty_type == CounterpartyType::PaymentProcessor)
+        );
+        assert_eq!(
+            excluded
+                .iter()
+                .map(|e| e["reason"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "unsupported_classification",
+                "missing_english_or_default_label",
+                "dissolved",
+                "missing_wikidata_mapping"
+            ]
+        );
+        let mut incomplete = data.clone();
+        incomplete["results"]["bindings"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(payment_provider_selection(&incomplete).is_err());
+        data["results"]["bindings"][0]["item"]["value"] =
+            json!("http://www.wikidata.org/entity/Q9999999");
+        assert!(payment_provider_selection(&data).is_err());
+    }
+
     #[test]
     fn payment_category_import_requires_membership_and_organization_evidence() {
         let contents = include_str!("../../tests/fixtures/wikidata-payments.json");

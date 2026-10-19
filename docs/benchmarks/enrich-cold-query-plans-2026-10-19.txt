@@ -1,0 +1,53 @@
+BEGIN
+SET
+SET
+SET
+SET
+                                                                           QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1.13..1096.90 rows=100 width=8) (actual time=1.580..21.067 rows=100 loops=1)
+   Buffers: shared hit=363 read=354 written=112
+   ->  Nested Loop  (cost=1.13..5681408.86 rows=518485 width=8) (actual time=1.577..21.050 rows=100 loops=1)
+         Buffers: shared hit=363 read=354 written=112
+         ->  Index Scan using merchant_search_pkey on merchant_search  (cost=0.56..3457168.83 rows=518571 width=8) (actual time=1.505..19.505 rows=100 loops=1)
+               Filter: (tokens @@ '''cafe'''::tsquery)
+               Rows Removed by Filter: 16601
+               Buffers: shared hit=9 read=307 written=97
+         ->  Index Only Scan using merchants_counterparty_type_key on merchants  (cost=0.56..4.29 rows=1 width=8) (actual time=0.015..0.015 rows=1 loops=100)
+               Index Cond: ((counterparty_type = 'merchant'::text) AND (merchant_key = merchant_search.merchant_id))
+               Heap Fetches: 0
+               Buffers: shared hit=354 read=47 written=15
+ Planning:
+   Buffers: shared hit=330 read=41 written=15
+ Planning Time: 15.180 ms
+ Execution Time: 21.115 ms
+(16 rows)
+
+                                                                              QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=187593.00..375186.20 rows=8 width=48) (actual time=300.079..2780.564 rows=8 loops=1)
+   Buffers: shared hit=1662 read=38846 written=6213
+   ->  Function Scan on unnest query  (cost=0.00..0.02 rows=2 width=32) (actual time=0.005..0.007 rows=2 loops=1)
+   ->  Limit  (cost=187593.00..187593.01 rows=4 width=20) (actual time=1390.273..1390.274 rows=4 loops=2)
+         Buffers: shared hit=1662 read=38846 written=6213
+         ->  Sort  (cost=187593.00..187918.74 rows=130298 width=20) (actual time=1390.272..1390.272 rows=4 loops=2)
+               Sort Key: (similarity(merchant_search_words.word, query.word)) DESC, merchant_search_words.word
+               Sort Method: top-N heapsort  Memory: 25kB
+               Buffers: shared hit=1662 read=38846 written=6213
+               ->  Bitmap Heap Scan on merchant_search_words  (cost=929.06..185638.53 rows=130298 width=20) (actual time=34.474..1388.190 rows=3766 loops=2)
+                     Recheck Cond: (word % query.word)
+                     Rows Removed by Index Recheck: 60168
+                     Filter: (word <> query.word)
+                     Rows Removed by Filter: 1
+                     Heap Blocks: exact=40129
+                     Buffers: shared hit=1656 read=38846 written=6213
+                     ->  Bitmap Index Scan on merchant_search_words_trigrams  (cost=0.00..896.48 rows=130298 width=0) (actual time=30.895..30.895 rows=63936 loops=2)
+                           Index Cond: (word % query.word)
+                           Buffers: shared hit=147 read=226 written=63
+ Planning:
+   Buffers: shared hit=64 read=8 written=2
+ Planning Time: 2.170 ms
+ Execution Time: 2781.120 ms
+(23 rows)
+
+ROLLBACK

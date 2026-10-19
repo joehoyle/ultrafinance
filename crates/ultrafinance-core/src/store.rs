@@ -15,7 +15,7 @@ pub use search_pipeline::{RetrievalEvidence, SearchTrace};
 
 pub const LOCAL_DATABASE_URL: &str =
     "postgresql://ultrafinance@127.0.0.1:55432/ultrafinance?sslmode=disable";
-pub const POSTGRES_SCHEMA_VERSION: i32 = 21;
+pub const POSTGRES_SCHEMA_VERSION: i32 = 25;
 
 #[derive(Debug)]
 pub struct SchemaMismatch {
@@ -155,6 +155,28 @@ impl MerchantStore {
         self.apply_logos(merchant.iter_mut())?;
         Ok(merchant)
     }
+    pub fn processor_formats(&self) -> Result<Vec<crate::processor_formats::ProcessorFormat>> {
+        self.0.processor_formats()
+    }
+    pub fn save_processor_formats(
+        &self,
+        mut formats: Vec<crate::processor_formats::ProcessorFormat>,
+        dry_run: bool,
+    ) -> Result<()> {
+        for format in &mut formats {
+            format.processor_id = self.resolve_merchant_id(&format.processor_id)?;
+        }
+        crate::processor_formats::validate_set(&formats)?;
+        self.0.save_processor_formats(formats, dry_run)
+    }
+    pub fn processor_format_matches(
+        &self,
+        descriptions: &[String],
+    ) -> Result<Vec<Vec<crate::processor_formats::FormatMatch>>> {
+        let mut matches = self.0.processor_format_matches(descriptions.to_vec())?;
+        self.apply_logos(matches.iter_mut().flatten().map(|hit| &mut hit.processor))?;
+        Ok(matches)
+    }
     pub fn resolutions(
         &self,
         id: Option<&str>,
@@ -203,6 +225,32 @@ impl MerchantStore {
         request: &crate::EnrichRequest,
         limit: usize,
     ) -> Result<(Vec<Candidate>, SearchTrace)> {
+        self.search_request_for_role(request, limit, false)
+    }
+
+    pub(crate) fn search_primary_request(
+        &self,
+        request: &crate::EnrichRequest,
+        limit: usize,
+    ) -> Result<Vec<Candidate>> {
+        self.search_request_for_role(request, limit, true)
+            .map(|(candidates, _)| candidates)
+    }
+
+    pub(crate) fn search_primary_request_traced(
+        &self,
+        request: &crate::EnrichRequest,
+        limit: usize,
+    ) -> Result<(Vec<Candidate>, SearchTrace)> {
+        self.search_request_for_role(request, limit, true)
+    }
+
+    fn search_request_for_role(
+        &self,
+        request: &crate::EnrichRequest,
+        limit: usize,
+        primary: bool,
+    ) -> Result<(Vec<Candidate>, SearchTrace)> {
         request.validate()?;
         if limit == 0 {
             return Ok((vec![], SearchTrace::default()));
@@ -213,45 +261,70 @@ impl MerchantStore {
             .resolutions(Some(&id), 1)?
             .into_iter()
             .find(|r| r.context == context);
-        let interpretation = crate::interpretation::interpret(request);
+        let interpretation = if primary {
+            crate::interpretation::interpret_merchant(request)
+        } else {
+            crate::interpretation::interpret(request)
+        };
         let ranking_country = ranking_country(request, &interpretation);
         // Keep a larger pool per interpretation; spend the final budget on names
         // only after combining evidence, retaining their competing identities.
         let pool_limit = limit.saturating_mul(6).clamp(64, 254);
-        let mut found = self.search(&request.description, ranking_country, pool_limit)?;
-        if let Some(mapping) = mapping
+        let remembered = if let Some(mapping) = mapping
             && let Some(merchant) = self.get(&mapping.merchant.id)?
+            && (!primary || merchant.counterparty_type != crate::CounterpartyType::PaymentProcessor)
         {
-            // Remembered decisions may contain legacy branch-by-branch evidence.
-            // Use the current catalog contribution without rewriting audit data.
             let current = self.merchant_provenance(&merchant.id)?;
-            let candidate = Candidate {
+            Some(Candidate {
                 merchant,
                 score: 1.0,
                 exact: mapping.verified,
                 trusted: mapping.verified,
                 regex_match_length: None,
-                provenance: if current.is_empty() {
-                    mapping.provenance
-                } else {
-                    current
-                },
+                provenance: if current.is_empty() { mapping.provenance } else { current },
                 resolution_id: Some(id),
                 pending_import: false,
                 interpretation_evidence: vec![],
                 retrieval_evidence: vec![],
                 business_evidence: serde_json::Value::Null,
-            };
-            if mapping.verified {
-                return Ok((vec![candidate], SearchTrace::default()));
+            })
+        } else { None };
+        // A verified, context-scoped decision already dominates retrieval.
+        // Return it before running broad pools, preserving the existing result.
+        if remembered.as_ref().is_some_and(|candidate| candidate.trusted) {
+            return Ok((vec![remembered.unwrap()], SearchTrace::default()));
+        }
+        let mut cache_texts = vec![request.description.clone()];
+        let mut cache_seen = std::collections::HashSet::from([normalize(&request.description)]);
+        for hypothesis in &interpretation.hypotheses {
+            if cache_seen.insert(normalize(&hypothesis.merchant_text)) { cache_texts.push(hypothesis.merchant_text.clone()); }
+        }
+        let cached = self.0.cached_searches(cache_texts, ranking_country.map(str::to_owned), pool_limit, primary)?;
+        let search = |text: &str| -> Result<Vec<Candidate>> {
+            if let Some(pool) = cached.as_ref().and_then(|all| all.get(text)) { return Ok(pool.clone()); }
+            if !primary {
+                return self.0.search(text, ranking_country, pool_limit);
             }
-            if !found
-                .iter()
-                .any(|c| c.merchant.id == candidate.merchant.id && c.exact && c.trusted)
-            {
-                found.retain(|c| c.merchant.id != candidate.merchant.id);
-                found.insert(0, candidate);
-            }
+            let mut found = self.0.search_typed(
+                text,
+                ranking_country,
+                pool_limit,
+                Some(crate::CounterpartyType::Merchant),
+            )?;
+            found.extend(self.0.search_typed(
+                text,
+                ranking_country,
+                pool_limit,
+                Some(crate::CounterpartyType::FinancialInstitution),
+            )?);
+            Ok(found)
+        };
+        let mut found = search(&request.description)?;
+        if let Some(candidate) = remembered
+            && !found.iter().any(|c| c.merchant.id == candidate.merchant.id && c.exact && c.trusted)
+        {
+            found.retain(|c| c.merchant.id != candidate.merchant.id);
+            found.insert(0, candidate);
         }
         let mut searched = std::collections::HashSet::from([normalize(&request.description)]);
         // Never upgrade a partial-name hypothesis to an exact or trusted alias.
@@ -259,9 +332,7 @@ impl MerchantStore {
             if !searched.insert(normalize(&hypothesis.merchant_text)) {
                 continue;
             }
-            for mut candidate in
-                self.search(&hypothesis.merchant_text, ranking_country, pool_limit)?
-            {
+            for mut candidate in search(&hypothesis.merchant_text)? {
                 candidate.exact = false;
                 candidate.trusted = false;
                 // Explicit evidence, not hypothesis enumeration order, controls priority.
@@ -287,24 +358,21 @@ impl MerchantStore {
                 }
             }
         }
-        for candidate in &mut found {
-            let needs_outlets = interpretation.hypotheses.iter().any(|hypothesis| {
+        self.apply_logos(found.iter_mut().map(|candidate| &mut candidate.merchant))?;
+        let outlet_ids = found.iter().filter(|candidate| {
+            interpretation.hypotheses.iter().any(|hypothesis| {
                 (hypothesis.possible_location.is_some() || hypothesis.location_hint.is_some())
-                    && crate::interpretation::supporting_name(
-                        &candidate.merchant,
-                        &hypothesis.merchant_text,
-                    )
-                    .is_some()
-            });
-            let outlets = if needs_outlets {
-                self.cached_locations(&candidate.merchant.id)?
-            } else {
-                std::sync::Arc::new(vec![])
-            };
+                    && crate::interpretation::supporting_name(&candidate.merchant, &hypothesis.merchant_text).is_some()
+            })
+        }).map(|c|c.merchant.id.clone()).collect();
+        let mut outlets_by_id = self.0.cached_locations_many(outlet_ids)?;
+        let empty_outlets = std::sync::Arc::new(vec![]);
+        for candidate in &mut found {
+            let outlets = outlets_by_id.get(&candidate.merchant.id).unwrap_or(&empty_outlets);
             candidate.interpretation_evidence = crate::interpretation::catalog_support(
                 &interpretation,
                 &candidate.merchant,
-                &outlets,
+                outlets,
                 request
                     .country
                     .as_deref()
@@ -323,9 +391,10 @@ impl MerchantStore {
         }
         let (mut ranked, trace) =
             search_pipeline::shortlist(found, &interpretation, limit, ranking_country, pool_limit);
+        let missing = ranked.iter().filter(|c| !outlets_by_id.contains_key(&c.merchant.id)).map(|c|c.merchant.id.clone()).collect();
+        outlets_by_id.extend(self.0.cached_locations_many(missing)?);
         for candidate in &mut ranked {
-            let outlets = self.cached_locations(&candidate.merchant.id)?;
-            candidate.business_evidence = crate::business::outlet_summary(request, &outlets);
+            candidate.business_evidence = crate::business::outlet_summary(request, &outlets_by_id[&candidate.merchant.id]);
         }
         Ok((ranked, trace))
     }

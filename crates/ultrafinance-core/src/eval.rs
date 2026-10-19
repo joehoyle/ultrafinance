@@ -312,7 +312,7 @@ pub async fn run_with_progress(
     let mut cases = suite.cases.into_iter();
     loop {
         let mut batch_results = Vec::new();
-        let mut inputs = Vec::new();
+        let mut requests = Vec::new();
         let mut starts = Vec::new();
         for case in cases.by_ref().take(crate::batch::MAX_BATCH_ITEMS) {
             let started = Instant::now();
@@ -325,11 +325,13 @@ pub async fn run_with_progress(
                     merchant: MerchantRef::External(r),
                 } => store.resolve_source(&r.source, &r.external_id)?,
             };
-            let db = store.clone();
-            let request = case.request.clone();
-            let (candidates, search_trace) =
-                tokio::task::spawn_blocking(move || db.search_request_traced(&request, 10))
-                    .await??;
+            let (candidates, search_trace) = if enricher.is_none() {
+                let db = store.clone();
+                let request = case.request.clone();
+                tokio::task::spawn_blocking(move || db.search_request_traced(&request, 10)).await??
+            } else {
+                (vec![], Default::default())
+            };
             let candidate_ids: Vec<_> = candidates.iter().map(|c| c.merchant.id.clone()).collect();
             let expected_rank = expected_local_id
                 .as_ref()
@@ -357,7 +359,7 @@ pub async fn run_with_progress(
                     0.0
                 },
             };
-            inputs.push((case.request, Ok(candidates)));
+            requests.push(case.request);
             starts.push(started);
             batch_results.push(result);
         }
@@ -365,9 +367,17 @@ pub async fn run_with_progress(
             break;
         }
         if let Some(enricher) = &enricher {
-            let (outcomes, evidence) = enricher.enrich_batch_candidates_traced(inputs).await;
-            for (index, (result, outcome)) in batch_results.iter_mut().zip(outcomes).enumerate() {
-                result.enrichment = evidence.get(index).cloned();
+            let evaluated = enricher.enrich_evaluation_batch(&requests).await;
+            for (result, retrieval) in batch_results.iter_mut().zip(evaluated.retrieval) {
+                result.candidates = retrieval.candidates;
+                result.search_trace = retrieval.trace;
+                result.candidate_ids = result.candidates.iter().map(|c| c.merchant.id.clone()).collect();
+                result.expected_rank = result.expected_local_id.as_ref()
+                    .and_then(|id| result.candidate_ids.iter().position(|candidate| candidate == id))
+                    .map(|rank| rank + 1);
+            }
+            for (index, (result, outcome)) in batch_results.iter_mut().zip(evaluated.results).enumerate() {
+                result.enrichment = evaluated.evidence.get(index).cloned();
                 match outcome {
                     Ok(response) => {
                         result.predicted_id = match response.merchant {

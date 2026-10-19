@@ -208,7 +208,7 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
         assert_eq!(row.get::<_,String>(0),"cafe brand");assert_eq!(row.get::<_,String>(1),"brand.test");
         let row=client.query_one("SELECT rule_name,rule_host FROM merchant_identity_keys WHERE merchant_id=merchant_key('legacy-00004999')",&[])?;
         assert_eq!(row.get::<_,String>(0),"cafe brand llc");assert_eq!(row.get::<_,String>(1),"");
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),21);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema",&[])?.get::<_,i32>(0),crate::store::POSTGRES_SCHEMA_VERSION);
         Ok(())
     })
 }

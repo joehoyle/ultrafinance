@@ -1,0 +1,107 @@
+{
+  "baseline_report": "evals/reports/lunchmoney-global-holdout-enrich.json",
+  "baseline_total_cases": 197,
+  "baseline_purchase_cases": 159,
+  "baseline_model": "jev-latest",
+  "baseline_threshold": 0.75,
+  "baseline_inferred_batch_seconds": [
+    91.350616875,
+    106.816442
+  ],
+  "baseline_inferred_eval_seconds": 198.167058875,
+  "baseline_inference": "Sum of maximum latency in each original 100-item batch; first case timer starts at batch entry. Approximates evaluation loop, excludes process startup/report serialization. Historical run, not a controlled same-catalog before/after.",
+  "baseline_purchase_median_ms": 59746.139125,
+  "baseline_purchase_p95_ms": 101031.264833,
+  "after_full_status": "completed",
+  "after_local_search": {
+    "wall_seconds": 114.71582549999584,
+    "cases": 197,
+    "median_ms": 517.366083,
+    "p95_ms": 1172.5396660000001,
+    "errors": 0,
+    "cases_without_candidates": 0,
+    "provider_calls": 0
+  },
+  "comparison_limits": [
+    "Historical before report rather than rebuilt old code on an identical catalog. Catalog content and provider behavior may differ.",
+    "Full eval preloads candidates serially in batches of 100, then runs enrichment. Enrich latency includes time awaiting the batch, not individual-request service time.",
+    "Fresh process per run; local-only run preceded full run and may warm PostgreSQL buffers. Candidate caches are process-local.",
+    "Local-only search measures retrieval and excludes processor stage, Jev, and HTTP orchestration."
+  ],
+  "after_full": {
+    "wall_seconds": 100.2012571249943,
+    "cases": 197,
+    "metrics": {
+      "cases": 197,
+      "funnel": [
+        {
+          "stage": "evaluated",
+          "remaining": 197,
+          "dropped": 0
+        },
+        {
+          "stage": "candidates_found",
+          "remaining": 197,
+          "dropped": 0
+        },
+        {
+          "stage": "name_or_selection_accepted",
+          "remaining": 106,
+          "dropped": 91
+        },
+        {
+          "stage": "merchant_resolved",
+          "remaining": 93,
+          "dropped": 13
+        }
+      ],
+      "failures_by_stage": {
+        "identity_resolution": 13,
+        "merchant_selection": 13,
+        "name_recognition": 78
+      },
+      "failures_by_reason": {
+        "identity_resolution:below_threshold": 8,
+        "identity_resolution:no_match_selected": 5,
+        "merchant_selection:below_threshold": 5,
+        "merchant_selection:no_match_selected": 8,
+        "name_recognition:below_threshold": 40,
+        "name_recognition:no_match_selected": 38
+      },
+      "labeled_merchants": 0,
+      "labeled_unresolved": 0,
+      "unlabeled": 197,
+      "candidate_coverage": 1.0,
+      "unresolved": 104,
+      "missing_source_references": 0,
+      "retrieval_hits": 0,
+      "candidate_recall": null,
+      "top1_recall": null,
+      "cases_without_candidates": 0,
+      "errors": 0,
+      "matches": 93,
+      "correct_matches": null,
+      "false_matches": null,
+      "correct_unresolved": null,
+      "accuracy": null,
+      "match_precision": null,
+      "merchant_recall": null,
+      "match_rate": 0.4720812182741117,
+      "median_latency_ms": 26972.983207999998,
+      "p95_latency_ms": 48049.667125
+    },
+    "report": "evals/reports/lunchmoney-latency-after-2026-10-19.json",
+    "profile": "release",
+    "model": "jev-latest",
+    "threshold": 0.75
+  },
+  "after_historical_purchase_subset": {
+    "cases": 159,
+    "median_batch_inclusive_latency_ms": 28273.087417,
+    "p95_batch_inclusive_latency_ms": 48507.596167,
+    "matches": 90,
+    "errors": 0
+  },
+  "observed_runtime_ratio": 1.9776903460183137,
+  "observed_runtime_reduction_percent": 49.43596695947365
+}

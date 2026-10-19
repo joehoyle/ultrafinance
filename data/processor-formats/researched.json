@@ -1,0 +1,89 @@
+[
+  {
+    "id": "airwallex-mor-awx-star",
+    "processor": "Airwallex",
+    "pattern": "(?i:AWX)[ \\t]*\\*[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://www.airwallex.com/docs/payments/merchant-of-record"
+    ],
+    "scope": "Airwallex Merchant of Record transactions, whose documentation specifies an AWX* prefix.",
+    "notes": "This is not a universal Airwallex Payments descriptor. Merchant of Record is a payment-platform role, not evidence of a physical outlet.",
+    "reviewed_on": "2026-10-19",
+    "enabled": true
+  },
+  {
+    "id": "paypal-name-star",
+    "processor": "PayPal",
+    "pattern": "(?i:PAYPAL)[ \\t]*\\*[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://www.paypal.com/us/cshelp/article/how-do-i-update-my-business-name-on-customers-credit-card-statements-help336"
+    ],
+    "reviewed_on": "2026-10-19",
+    "scope": "PayPal card statements using PayPal * followed by the configured seller statement name.",
+    "notes": "This does not cover bank-transfer descriptors such as PAYPALINST XFER or identify a seller from a standalone PayPal mention. PP* is deliberately excluded because it is shared with PayPal Point of Sale; do not infer the Zettle product from it.",
+    "enabled": true
+  },
+  {
+    "id": "square-sq-star",
+    "processor": "Square",
+    "pattern": "(?i:SQ)[ \\t]*\\*[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://developer.squareup.com/docs/payments-api/take-payments/card-payments/statement-descriptions"
+    ],
+    "reviewed_on": "2026-10-19",
+    "scope": "Square-generated card statement descriptors with the documented SQ * prefix.",
+    "notes": "The captured suffix is merchant lookup text and may include a trailing *identifier such as a store number; preserve it for normal interpretation and location extraction. Bank truncation can occur. Do not infer Square from a space-only SQ or from gosq.com without a documented suffix template.",
+    "enabled": true
+  },
+  {
+    "id": "sumup-card-star",
+    "processor": "SumUp",
+    "pattern": "(?i:SUMUP)[ \\t]*\\*[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://www.sumup.com/en-us/security/",
+      "https://help.sumup.com/en-GB/articles/fQAR6AB9o38yT8RkGaM5H-understanding-sumup-charges-on-my-bank-statement"
+    ],
+    "scope": "Card statements identifying a SumUp merchant with the documented asterisk separator.",
+    "notes": "Case-insensitive spelling and horizontal whitespace are normalization choices. Space-only prefixes are not documented by these sources and are deliberately excluded.",
+    "reviewed_on": "2026-10-19",
+    "enabled": true
+  },
+  {
+    "id": "wepay-wpy-star-merchant",
+    "processor": "WePay",
+    "pattern": "(?i:WPY)[ \\t]*\\*[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://support.wepay.com/hc/en-us/articles/203609683-Unrecognized-Charge"
+    ],
+    "scope": "WePay bank/card statement charges routed through supported merchants or partners that use the documented WPY* [MERCHANT NAME] format.",
+    "notes": "Official support describes WPY* [MERCHANT NAME]. Case-insensitive spelling and horizontal whitespace are normalization choices. The merchant suffix is lookup text, not verified identity. This does not cover all WePay transactions or configurable soft descriptors that use other formats.",
+    "reviewed_on": "2026-10-19",
+    "enabled": true
+  },
+  {
+    "id": "xsolla-star-or-underscore",
+    "processor": "Xsolla",
+    "pattern": "(?i:XSOLLA)[ \\t]*(?:\\*|_)[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://help.xsolla.com/en/unauthorized-charges/i-see-unknown-charges-for-xsolla"
+    ],
+    "scope": "Xsolla statement examples using an explicit asterisk or underscore before a game or service label.",
+    "notes": "The suffix is lookup text, not a verified business identity. Do not identify Xsolla from unrelated names or standalone corporate descriptions.",
+    "reviewed_on": "2026-10-19",
+    "enabled": true
+  },
+  {
+    "id": "zettle-paypal-point-of-sale-star",
+    "processor": "Zettle",
+    "pattern": "(?i:PAYPAL[ \\t]+POINT[ \\t]+OF[ \\t]+SALE)[ \\t]*\\*[ \\t]*(?P<merchant>\\S(?:[^\\r\\n]*\\S)?)",
+    "sources": [
+      "https://www.zettle.com/gb/help/articles/1084729-taking-card-and-contactless-payments",
+      "https://slc-b-origin-pointofsale.paypal.com/us/cshelp/article/how-do-i-take-payments-with-point-of-sale-help919",
+      "https://slc-b-origin-pointofsale.paypal.com/fr/cshelp/article/o%C3%B9-trouver-le-code-paypal-pour-confirmer-ma-carte%C2%A0-help170"
+    ],
+    "scope": "PayPal Point of Sale (formerly Zettle) card-reader and terminal payments in the cited UK help article.",
+    "notes": "The official help page specifies PayPal Point of Sale *[your company name]. Case-insensitive spelling and horizontal whitespace are normalization choices. The captured suffix is lookup text, not a verified merchant identity. A focused official-source search did not confirm legacy `IZ *<merchant>` or `IZETTLE*<merchant>` forms, so neither is enabled. Do not broaden this rule to `PP*<merchant>`: US PayPal Point of Sale docs use PP* next to a business name, but general PayPal docs also use PP* for card-confirmation debits, so the marker is not specific enough to assign Zettle.",
+    "reviewed_on": "2026-10-19",
+    "enabled": true
+  }
+]

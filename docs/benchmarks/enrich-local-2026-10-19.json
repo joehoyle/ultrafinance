@@ -1,0 +1,127 @@
+{
+  "date": "2026-10-19",
+  "base_revision": "e0159eb",
+  "workspace": "dirty; includes processor formats and expanded benchmark stages",
+  "descriptor": "SQ* JULIUS BROMONT",
+  "context": "description only",
+  "catalog_estimated_merchants": 66375404,
+  "postgres_version": "17.11 (aarch64, local PostgreSQL)",
+  "rustc": "1.98.0 (88d9e12ae 2026-08-18)",
+  "profile": "bench (optimized)",
+  "samples_per_stage": 30,
+  "provider_calls": 0,
+  "writes": false,
+  "methodology": "Same local database and executable, sequential JIT-on then connection-scoped JIT-off runs. Each stage calibrates a batch then measures 30 warm batch averages; these are not individual-request tail latencies. Stage timings overlap and must not be summed. Initial local calls exclude connection/runtime setup and are not cold database measurements.",
+  "runs": {
+    "jit_on": {
+      "first_local_ms": 723.58,
+      "candidates": 18,
+      "outcome": "unresolved",
+      "stages": {
+        "normalize": {
+          "mean_us": 0.04,
+          "p50_us": 0.04,
+          "p95_us": 0.04,
+          "ops_per_sample": 65536
+        },
+        "interpret": {
+          "mean_us": 3.5,
+          "p50_us": 3.49,
+          "p95_us": 3.6,
+          "ops_per_sample": 4096
+        },
+        "processor_formats": {
+          "mean_us": 16663.82,
+          "p50_us": 16253.38,
+          "p95_us": 22609.88,
+          "ops_per_sample": 1
+        },
+        "retrieve": {
+          "mean_us": 436281.8,
+          "p50_us": 432526.33,
+          "p95_us": 474004.38,
+          "ops_per_sample": 1
+        },
+        "enrich_locally": {
+          "mean_us": 335913.73,
+          "p50_us": 325638.67,
+          "p95_us": 372081.67,
+          "ops_per_sample": 1
+        },
+        "merchant_pool_cleaned": {
+          "mean_us": 77662.8,
+          "p50_us": 75274.29,
+          "p95_us": 85755.92,
+          "ops_per_sample": 1
+        },
+        "bank_pool_cleaned": {
+          "mean_us": 69314.69,
+          "p50_us": 68312.29,
+          "p95_us": 79270.33,
+          "ops_per_sample": 1
+        },
+        "enrich_locally_cleaned": {
+          "mean_us": 485199.72,
+          "p50_us": 477402.38,
+          "p95_us": 603656.79,
+          "ops_per_sample": 1
+        }
+      }
+    },
+    "jit_off": {
+      "first_local_ms": 527.16,
+      "candidates": 18,
+      "outcome": "unresolved",
+      "stages": {
+        "normalize": {
+          "mean_us": 0.04,
+          "p50_us": 0.04,
+          "p95_us": 0.04,
+          "ops_per_sample": 65536
+        },
+        "interpret": {
+          "mean_us": 3.53,
+          "p50_us": 3.52,
+          "p95_us": 3.62,
+          "ops_per_sample": 4096
+        },
+        "processor_formats": {
+          "mean_us": 21142.66,
+          "p50_us": 20421.46,
+          "p95_us": 29224.25,
+          "ops_per_sample": 1
+        },
+        "retrieve": {
+          "mean_us": 390223.76,
+          "p50_us": 378057.58,
+          "p95_us": 488275.79,
+          "ops_per_sample": 1
+        },
+        "enrich_locally": {
+          "mean_us": 212198.24,
+          "p50_us": 207387.12,
+          "p95_us": 254892.54,
+          "ops_per_sample": 1
+        },
+        "merchant_pool_cleaned": {
+          "mean_us": 55018.76,
+          "p50_us": 54578.0,
+          "p95_us": 59780.33,
+          "ops_per_sample": 1
+        },
+        "bank_pool_cleaned": {
+          "mean_us": 35618.42,
+          "p50_us": 35081.96,
+          "p95_us": 38677.0,
+          "ops_per_sample": 1
+        },
+        "enrich_locally_cleaned": {
+          "mean_us": 363763.0,
+          "p50_us": 351609.83,
+          "p95_us": 454315.46,
+          "ops_per_sample": 1
+        }
+      }
+    }
+  }
+}

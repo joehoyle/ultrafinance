@@ -20,7 +20,10 @@ pub async fn enrich_locally(
         persist_matches: false,
         discovery: None,
         research: None,
-        client: reqwest::Client::new(),
+        client: {
+            static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+            CLIENT.get_or_init(reqwest::Client::new).clone()
+        },
         provider_url: String::new(),
         api_key: None,
         model: String::new(),
@@ -69,6 +72,6 @@ impl Enricher {
     pub(crate) async fn retrieve(&self, request: &EnrichRequest) -> Result<Vec<Candidate>> {
         let store = self.store.clone();
         let input = request.clone();
-        tokio::task::spawn_blocking(move || store.search_request(&input, 10)).await?
+        tokio::task::spawn_blocking(move || store.search_primary_request(&input, 10)).await?
     }
 }

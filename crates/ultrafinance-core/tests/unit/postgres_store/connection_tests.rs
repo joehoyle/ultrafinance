@@ -85,7 +85,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
     // Reinitialization must not recreate either audit table.
     let initialized = PostgresStore::connect(&url, true)?;
     initialized.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 21);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), crate::store::POSTGRES_SCHEMA_VERSION);
         assert!(client.query_one(
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
@@ -215,7 +215,8 @@ fn postgres_idle_session_reconnects_before_work_without_replaying_jobs() -> Resu
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get(0);
         assert_eq!(
-            version, 21,
+            version,
+            crate::store::POSTGRES_SCHEMA_VERSION,
             "market migration must run before application use"
         );
         let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
@@ -807,7 +808,7 @@ fn version_nineteen_counterparty_migration_preserves_legacy_identities() -> Resu
         assert_eq!(
             c.query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            21
+            crate::store::POSTGRES_SCHEMA_VERSION
         );
         Ok(())
     })?;
@@ -858,4 +859,119 @@ fn version_twenty_upgrades_types_without_changing_existing_identities() -> Resul
         1
     );
     Ok(())
+}
+
+#[test]
+fn version_twenty_one_adds_covering_type_index_and_preserves_keys() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    let keys: Vec<i64> = lease.run(|client| {
+        client.batch_execute(
+            "DROP INDEX merchants_counterparty_type_key;
+             INSERT INTO merchants(id,name,counterparty_type)
+             SELECT 'type-index-'||n, 'Type Index '||n,
+               CASE WHEN n<=10 THEN 'financial_institution'
+                    WHEN n<=13 THEN 'payment_processor' ELSE 'merchant' END
+             FROM generate_series(1,20000) n;
+             ANALYZE merchants;
+             UPDATE ultrafinance_schema SET version=21",
+        )?;
+        let plan = client.query(
+            "EXPLAIN (ANALYZE, BUFFERS) SELECT merchant_key FROM merchants WHERE counterparty_type='financial_institution'", &[]
+        )?.into_iter().map(|row| row.get::<_, String>(0)).collect::<Vec<_>>().join("\n");
+        eprintln!("Type lookup before migration:\n{plan}");
+        Ok(client.query("SELECT merchant_key FROM merchants WHERE counterparty_type='financial_institution' ORDER BY merchant_key", &[])?
+            .into_iter().map(|row| row.get(0)).collect())
+    })?;
+    let url = lease.temporary_url().unwrap();
+    assert!(PostgresStore::connect(url, false).is_err());
+    let upgraded = PostgresStore::connect(url, true)?;
+    upgraded.run(move |client| {
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), crate::store::POSTGRES_SCHEMA_VERSION);
+        let restored: Vec<i64> = client.query("SELECT merchant_key FROM merchants WHERE counterparty_type='financial_institution' ORDER BY merchant_key", &[])?
+            .into_iter().map(|row| row.get(0)).collect();
+        assert_eq!(keys, restored);
+        assert_eq!(client.query_one("SELECT count(*) FROM merchants", &[])?.get::<_, i64>(0), 20000);
+        for kind in ["financial_institution", "payment_processor"] {
+            let plan = client.query(
+                "EXPLAIN (ANALYZE, BUFFERS) SELECT merchant_key FROM merchants WHERE counterparty_type=$1", &[&kind]
+            )?.into_iter().map(|row| row.get::<_, String>(0)).collect::<Vec<_>>().join("\n");
+            eprintln!("Type lookup after migration ({kind}):\n{plan}");
+            assert!(plan.contains("merchants_counterparty_type_key"), "{plan}");
+            let listing_plan = client.query(
+                "EXPLAIN SELECT * FROM merchants WHERE counterparty_type=$1 ORDER BY lower(name) COLLATE \"C\",id LIMIT 20", &[&kind]
+            )?.into_iter().map(|row| row.get::<_, String>(0)).collect::<Vec<_>>().join("\n");
+            assert!(listing_plan.contains("merchants_counterparty_type_key"), "{listing_plan}");
+        }
+        Ok(())
+    })?;
+    // Reinitializing a current database also preserves the index.
+    PostgresStore::connect(url, true)?;
+    Ok(())
+}
+
+#[test]
+fn version_twenty_three_removes_examples_and_preserves_processor_rules() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    lease.run(|client| {
+        client.batch_execute(
+            "INSERT INTO merchants(id,name,counterparty_type) VALUES('fixture-processor','Fixture Processor','payment_processor');
+             INSERT INTO processor_formats(id,processor_id,pattern,sources,reviewed_on,scope,notes,enabled)
+             VALUES('fixture-rule','fixture-processor','FIX\\*(?P<merchant>.+)',ARRAY['https://example.test/docs'],'2026-10-19','Fixture scope','Fixture notes',false);
+             ALTER TABLE processor_formats ADD COLUMN positive_examples JSONB NOT NULL DEFAULT '[]', ADD COLUMN negative_examples TEXT[] NOT NULL DEFAULT '{}';
+             UPDATE ultrafinance_schema SET version=23",
+        )?;
+        Ok(())
+    })?;
+    let url = lease.temporary_url().unwrap();
+    assert!(PostgresStore::connect(url, false).is_err());
+    let upgraded = PostgresStore::connect(url, true)?;
+    let rules = upgraded.processor_formats()?;
+    assert_eq!(rules.len(), 1);
+    let rule = &rules[0];
+    assert_eq!(rule.id, "fixture-rule");
+    assert_eq!(rule.processor_id, "fixture-processor");
+    assert_eq!(rule.pattern, r"FIX\*(?P<merchant>.+)");
+    assert_eq!(rule.sources, ["https://example.test/docs"]);
+    assert_eq!(rule.reviewed_on, "2026-10-19");
+    assert_eq!(rule.scope, "Fixture scope");
+    assert_eq!(rule.notes, "Fixture notes");
+    assert!(!rule.enabled);
+    upgraded.run(|client| {
+        let count: i64 = client.query_one(
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='processor_formats' AND column_name IN ('positive_examples','negative_examples')",
+            &[],
+        )?.get(0);
+        assert_eq!(count, 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn version_twenty_two_adds_processor_format_catalog() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    lease.run(|client| {
+        client.batch_execute(
+            "DROP TABLE processor_formats; UPDATE ultrafinance_schema SET version=22",
+        )?;
+        Ok(())
+    })?;
+    let url = lease.temporary_url().unwrap();
+    assert!(PostgresStore::connect(url, false).is_err());
+    let upgraded = PostgresStore::connect(url, true)?;
+    assert!(upgraded.processor_formats()?.is_empty());
+    upgraded.run(|client| {
+        assert_eq!(
+            client
+                .query_one("SELECT version FROM ultrafinance_schema", &[])?
+                .get::<_, i32>(0),
+            crate::store::POSTGRES_SCHEMA_VERSION
+        );
+        Ok(())
+    })
 }

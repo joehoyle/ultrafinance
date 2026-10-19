@@ -5,6 +5,44 @@ use std::{
 };
 
 #[test]
+fn extract_dry_run_needs_no_database_or_provider_credentials() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+        .args(["extract", "SQ *CAFÉ BROMONT 00482", "--dry-run", "--json"])
+        .env_remove("CLOUDFLARE_ACCOUNT_ID")
+        .env_remove("CLOUDFLARE_AUTH_TOKEN")
+        .env("ULTRAFINANCE_DATABASE_URL", "invalid-database-url")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["request"]["state"], "SQ *CAFÉ BROMONT 00482");
+    assert_eq!(value["request"]["fields"].as_object().unwrap().len(), 10);
+    assert_eq!(value["local_interpretation"]["processor_hint"], "Square");
+}
+
+#[test]
+fn extract_live_requires_credentials_and_rejects_invalid_input_first() {
+    for (description, expected) in [
+        ("SHOP", "extract requires CLOUDFLARE_ACCOUNT_ID"),
+        ("", "description"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .args(["extract", description])
+            .env_remove("CLOUDFLARE_ACCOUNT_ID")
+            .env_remove("CLOUDFLARE_AUTH_TOKEN")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}
+
+#[test]
 fn enrich_txt_preserves_order_duplicates_and_context_beyond_one_batch() {
     let mut input = String::from("\u{feff}COFFEE\r\n\r\nCOFFEE\r\n");
     for i in 0..104 {
@@ -511,7 +549,7 @@ fn short_descriptor_remains_unresolved_without_provider_credentials() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "Transaction: LS\nKind:        unknown\nMerchant:    Unresolved\nLocation:    Unresolved\n"
+        "Transaction\n  Description: LS\n  Kind:        unknown\n\nMerchant\n  Unresolved\n\nLocation\n  Unresolved\n"
     );
 }
 
@@ -543,11 +581,13 @@ fn enrich_details_explains_abstention_and_preserves_response_json() {
     assert_eq!(result["merchant"]["status"], "unresolved");
     assert_eq!(result["location"]["status"], "unresolved");
     let steps = String::from_utf8(output.stderr).unwrap();
-    assert!(steps.contains("1. Interpret descriptor"));
-    assert!(steps.contains("Name: LS"));
-    assert!(steps.contains("0 shortlisted"));
+    assert!(steps.contains("3. Interpret merchant descriptor"));
+    assert!(steps.contains("1. Identify payment processor"));
+    assert!(steps.contains("2. Prepare merchant descriptor"));
+    assert!(steps.contains("Merchant lookup: LS"));
+    assert!(steps.contains("No catalog candidates found."));
     assert!(steps.contains("Method: no_candidates"));
-    assert!(steps.contains("4. Resolve location independently"));
+    assert!(steps.contains("9. Resolve location independently"));
     let output = run(
         &[
             "enrich",

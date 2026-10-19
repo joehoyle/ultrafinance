@@ -2,6 +2,8 @@ use super::*;
 use std::io::{Read, Write};
 use std::sync::mpsc;
 
+include!("processor_tests.rs");
+
 fn request(description: &str) -> EnrichRequest {
     serde_json::from_value(json!({"description":description,"country":"CA"})).unwrap()
 }
@@ -337,7 +339,7 @@ async fn abbreviated_name_sends_catalog_city_evidence_to_provider() {
     enricher.store.import(&records).unwrap();
     let rx = mock(&mut enricher, 1, 200, None);
     let (result, details) = enricher
-        .enrich_with_details(&request("SQ* JULIUS BROMONT"))
+        .enrich_with_details(&request("JULIUS BROMONT"))
         .await;
     assert!(matches!(result.unwrap().merchant,
         MerchantResult::Matched { data } if data.name == "Julius Cafe"));

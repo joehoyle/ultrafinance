@@ -751,7 +751,7 @@
             "items": {
               "$ref": "#/components/schemas/Counterparty"
             },
-            "description": "Supported counterparties; empty when unresolved. Currently at most one identity."
+            "description": "Independently supported merchants, institutions and payment processors; empty when unresolved."
           },
           "kind": {
             "$ref": "#/components/schemas/TransactionKind",

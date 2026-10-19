@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn retrieval_cache_invalidates_names_and_roles_after_another_connection_writes() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    store.put(&serde_json::from_value(serde_json::json!({"id":"cache-party","name":"cachealpha"}))?)?;
+    let merchant = Some(crate::CounterpartyType::Merchant);
+    assert!(store.search_typed("cachealpha", None, 10, merchant)?[0].exact);
+    assert!(store.search_typed("cachealpha", None, 10, merchant)?[0].exact);
+    let other = MerchantStore::postgres(store.temporary_url())?;
+    other.put(&serde_json::from_value(serde_json::json!({"id":"cache-party","name":"cachebeta"}))?)?;
+    assert!(store.search_typed("cachealpha", None, 10, merchant)?.iter().all(|c| !c.exact));
+    assert!(store.search_typed("cachebeta", None, 10, merchant)?[0].exact);
+    other.put(&serde_json::from_value(serde_json::json!({"id":"cache-party","name":"cachebeta","type":"payment_processor"}))?)?;
+    assert!(store.search_typed("cachebeta", None, 10, merchant)?.is_empty());
+    assert!(store.search_typed("cachebeta", None, 10, Some(crate::CounterpartyType::PaymentProcessor))?[0].exact);
+    Ok(())
+}
+
+#[test]
+fn verified_context_match_bypasses_broad_search_but_changed_context_does_not() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let merchant = serde_json::from_value(serde_json::json!({"id":"verified-fast","name":"Verified Cafe"}))?;
+    store.put(&merchant)?;
+    let request: crate::EnrichRequest = serde_json::from_value(serde_json::json!({"description":"opaque transaction","country":"CA"}))?;
+    let mut mapping = crate::resolution::Resolution::supported(&request, merchant, vec![]);
+    mapping.verified = true;
+    mapping.evidence = Some("Reviewed test receipt".into());
+    store.save_resolution(&mapping)?;
+    let mut client = postgres::Client::connect(
+        store.temporary_url(),
+        postgres_native_tls::MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?),
+    )?;
+    client.batch_execute("ALTER TABLE merchant_search RENAME TO unavailable_merchant_search")?;
+    let candidates = store.search_primary_request(&request, 10)?;
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].trusted && candidates[0].exact);
+    let mut changed = request;
+    changed.country = Some("US".into());
+    assert!(store.search_primary_request(&changed, 10).is_err());
+    Ok(())
+}
+
+#[test]
 fn postgres_source_columns_retain_matching_fields_without_raw_payloads() -> Result<()> {
     let lease = MerchantStore::temporary()?;
     let mut client = postgres::Client::connect(
