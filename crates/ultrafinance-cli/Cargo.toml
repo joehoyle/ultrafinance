@@ -26,6 +26,8 @@ sha2.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "ico", "gif"] }
 scraper = "0.24"
 resvg = { version = "0.48.1", default-features = false }
+calamine = { version = "0.35", default-features = false }
+zip = { version = "7", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

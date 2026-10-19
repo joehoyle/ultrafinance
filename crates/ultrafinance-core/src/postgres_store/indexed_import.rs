@@ -16,7 +16,7 @@ pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
     let mut after = String::new();
     loop {
         let rows = tx.query(
-            "SELECT id,name,website FROM merchants WHERE id>$1 ORDER BY id LIMIT 5000",
+            "SELECT id,name,website,counterparty_type FROM merchants WHERE id>$1 ORDER BY id LIMIT 5000",
             &[&after],
         )?;
         if rows.is_empty() {
@@ -25,6 +25,7 @@ pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
         let merchants: Vec<Merchant> = rows
             .into_iter()
             .map(|r| Merchant {
+                counterparty_type: r.get::<_, &str>(3).parse().expect("checked catalog type"),
                 id: r.get(0),
                 name: r.get(1),
                 website: r.get(2),

@@ -24,8 +24,8 @@ use utoipa_scalar::{Scalar, Servable};
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Ultrafinance API", description = "Synchronous merchant and location enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication."),
-    tags((name = "Enrichment", description = "Resolve merchants and transaction geography"), (name = "Merchants", description = "Browse and search the merchant catalog"), (name = "Health", description = "Service liveness"))
+    info(title = "Ultrafinance API", description = "Synchronous transaction kind, counterparty and location enrichment. Requests return a completed result, with no background jobs. This API currently requires no client authentication."),
+    tags((name = "Enrichment", description = "Classify transaction kinds and resolve counterparties and geography"), (name = "Merchants", description = "Browse and search the merchant catalog"), (name = "Counterparties", description = "Browse merchants and financial institutions"), (name = "Health", description = "Service liveness"))
 )]
 struct ApiDoc;
 
@@ -58,6 +58,7 @@ fn api_router() -> (Router<Arc<Enricher>>, utoipa::openapi::OpenApi) {
                 .layer(DefaultBodyLimit::max(1024 * 1024)),
         )
         .routes(routes!(merchants))
+        .routes(routes!(counterparties))
         .layer(middleware::map_response(no_index))
         .split_for_parts()
 }
@@ -246,7 +247,101 @@ async fn merchants(
     }
 }
 
-/// Enrich a transaction with a merchant and independently supported location.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(deny_unknown_fields)]
+struct CounterpartyQuery {
+    /// Optional counterparty type filter.
+    #[serde(rename = "type")]
+    #[param(rename = "type")]
+    entity_type: Option<ultrafinance_core::CounterpartyType>,
+    /// Optional name or alias search; at most 256 bytes. Searches return a bounded candidate pool.
+    q: Option<String>,
+    /// Filter by known operating market, as a two-letter uppercase country code. Coverage is not exhaustive.
+    market: Option<String>,
+    /// Page size, from 1 to 100. Defaults to 20.
+    limit: Option<usize>,
+    /// Number of results to skip, up to 1,000,000. Defaults to 0.
+    offset: Option<usize>,
+}
+
+/// Explore the counterparty catalog without calling the AI provider.
+/// Browsing is alphabetical; search ranks a bounded candidate pool rather than
+/// matching every catalog row. Search totals refer to that pool (at most 255 for
+/// exact alias collisions, otherwise 100), not the full catalog. Results include
+/// typed counterparty records with known markets, without aliases or internal matching scores.
+#[utoipa::path(get, path = "/v1/counterparties", tag = "Counterparties",
+    params(CounterpartyQuery),
+    responses(
+        (status = 200, description = "Paginated catalog records or ranked search candidates", body = response::CounterpartyPage),
+        (status = 400, description = "Invalid query parameters", body = ApiError),
+        (status = 503, description = "Catalog unavailable or database schema incompatible", body = ApiError),
+        (status = 504, description = "Catalog query timed out", body = ApiError)
+    )
+)]
+async fn counterparties(
+    State(enricher): State<Arc<Enricher>>,
+    query: Result<Query<CounterpartyQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(error) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                &error.body_text(),
+            );
+        }
+    };
+    let q = query
+        .q
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let market = query.market.filter(|value| !value.is_empty());
+    let limit = query.limit.unwrap_or(20);
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=100).contains(&limit)
+        || offset > 1_000_000
+        || q.as_ref().is_some_and(|value| value.len() > 256)
+        || market
+            .as_ref()
+            .is_some_and(|value| value.len() != 2 || !value.bytes().all(|c| c.is_ascii_uppercase()))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Use limit 1–100, offset 0–1000000, a search of at most 256 bytes, and a two-letter uppercase market code",
+        );
+    }
+    match tokio::time::timeout(
+        Duration::from_secs(50),
+        enricher.list_counterparties(q, market, limit, offset, query.entity_type),
+    )
+    .await
+    {
+        Ok(Ok(page)) => Json(response::CounterpartyPage::from(page)).into_response(),
+        Ok(Err(error)) => {
+            eprintln!("Catalog query failed: {error:#}");
+            if let Some(response) = schema_error(&error) {
+                return response;
+            }
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "catalog_unavailable",
+                "The counterparty catalog is unavailable. Please try again.",
+            )
+        }
+        Err(_) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "catalog_timeout",
+            "The counterparty catalog query timed out",
+        ),
+    }
+}
+
+/// Enrich a transaction with its operation kind, counterparty and independently supported location.
+/// Kind is classified independently through Jev when configured, including exact
+/// merchant matches and empty catalogs. Without Jev, kind is unknown.
 ///
 /// Only description is required; unknown top-level fields are rejected. The JSON body
 /// is limited to 64 KiB. A unique verified exact alias can resolve locally; fuzzy or
@@ -262,11 +357,11 @@ async fn merchants(
 #[utoipa::path(post, path = "/v1/enrich", tag = "Enrichment",
     request_body(content = EnrichRequest, example = json!({"description":"LS","amount":"142.97","currency":"CAD","country":"CA","extra":{"bank_category":["Food and Drink","Restaurants"]}})),
     responses(
-        (status = 200, description = "Completed merchant and location enrichment", body = EnrichResponse,
+        (status = 200, description = "Completed kind, counterparty and location enrichment", body = EnrichResponse,
             examples(
-                ("extracted_location" = (value = json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"extracted","data":{"id":null,"precision":"city","address":null,"city":"Hialeah","region":"FL","postal_code":null,"country":"US","store_number":"10241"}}}))),
-                ("unresolved" = (value = json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}}))),
-                ("matched" = (value = json!({"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png","logo_source":"official website"}},"location":{"status":"unresolved","data":null}})))
+                ("extracted_location" = (value = json!({"kind":"unknown","counterparties":[],"merchant":{"status":"unresolved","data":null},"location":{"status":"extracted","data":{"id":null,"precision":"city","address":null,"city":"Hialeah","region":"FL","postal_code":null,"country":"US","store_number":"10241"}}}))),
+                ("unresolved" = (value = json!({"kind":"unknown","counterparties":[],"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}}))),
+                ("matched" = (value = json!({"kind":"unknown","counterparties":[{"id":"mer_example","type":"merchant","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png","logo_source":"official website"}],"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png","logo_source":"official website"}},"location":{"status":"unresolved","data":null}})))
             )),
         (status = 400, description = "Malformed JSON", body = ApiError),
         (status = 413, description = "Request body exceeds 64 KiB", body = ApiError),
@@ -317,8 +412,9 @@ async fn enrich(
 }
 
 /// Enrich 1 to 100 transactions, preserving input order.
-/// Each transaction has an isolated provider question. Verified exact matches and
-/// empty candidate sets resolve locally. Provider calls are packed within byte
+/// Each transaction has independent kind and merchant questions as needed. Verified
+/// exact matches and empty candidate sets resolve merchant identity locally; kind
+/// still uses Jev when configured. Provider calls are packed within byte
 /// budgets, with at most four in flight. Invalid transactions and provider failures
 /// produce per-item errors alongside successful results. The body limit is 1 MiB;
 /// the overall deadline is 55 seconds, after which the whole request returns 504.

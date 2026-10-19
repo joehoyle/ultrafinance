@@ -3,6 +3,7 @@ use super::*;
 async fn offline_retrieval_and_exact_matching_are_separate_metrics() {
     let db = MerchantStore::temporary().unwrap();
     db.put(&crate::Merchant {
+        counterparty_type: Default::default(),
         id: "mer_a".into(),
         name: "Julius Café".into(),
         markets: vec!["CA".into()],
@@ -40,6 +41,7 @@ async fn offline_retrieval_and_exact_matching_are_separate_metrics() {
 async fn service_errors_cannot_be_counted_as_correct_unresolved() {
     let db = MerchantStore::temporary().unwrap();
     db.put(&crate::Merchant {
+        counterparty_type: Default::default(),
         id: "mer_a".into(),
         name: "Julius Café".into(),
         markets: vec![],
@@ -73,6 +75,7 @@ async fn service_errors_cannot_be_counted_as_correct_unresolved() {
 async fn unlabeled_outcomes_measure_coverage_without_claiming_accuracy() {
     let db = MerchantStore::temporary().unwrap();
     db.put(&crate::Merchant {
+        counterparty_type: Default::default(),
         id: "a".into(),
         name: "Julius Cafe".into(),
         markets: vec![],

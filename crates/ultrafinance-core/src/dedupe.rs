@@ -82,6 +82,14 @@ fn canonical_name(name: &str) -> String {
     }
     words.join(" ")
 }
+fn typed_name(merchant: &Merchant, name: String) -> String {
+    if merchant.counterparty_type == crate::CounterpartyType::Merchant || name.is_empty() {
+        name
+    } else {
+        format!("{}:{name}", merchant.counterparty_type.as_str())
+    }
+}
+
 pub(crate) fn deterministic_key(merchant: &Merchant) -> Option<(String, Option<String>)> {
     if merchant
         .website
@@ -90,10 +98,10 @@ pub(crate) fn deterministic_key(merchant: &Merchant) -> Option<(String, Option<S
     {
         // Without a website, require the complete normalized name: do not
         // strip legal suffixes or use aliases/fuzzy matches as identity.
-        let name = crate::store::normalize(&merchant.name);
+        let name = typed_name(merchant, crate::store::normalize(&merchant.name));
         return (!name.is_empty()).then_some((name, None));
     }
-    let name = canonical_name(&merchant.name);
+    let name = typed_name(merchant, canonical_name(&merchant.name));
     if name.len() < 3 {
         return None;
     }

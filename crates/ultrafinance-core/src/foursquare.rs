@@ -198,6 +198,7 @@ pub(crate) fn prepare_rows(
             source: "foursquare".into(),
             external_id: key.clone(),
             merchant: Merchant {
+                counterparty_type: Default::default(),
                 id: key.clone(),
                 name: name.into(),
                 markets: vec![country],

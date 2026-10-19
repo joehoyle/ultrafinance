@@ -41,6 +41,8 @@ mod read_cache_tests;
 mod research;
 #[path = "postgres_store/rows.rs"]
 pub(super) mod rows;
+#[path = "postgres_store/search_terms.rs"]
+mod search_terms;
 #[path = "postgres_store/typed_sources.rs"]
 mod typed_sources;
 
@@ -287,6 +289,10 @@ impl PostgresStore {
                         tx.batch_execute(include_str!("../migrations/019_numeric_merchant_keys.sql"))
                             .context("schema migration 19 (numeric merchant keys) failed")?;
                     }
+                    if version < 20 {
+                        tx.batch_execute(include_str!("../migrations/020_counterparty_types.sql"))
+                            .context("schema migration 20 (counterparty types) failed")?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     // Run historical normalizer backfills after key conversion.
                     if version < 12 { indexed_import::backfill(&mut tx)?; }
@@ -507,7 +513,7 @@ impl PostgresStore {
                 // Source listings retain explicit null/empty input fields.
                 let merchant = &record.merchant;
                 document["merchant"] = serde_json::json!({
-                    "id":merchant.id,"name":merchant.name,"website":merchant.website,
+                    "id":merchant.id,"type":merchant.counterparty_type,"name":merchant.name,"website":merchant.website,
                     "logo_url":merchant.logo_url,"logo_source":merchant.logo_source,
                     "markets":merchant.markets,"aliases":merchant.aliases,"sources":merchant.sources
                 });
@@ -855,7 +861,13 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             })
         })
     }
-    pub fn list(&self, market: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
+    pub fn list(
+        &self,
+        market: Option<&str>,
+        limit: usize,
+        offset: usize,
+        entity_type: Option<crate::CounterpartyType>,
+    ) -> Result<MerchantPage> {
         if !(1..=1000).contains(&limit) {
             bail!("limit must be between 1 and 1000");
         }
@@ -863,12 +875,13 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             bail!("market must be a two-letter uppercase code");
         }
         let market = market.map(str::to_owned);
+        let entity_type = entity_type.map(|t| t.as_str());
         let sql_offset = i64::try_from(offset)?;
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
-            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text])", &[&market])?.get(0);
+            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) AND ($2::text IS NULL OR m.counterparty_type=$2)", &[&market,&entity_type])?.get(0);
             let mut merchants = Vec::new();
-            for row in tx.query("SELECT m.* FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset])? {
+            for row in tx.query("SELECT m.* FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) AND ($4::text IS NULL OR m.counterparty_type=$4) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset,&entity_type])? {
                 merchants.push(rows::merchant(&row)?);
             }
             let page = MerchantPage {merchants,total:usize::try_from(total)?,limit,offset};
@@ -944,18 +957,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             combined_terms.sort_unstable();
             combined_terms.dedup();
             if !combined_terms.is_empty() {
-                for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases,m.markets FROM (
-                        SELECT DISTINCT pool.merchant_id
-                        FROM unnest($1::text[]) term(query)
-                        CROSS JOIN LATERAL (
-                            SELECT merchant_id FROM merchant_search
-                            WHERE tokens @@ to_tsquery('simple',term.query)
-                            LIMIT 32
-                        ) pool
-                    ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
-                    &[&combined_terms],
-                )? {
+                for row in search_terms::query(&mut tx, &combined_terms, 32, false)? {
                     add_candidate(&mut found,&row,false,None,&mut scorer,("token_pair", &query))?;
                 }
             }
@@ -963,18 +965,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             // ones out before Rust scores merchant names. A post-sort LIMIT alone
             // does not bound work on a million-row catalog.
             if !terms.is_empty() {
-                for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases,m.markets FROM (
-                        SELECT DISTINCT pool.merchant_id
-                        FROM unnest($1::text[]) term(query)
-                        CROSS JOIN LATERAL (
-                            SELECT merchant_id FROM merchant_search
-                            WHERE tokens @@ to_tsquery('simple',term.query)
-                            LIMIT 100
-                        ) pool
-                    ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
-                    &[&terms],
-                )? {
+                for row in search_terms::query(&mut tx, &terms, 100, false)? {
                     add_candidate(&mut found,&row,false,None,&mut scorer,("token", &query))?;
                 }
             }
@@ -985,18 +976,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                 .filter(|token| token.chars().any(char::is_alphabetic)).collect();
             let fuzzy_words = owner.reads.lock().unwrap().fuzzy_words(&mut tx, &fuzzy_tokens)?;
             if !fuzzy_words.is_empty() {
-                for row in tx.query(
-                    "SELECT m.id,m.name,m.aliases,m.markets FROM (
-                        SELECT DISTINCT pool.merchant_id
-                        FROM unnest($1::text[]) words(word)
-                        CROSS JOIN LATERAL (
-                            SELECT merchant_id FROM merchant_search
-                            WHERE tokens @@ plainto_tsquery('simple',words.word)
-                            LIMIT 32
-                        ) pool
-                    ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
-                    &[&fuzzy_words],
-                )? {
+                for row in search_terms::query(&mut tx, &fuzzy_words, 32, true)? {
                     add_candidate(&mut found,&row,false,None,&mut scorer,("fuzzy_token", &query))?;
                 }
             }
@@ -1120,6 +1100,7 @@ fn add_candidate(
 ) -> Result<()> {
     // Rank with just identity, names and markets; hydrate the final shortlist.
     let merchant = Merchant {
+        counterparty_type: Default::default(),
         id: row.get(0),
         name: row.get(1),
         aliases: row.try_get(2)?,
@@ -1159,6 +1140,7 @@ fn add_candidate(
                 query: retrieval.1.into(),
                 score,
             }],
+            business_evidence: serde_json::Value::Null,
             merchant,
             score,
             exact,
@@ -1456,6 +1438,15 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
     let mut completed = 0;
     for group in groups {
         let target = &group[0];
+        let types: i64 = tx
+            .query_one(
+                "SELECT count(DISTINCT counterparty_type) FROM merchants WHERE id=ANY($1)",
+                &[group],
+            )?
+            .get(0);
+        if types > 1 {
+            bail!("cannot merge counterparties with different types");
+        }
         for retired in &group[1..] {
             let fsq: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM source_identities WHERE source='foursquare' AND merchant_id=$1)", &[retired])?.get(0);
             if fsq {

@@ -53,6 +53,13 @@ fn server(
             } else {
                 body.to_string()
             };
+            let mut response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            if let Some(questions) = request["questions"].as_object() {
+                for key in questions.keys().filter(|key| key.starts_with("kind_")) {
+                    response["answers"][key] = json!({"type":"choice","choice":"refund","confidence":0.99,"probabilities":{"refund":0.99}});
+                }
+            }
+            let response = response.to_string();
             write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
             tx.send(request).unwrap();
         }
@@ -78,12 +85,13 @@ async fn discovery_is_grounded_persisted_untrusted_and_reusable_after_review() -
     )?;
     let (url, discovery_rx) = server(listing(), 200, 1);
     enricher.discovery = Some(Discovery { url, api_key: None });
-    let (url, provider_rx) = server(provider("candidate_0"), 200, 2);
+    let (url, provider_rx) = server(provider("candidate_0"), 200, 3);
     enricher.provider_url = url;
     let request: EnrichRequest = serde_json::from_value(
         json!({"description":"opaque zxmq","country":"CA","amount":"10.00","extra":{"private":"do not forward to discovery"}}),
     )?;
     let first = enricher.enrich(&request).await?;
+    assert_eq!(first.kind, crate::TransactionKind::Refund);
     let MerchantResult::Matched { data: first } = first.merchant else {
         panic!("expected supported discovered merchant")
     };
@@ -97,10 +105,17 @@ async fn discovery_is_grounded_persisted_untrusted_and_reusable_after_review() -
         panic!("expected cached candidate")
     };
     assert_eq!(first.id, second.id);
-    for _ in 0..2 {
+    let mut merchant_questions = 0;
+    for _ in 0..3 {
         let body = provider_rx.recv().unwrap();
-        assert!(body["questions"]["transaction_0"]["instructions"]["interpretation"].is_object());
+        if body["questions"].get("transaction_0").is_some() {
+            assert!(
+                body["questions"]["transaction_0"]["instructions"]["interpretation"].is_object()
+            );
+            merchant_questions += 1;
+        }
     }
+    assert_eq!(merchant_questions, 2);
     let mut mapping = store.resolutions(None, 10)?.remove(0);
     assert!(!mapping.verified);
     mapping.verified = true;
@@ -135,7 +150,7 @@ async fn evaluation_discovery_matches_do_not_import_or_remember_evidence() -> Re
     )?;
     let (url, discovery_rx) = server(listing(), 200, 1);
     enricher.discovery = Some(Discovery { url, api_key: None });
-    let (url, provider_rx) = server(provider("candidate_0"), 200, 1);
+    let (url, provider_rx) = server(provider("candidate_0"), 200, 2);
     enricher.provider_url = url;
     let request = serde_json::from_value(json!({"description":"opaque zxmq","country":"CA"}))?;
     assert!(matches!(
@@ -143,6 +158,7 @@ async fn evaluation_discovery_matches_do_not_import_or_remember_evidence() -> Re
         MerchantResult::Matched { .. }
     ));
     discovery_rx.recv().unwrap();
+    provider_rx.recv().unwrap();
     provider_rx.recv().unwrap();
     assert_eq!(store.stats()?.total, 0);
     assert!(store.resolutions(None, 10)?.is_empty());
@@ -170,13 +186,8 @@ async fn rejected_and_invalid_discoveries_do_not_pollute_the_catalog() -> Result
         )?;
         let (url, rx) = server(response, status, 1);
         enricher.discovery = Some(Discovery { url, api_key: None });
-        let provider_rx = if !error {
-            let (url, rx) = server(provider(choice), 200, 1);
-            enricher.provider_url = url;
-            Some(rx)
-        } else {
-            None
-        };
+        let (url, provider_rx) = server(provider(choice), 200, if error { 1 } else { 2 });
+        enricher.provider_url = url;
         let request = serde_json::from_value(json!({"description":"opaque zxmq"}))?;
         let result = enricher.enrich(&request).await;
         assert_eq!(result.is_err(), error);
@@ -189,8 +200,8 @@ async fn rejected_and_invalid_discoveries_do_not_pollute_the_catalog() -> Result
         assert_eq!(store.stats()?.total, 0);
         assert!(store.resolutions(None, 10)?.is_empty());
         rx.recv().unwrap();
-        if let Some(rx) = provider_rx {
-            rx.recv().unwrap();
+        for _ in 0..if error { 1 } else { 2 } {
+            provider_rx.recv().unwrap();
         }
     }
     Ok(())
@@ -228,7 +239,7 @@ async fn discovery_runs_after_catalog_abstention_and_has_a_batch_budget() -> Res
     )?;
     let (url, rx) = server(listing(), 200, 4);
     enricher.discovery = Some(Discovery { url, api_key: None });
-    let (url, provider_rx) = server(json!({"auto_choice":"none"}), 200, 1);
+    let (url, provider_rx) = server(json!({"auto_choice":"none"}), 200, 2);
     enricher.provider_url = url;
     let requests: Vec<EnrichRequest> = (0..6)
         .map(|i| serde_json::from_value(json!({"description":format!("opaque zxmq {i}")})).unwrap())
@@ -242,6 +253,7 @@ async fn discovery_runs_after_catalog_abstention_and_has_a_batch_budget() -> Res
     for _ in 0..4 {
         rx.recv().unwrap();
     }
+    provider_rx.recv().unwrap();
     provider_rx.recv().unwrap();
     let logs = store.enrichment_logs(None, None, 10, 0)?;
     assert_eq!(

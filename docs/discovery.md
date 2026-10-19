@@ -133,7 +133,8 @@ cargo run -- resolutions revoke DESCRIPTOR_ID
 
 Confirmation is an explicit review action, not a claim that a supplied note was
 automatically verified. Check the merchant and context before confirming. A
-confirmed mapping can resolve that context without Jev. No transaction descriptor
+confirmed mapping can resolve the merchant in that context without Jev; transaction
+kind is classified independently through Jev when configured. No transaction descriptor
 is added to the merchant's global aliases. Conflicting identities, missing review
 evidence and attempts to downgrade verified mappings are rejected. Revocation
 removes the mapping while preserving the merchant and original enrichment history.

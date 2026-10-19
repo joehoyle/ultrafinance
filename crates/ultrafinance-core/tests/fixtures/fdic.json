@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "total": 1
+  },
+  "data": [
+    {
+      "data": {
+        "CERT": 42,
+        "NAME": "Example Federal Bank",
+        "ACTIVE": 1,
+        "WEBADDR": "example.com"
+      }
+    }
+  ]
+}

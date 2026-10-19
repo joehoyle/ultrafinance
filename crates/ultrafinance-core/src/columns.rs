@@ -4,7 +4,7 @@ use postgres::GenericClient;
 
 pub(crate) fn postgres_merchants(c: &mut impl GenericClient, id: &str, data: &str) -> Result<()> {
     let m: crate::Merchant = serde_json::from_str(data)?;
-    c.execute("INSERT INTO merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources", &[&id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources])?;
+    c.execute("INSERT INTO merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources,counterparty_type=excluded.counterparty_type", &[&id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&m.counterparty_type.as_str()])?;
     let mut merchant = m;
     merchant.id = id.to_owned();
     postgres_identity_key(c, &merchant)?;
@@ -31,7 +31,7 @@ pub(crate) fn postgres_manual_merchants(
     data: &str,
 ) -> Result<()> {
     let m: crate::Merchant = serde_json::from_str(data)?;
-    c.execute("INSERT INTO manual_merchants(id,name,website,logo_url,logo_source,markets,aliases,sources) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources", &[&id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources])?;
+    c.execute("INSERT INTO manual_merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources,counterparty_type=excluded.counterparty_type", &[&id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&m.counterparty_type.as_str()])?;
     Ok(())
 }
 pub(crate) fn postgres_source_records(
@@ -60,7 +60,7 @@ pub(crate) fn postgres_source_records(
         "INSERT INTO source_provenance(source,attribution,license,url) VALUES($1,$2,$3,$4) ON CONFLICT(source,attribution,license,url) DO UPDATE SET source=excluded.source RETURNING id",
         &[&source,&record.attribution,&record.license,&record.url],
     )?.get(0);
-    c.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases", &[&source,&external_id,&merchant_id,&record.version,&provenance_id,&pattern,&parent,&m.id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&hints,&region,&negative_aliases])?;
+    c.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases,input_counterparty_type=excluded.input_counterparty_type", &[&source,&external_id,&merchant_id,&record.version,&provenance_id,&pattern,&parent,&m.id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&hints,&region,&negative_aliases,&m.counterparty_type.as_str()])?;
     Ok(())
 }
 #[allow(clippy::too_many_arguments)]

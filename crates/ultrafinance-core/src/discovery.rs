@@ -129,6 +129,7 @@ fn candidate(place: Place) -> Result<Candidate> {
         bail!("invalid discovered place country");
     }
     let merchant = Merchant {
+        counterparty_type: Default::default(),
         id: format!("discovery_{}", uuid::Uuid::new_v4().simple()),
         name: place.name.clone(),
         markets: place.country.iter().cloned().collect(),
@@ -160,6 +161,7 @@ fn candidate(place: Place) -> Result<Candidate> {
         pending_import: true,
         interpretation_evidence: vec![],
         retrieval_evidence: vec![],
+        business_evidence: serde_json::Value::Null,
     })
 }
 

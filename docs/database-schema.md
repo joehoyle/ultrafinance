@@ -1,6 +1,6 @@
 # Database lookup columns
 
-Schema version 19 stores fixed catalog and matching fields in columns in
+Schema version 20 stores fixed catalog and matching fields in columns in
 PostgreSQL. Application lookups and sorting use those columns and
 indexes. Merchant markets, aliases and sources and location aliases use native `text[]`
 columns. JSON remains for keyed external place IDs (`jsonb`), variable resolution
@@ -202,7 +202,7 @@ if that is the established database role policy. Credentials belong in the
 configured environment, not command arguments.
 
 This migration changes the stored schema. Earlier application versions cannot
-run against version 19; coordinate the database upgrade with the new application
+run against version 20; coordinate the database upgrade with the new application
 release. A rollback to an earlier binary also requires restoring the earlier
 schema from a database backup. No production migration is performed by merely
 editing this repository or running the disposable tests.
@@ -296,3 +296,13 @@ copy and speculative upsert. Existing canonical merchants still use guarded
 updates. Regular imports retain active primary keys; initial loads rebuild them
 before commit. An unexpected new-ID collision aborts the transaction rather than
 overwriting another merchant.
+
+## Counterparty types (version 20)
+
+`merchants` and `manual_merchants` carry `counterparty_type`; `source_records`
+carries `input_counterparty_type`. All are non-null text columns constrained to
+`merchant` or `financial_institution`, defaulting to `merchant` for legacy rows.
+The existing identity IDs, table names, foreign keys, and search indexes remain.
+Explicit types survive both individual and bulk writes and canonical rebuilds.
+Institution identity keys are type-qualified to avoid automatic cross-type merges.
+This migration does not infer institutions from existing names or categories.

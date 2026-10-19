@@ -85,7 +85,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
     // Reinitialization must not recreate either audit table.
     let initialized = PostgresStore::connect(&url, true)?;
     initialized.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 19);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 20);
         assert!(client.query_one(
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
@@ -215,7 +215,7 @@ fn postgres_idle_session_reconnects_before_work_without_replaying_jobs() -> Resu
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get(0);
         assert_eq!(
-            version, 19,
+            version, 20,
             "market migration must run before application use"
         );
         let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
@@ -441,6 +441,12 @@ fn version_thirteen_views_are_removed_without_changing_catalog_responses() -> Re
         serde_json::to_value(upgraded.resolutions(None, 100)?)?,
         serde_json::to_value(resolutions)?
     );
+    // Legacy exports predate the explicit counterparty type; migration defaults
+    // those identities to merchant while preserving their other fields.
+    let mut exports = exports;
+    for export in &mut exports {
+        export["record"]["merchant"]["type"] = serde_json::json!("merchant");
+    }
     assert_eq!(upgraded.source_records("fixture", None, 100, 0)?, exports);
     upgraded.run(move |client| {
         assert!(client.query_one("SELECT revision FROM catalog_revision", &[])?.get::<_, i64>(0) >= revision);
@@ -502,7 +508,7 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
             client
                 .query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            19
+            crate::store::POSTGRES_SCHEMA_VERSION
         );
         assert_eq!(
             client
@@ -649,7 +655,7 @@ fn version_fourteen_json_lists_migrate_without_changing_api_values() -> Result<(
         assert!(client.query_one("SELECT indisvalid FROM pg_index WHERE indexrelid='merchants_markets'::regclass", &[])?.get::<_, bool>(0));
         Ok(())
     })?;
-    assert_eq!(migrated.list(Some("JP"), 10, 0)?.total, 1);
+    assert_eq!(migrated.list(Some("JP"), 10, 0, None)?.total, 1);
     PostgresStore::connect(lease.temporary_url().unwrap(), true)?;
     Ok(())
 }
@@ -758,6 +764,51 @@ fn shared_source_provenance_migrates_variants_and_refreshes_independently() -> R
         let other: i64 = tx.query_one("INSERT INTO source_provenance(source,attribution,license,url) VALUES('other','a','b','c') RETURNING id", &[])?.get(0);
         assert!(tx.execute("UPDATE source_records SET source_provenance_id=$1", &[&other]).is_err());
         tx.rollback()?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn version_nineteen_counterparty_migration_preserves_legacy_identities() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let merchant: Merchant = serde_json::from_value(
+        serde_json::json!({"id":"legacy", "name":"Legacy Shop", "aliases":["LEGACY BILL"]}),
+    )?;
+    store.put(&merchant)?;
+    store.run(|c| {
+        c.batch_execute("ALTER TABLE merchants DROP COLUMN counterparty_type; ALTER TABLE manual_merchants DROP COLUMN counterparty_type; ALTER TABLE source_records DROP COLUMN input_counterparty_type; UPDATE ultrafinance_schema SET version=19")?;
+        Ok(())
+    })?;
+    let upgraded = PostgresStore::connect(store.temporary_url().unwrap(), true)?;
+    let restored = upgraded.get("legacy")?.unwrap();
+    assert_eq!(
+        restored.counterparty_type,
+        crate::CounterpartyType::Merchant
+    );
+    assert_eq!(
+        serde_json::to_value(restored)?,
+        serde_json::to_value(merchant)?
+    );
+    assert_eq!(
+        upgraded.search("LEGACY BILL", None, 10)?[0].merchant.id,
+        "legacy"
+    );
+    upgraded.run(|c| {
+        assert!(
+            c.execute(
+                "UPDATE merchants SET counterparty_type='invalid' WHERE id='legacy'",
+                &[]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            c.query_one("SELECT version FROM ultrafinance_schema", &[])?
+                .get::<_, i32>(0),
+            20
+        );
         Ok(())
     })?;
     Ok(())

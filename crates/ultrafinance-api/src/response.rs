@@ -53,8 +53,29 @@ fn null_schema() -> utoipa::openapi::schema::Object {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct Counterparty {
+    #[serde(rename = "type")]
+    counterparty_type: ultrafinance_core::CounterpartyType,
+    #[serde(flatten)]
+    identity: Merchant,
+}
+
+impl From<ultrafinance_core::Counterparty> for Counterparty {
+    fn from(value: ultrafinance_core::Counterparty) -> Self {
+        Self {
+            counterparty_type: value.counterparty_type,
+            identity: value.into(),
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct EnrichResponse {
+    /// Financial operation classified independently of merchant identity; unknown when evidence is insufficient or Jev is not configured.
+    kind: ultrafinance_core::TransactionKind,
     merchant: MerchantResult,
+    /// Supported counterparties; empty when unresolved. Currently at most one identity.
+    counterparties: Vec<Counterparty>,
     /// Independently extracted geography or a supported catalog outlet match.
     location: LocationResult,
     /// Source attribution for matched merchants and outlets. Omitted when empty.
@@ -65,6 +86,8 @@ pub struct EnrichResponse {
 impl From<ultrafinance_core::EnrichResponse> for EnrichResponse {
     fn from(value: ultrafinance_core::EnrichResponse) -> Self {
         Self {
+            kind: value.kind,
+            counterparties: value.counterparties.into_iter().map(Into::into).collect(),
             merchant: match value.merchant {
                 ultrafinance_core::MerchantResult::Matched { data } => MerchantResult::Matched {
                     data: (*data).into(),
@@ -108,4 +131,22 @@ pub struct BatchEnrichResponse {
 pub enum BatchItemResult {
     Success { data: Box<EnrichResponse> },
     Error { code: String, message: String },
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct CounterpartyPage {
+    counterparties: Vec<Counterparty>,
+    total: usize,
+    limit: usize,
+    offset: usize,
+}
+impl From<ultrafinance_core::store::MerchantPage> for CounterpartyPage {
+    fn from(value: ultrafinance_core::store::MerchantPage) -> Self {
+        Self {
+            counterparties: value.merchants.into_iter().map(Into::into).collect(),
+            total: value.total,
+            limit: value.limit,
+            offset: value.offset,
+        }
+    }
 }

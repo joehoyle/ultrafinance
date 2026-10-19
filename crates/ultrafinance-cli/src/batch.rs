@@ -439,21 +439,17 @@ fn jev_summary(answer: &Value, candidates: &[Value], threshold: &Value) -> Strin
         .unwrap_or_else(|| crate::output::text(choice));
     let reason = if choice == "none" {
         " · Jev selected no merchant"
-    } else if answer["confidence"]
+    } else if answer["probabilities"][choice]
         .as_f64()
         .zip(threshold.as_f64())
         .is_some_and(|(v, t)| v < t)
-        || answer["probabilities"][choice]
-            .as_f64()
-            .zip(threshold.as_f64())
-            .is_some_and(|(v, t)| v < t)
     {
         " · below match threshold"
     } else {
         ""
     };
     format!(
-        "Jev choice: {selected} · probability {} · confidence {} · threshold {}{reason}",
+        "Jev choice: {selected} · probability {} · confidence (derived diagnostic) {} · probability threshold {}{reason}",
         percent(&answer["probabilities"][choice]),
         percent(&answer["confidence"]),
         percent(threshold)

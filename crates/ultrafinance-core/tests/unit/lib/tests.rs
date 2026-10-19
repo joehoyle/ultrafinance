@@ -55,6 +55,7 @@ async fn exact_matches_bypass_jev_but_collisions_and_fuzzy_candidates_do_not() {
 fn catalogs_larger_than_jev_choice_limit_are_supported() {
     let merchants: Vec<_> = (0..300)
         .map(|index| Merchant {
+            counterparty_type: Default::default(),
             id: format!("mer_{index}"),
             name: format!("Merchant {index}"),
             markets: vec!["CA".into()],
@@ -102,6 +103,12 @@ fn match_requires_valid_candidate_and_sufficient_evidence() {
     response["answers"]["merchant"]["confidence"] = json!(0.5);
     assert!(matches!(
         parse_choice(&response, &candidates, 0.9).unwrap().merchant,
+        MerchantResult::Matched { .. }
+    ));
+    response["answers"]["merchant"]["probabilities"]["candidate_0"] = json!(0.89);
+    response["answers"]["merchant"]["confidence"] = json!(0.99);
+    assert!(matches!(
+        parse_choice(&response, &candidates, 0.9).unwrap().merchant,
         MerchantResult::Unresolved { .. }
     ));
     response["answers"]["merchant"]["choice"] = json!("candidate_99");
@@ -109,6 +116,41 @@ fn match_requires_valid_candidate_and_sufficient_evidence() {
     assert!(parse_choice(&response, &candidates, 0.9).is_err());
     assert_eq!(
         serde_json::to_value(unresolved()).unwrap(),
-        json!({"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}})
+        json!({"kind":"unknown","counterparties":[],"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}})
     );
+}
+
+#[test]
+fn match_cutoff_is_independent_of_choice_count() {
+    let candidates = candidates();
+    for count in [2, 3, 11, 255] {
+        for probability in [0.899, 0.90, 0.91] {
+            let confidence = (probability - 1.0 / count as f64) / (1.0 - 1.0 / count as f64);
+            let mut probabilities = serde_json::Map::new();
+            probabilities.insert("candidate_0".into(), json!(probability));
+            probabilities.insert(
+                "none".into(),
+                json!((1.0 - probability) / (count - 1) as f64),
+            );
+            for index in 1..count - 1 {
+                probabilities.insert(
+                    format!("candidate_{index}"),
+                    json!((1.0 - probability) / (count - 1) as f64),
+                );
+            }
+            let answer = json!({"type":"choice","choice":"candidate_0", "confidence":confidence,
+                "probabilities":probabilities});
+            let matched = matches!(
+                parse_choice_answer(&answer, &candidates, 0.9)
+                    .unwrap()
+                    .merchant,
+                MerchantResult::Matched { .. }
+            );
+            assert_eq!(
+                matched,
+                probability >= 0.9,
+                "{count} choices at {probability}"
+            );
+        }
+    }
 }

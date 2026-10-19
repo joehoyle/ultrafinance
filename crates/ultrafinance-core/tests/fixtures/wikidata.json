@@ -1,0 +1,26 @@
+{
+  "results": {
+    "bindings": [
+      {
+        "item": {
+          "value": "http://www.wikidata.org/entity/Q123"
+        },
+        "name": {
+          "value": "Example Global Bank"
+        },
+        "country": {
+          "value": "CA"
+        },
+        "lei": {
+          "value": "12345678901234567890"
+        },
+        "financialInstitution": {
+          "value": "http://www.wikidata.org/entity/Q650241"
+        },
+        "alias": {
+          "value": "Example Global Banking"
+        }
+      }
+    ]
+  }
+}

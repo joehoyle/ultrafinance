@@ -13,6 +13,10 @@ pub fn enrichment(
         return write_output(&serde_json::to_string_pretty(response)?);
     }
     let mut rendered = format!("Transaction: {}\n", text(description));
+    rendered.push_str(&format!(
+        "Kind:        {}\n",
+        serde_json::to_value(response.kind)?.as_str().unwrap()
+    ));
     match &response.merchant {
         MerchantResult::Matched { data } => {
             rendered.push_str(&format!("Merchant:    {}\n", text(&data.name)));
@@ -27,6 +31,15 @@ pub fn enrichment(
             }
         }
         MerchantResult::Unresolved { .. } => rendered.push_str("Merchant:    Unresolved\n"),
+    }
+    for counterparty in &response.counterparties {
+        if counterparty.counterparty_type != ultrafinance_core::CounterpartyType::Merchant {
+            rendered.push_str(&format!(
+                "Counterparty: {} ({})\n",
+                text(&counterparty.name),
+                counterparty.counterparty_type.as_str()
+            ));
+        }
     }
     match &response.location {
         LocationResult::Unresolved { .. } => rendered.push_str("Location:    Unresolved\n"),
@@ -227,6 +240,7 @@ fn provider_answer(
     label: &str,
     answer: &serde_json::Value,
     candidates: Option<&Vec<serde_json::Value>>,
+    entity_label: &str,
 ) -> String {
     let choice = answer["choice"].as_str().unwrap_or("unavailable");
     let choice_name = |choice: &str| {
@@ -248,7 +262,7 @@ fn provider_answer(
             .unwrap_or_else(|| "unavailable".into())
     };
     let mut rendered = format!(
-        "\n   {label}\n   Selected: {} ({})\n   Confidence: {} · selected probability: {}\n",
+        "\n   {label}\n   Selected: {} ({})\n   Jev confidence (derived diagnostic): {} · selected probability: {}\n",
         choice_name(choice),
         text(choice),
         percentage(&answer["confidence"]),
@@ -268,7 +282,7 @@ fn provider_answer(
             .load_style(UTF8_FULL_CONDENSED)
             .set_content_arrangement(ContentArrangement::Dynamic)
             .set_width(120)
-            .set_header(["Selected", "Choice", "Merchant", "Probability"]);
+            .set_header(["Selected", "Choice", entity_label, "Probability"]);
         for (candidate, probability) in probabilities {
             table.add_row([
                 if candidate == choice {
@@ -286,69 +300,41 @@ fn provider_answer(
     rendered
 }
 
-fn ambiguous_records(
-    answer: &serde_json::Value,
-    choices: Option<&Vec<serde_json::Value>>,
-    records: Option<&Vec<serde_json::Value>>,
-) -> String {
-    let Some(ids) = answer["choice"]
-        .as_str()
-        .and_then(|choice| choice.strip_prefix("candidate_"))
-        .and_then(|index| index.parse::<usize>().ok())
-        .and_then(|index| choices.and_then(|choices| choices.get(index)))
-        .and_then(|choice| choice["record_ids"].as_array())
-    else {
-        return String::new();
-    };
-    let mut table = Table::new();
-    table
-        .load_style(UTF8_FULL_CONDENSED)
-        .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_width(160)
-        .set_header([
-            "Merchant ID",
-            "Merchant",
-            "Website",
-            "Markets",
-            "Search similarity",
-        ]);
-    for id in ids.iter().filter_map(serde_json::Value::as_str) {
-        let record = records
-            .into_iter()
-            .flatten()
-            .find(|record| record["merchant"]["id"].as_str() == Some(id));
-        let merchant = record.map(|record| &record["merchant"]);
-        let field = |name: &str| {
-            text(
-                merchant
-                    .and_then(|merchant| merchant[name].as_str())
-                    .unwrap_or("—"),
-            )
-        };
-        let markets = merchant
-            .and_then(|merchant| merchant["markets"].as_array())
-            .map(|markets| {
-                markets
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .filter(|markets| !markets.is_empty())
-            .unwrap_or_else(|| "—".into());
-        let score = record
-            .and_then(|record| record["score"].as_f64())
-            .map(|score| format!("{score:.3}"))
-            .unwrap_or_else(|| "—".into());
-        table.add_row([
-            text(id),
-            field("name"),
-            field("website"),
-            text(&markets),
-            score,
-        ]);
+fn kind_answer(answer: &serde_json::Value, threshold: Option<f64>) -> String {
+    let mut rendered = provider_answer("Transaction kind answer", answer, None, "Kind");
+    if answer["choice"] == "unknown" {
+        rendered.push_str(
+            "   Kind outcome: unknown (model abstained; insufficient or ambiguous evidence).\n",
+        );
+    } else if let (Some(choice), Some(threshold)) = (answer["choice"].as_str(), threshold)
+        && let Some(probability) = answer["probabilities"][choice].as_f64()
+        && probability < threshold
+    {
+        rendered.push_str(&format!("   Below classification threshold: selected probability {:.1}% must reach {:.1}%.\n   Kind outcome: unknown.\n", probability * 100.0, threshold * 100.0));
     }
-    format!("   Ambiguous catalog records (search similarity is not match confidence):\n{table}\n")
+    rendered
+}
+
+fn name_answer(
+    answer: &serde_json::Value,
+    candidates: Option<&Vec<serde_json::Value>>,
+    threshold: Option<f64>,
+) -> String {
+    let mut rendered = provider_answer(
+        "Trading name recognition",
+        answer,
+        candidates,
+        "Trading name",
+    );
+    if answer["choice"] == "none" {
+        rendered.push_str("   No trading name selected; catalog identity resolution skipped.\n");
+    } else if let (Some(choice), Some(threshold)) = (answer["choice"].as_str(), threshold)
+        && let Some(probability) = answer["probabilities"][choice].as_f64()
+        && probability < threshold
+    {
+        rendered.push_str(&format!("   Below name threshold: selected probability {:.1}% must reach {:.1}%; catalog identity resolution skipped.\n", probability * 100.0, threshold * 100.0));
+    }
+    rendered
 }
 
 pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
@@ -439,7 +425,7 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
     rendered.push_str(&format!("   Method: {}\n", text(method)));
     if matches!(method, "provider" | "discovery") {
         rendered.push_str(&format!(
-            "   Model: {} · minimum confidence and probability: {}\n",
+            "   Model: {} · minimum selected probability: {}\n",
             text(details["model"].as_str().unwrap_or("")),
             details["threshold"]
         ));
@@ -447,8 +433,9 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
     if let Some(choices) = details["provider_choices"].as_array() {
         let mut table = Table::new();
         table.load_style(UTF8_FULL_CONDENSED).set_header([
-            "Brand choice",
+            "Business choice",
             "Merchant",
+            "Website",
             "Catalog records",
             "Record resolution",
         ]);
@@ -456,6 +443,7 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
             table.add_row([
                 format!("candidate_{index}"),
                 text(choice["merchant"]["name"].as_str().unwrap_or("")),
+                text(choice["merchant"]["website"].as_str().unwrap_or("—")),
                 choice["record_ids"]
                     .as_array()
                     .map_or(0, Vec::len)
@@ -464,7 +452,7 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
             ]);
         }
         rendered.push_str(&format!(
-            "   {} distinct merchant-name choices:\n{table}\n",
+            "   {} business identity choices:\n{table}\n",
             choices.len()
         ));
     }
@@ -477,8 +465,13 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
     for (key, label) in [
         ("catalog_provider_answer", "Catalog answer"),
         ("provider_answer", "Provider answer"),
+        ("kind_provider_answer", "Transaction kind answer"),
     ] {
         if let Some(answer) = details.get(key).filter(|answer| !answer.is_null()) {
+            if key == "kind_provider_answer" {
+                rendered.push_str(&kind_answer(answer, details["threshold"].as_f64()));
+                continue;
+            }
             let answer_candidates = if key == "catalog_provider_answer" {
                 details["catalog_provider_choices"]
                     .as_array()
@@ -488,56 +481,78 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
                     .as_array()
                     .or_else(|| details["candidates"].as_array())
             };
-            rendered.push_str(&provider_answer(label, answer, answer_candidates));
-            if let Some(records) = answer["identity_candidates"].as_array() {
+            if let Some(name) = answer.get("name_answer") {
+                rendered.push_str(&name_answer(
+                    name,
+                    answer_candidates,
+                    details["threshold"].as_f64(),
+                ));
+                if answer["decision_stage"] == "name" {
+                    continue;
+                }
+                rendered.push_str("   Resolve catalog identity conditional on the recognized name; this does not identify the outlet.\n");
+            }
+            if let Some(choices) = answer["identity_choices"].as_array() {
                 rendered.push_str(&format!(
-                    "   Identity resolution: {} · country: {}\n",
-                    text(answer["identity_method"].as_str().unwrap_or("unavailable")),
+                    "   Identity candidates after country and website refinement · country: {}\n",
                     text(answer["identity_country"].as_str().unwrap_or("unspecified"))
                 ));
-                let choices = vec![
-                    serde_json::json!({"record_ids":records.iter().map(|r| &r["merchant"]["id"]).collect::<Vec<_>>()}),
-                ];
-                rendered.push_str(
-                    &ambiguous_records(
-                        &serde_json::json!({"choice":"candidate_0"}),
-                        Some(&choices),
-                        Some(records),
-                    )
-                    .replacen(
-                        "Ambiguous catalog records",
-                        "Identity candidates after country and website refinement",
-                        1,
-                    ),
-                );
-                if let Some(identity_answer) =
-                    answer.get("identity_answer").filter(|a| !a.is_null())
-                {
-                    let mut labeled = records.clone();
-                    for record in &mut labeled {
-                        record["merchant"]["name"] = serde_json::json!(format!(
-                            "{} [{}]",
-                            record["merchant"]["name"].as_str().unwrap_or(""),
-                            record["merchant"]["id"].as_str().unwrap_or("")
-                        ));
+                for id in choices.iter().filter_map(serde_json::Value::as_str) {
+                    if let Some(choice) = id
+                        .strip_prefix("candidate_")
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .and_then(|n| answer_candidates.and_then(|choices| choices.get(n)))
+                    {
+                        rendered.push_str(&format!("   {}\n", text(id)));
+                        rendered.push_str(&selected_catalog_records(choice));
                     }
-                    rendered.push_str(&provider_answer(
-                        "Identity provider answer",
-                        identity_answer,
-                        Some(&labeled),
-                    ));
+                }
+            }
+            rendered.push_str(&provider_answer(
+                if answer["identity_method"] == "deterministic" {
+                    "Deterministic catalog identity resolution"
+                } else if answer["decision_stage"] == "identity" {
+                    "Catalog identity answer"
+                } else {
+                    label
+                },
+                answer,
+                answer_candidates,
+                "Merchant",
+            ));
+            if let Some(choice) = answer["choice"]
+                .as_str()
+                .and_then(|choice| choice.strip_prefix("candidate_"))
+                .and_then(|index| index.parse::<usize>().ok())
+                .and_then(|index| answer_candidates.and_then(|choices| choices.get(index)))
+            {
+                rendered.push_str(&selected_catalog_records(choice));
+                if let Some(evidence) = choice["business_evidence"].as_array() {
+                    let mut seen = std::collections::HashSet::new();
+                    for summary in evidence.iter().filter(|value| !value.is_null()) {
+                        if seen.insert(summary.to_string()) {
+                            rendered.push_str(&format!(
+                                "   Catalog outlet evidence (coverage is incomplete):\n{}\n",
+                                serde_json::to_string_pretty(summary)?
+                            ));
+                        }
+                    }
                 }
             }
             if answer["catalog_resolution"] == "ambiguous" {
                 rendered.push_str("   Merchant name selected, but catalog identity is ambiguous; no record matched.\n");
-                let records = if key == "catalog_provider_answer" {
-                    details["catalog_candidates"].as_array().or(candidates)
-                } else {
-                    details["candidates"].as_array()
-                };
-                if answer["identity_candidates"].is_null() {
-                    rendered.push_str(&ambiguous_records(answer, answer_candidates, records));
-                }
+            }
+            if let (Some(choice), Some(threshold)) =
+                (answer["choice"].as_str(), details["threshold"].as_f64())
+                && choice != "none"
+                && let Some(probability) = answer["probabilities"][choice].as_f64()
+                && probability < threshold
+            {
+                rendered.push_str(&format!(
+                    "   Below match threshold: selected probability {:.1}% must reach {:.1}%.\n",
+                    probability * 100.0,
+                    threshold * 100.0
+                ));
             }
         }
     }
@@ -584,7 +599,7 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
         rendered.push_str(&format!("   Discovery skipped: {}\n", text(reason)));
     }
     rendered.push_str(&format!(
-        "   Outcome: {}\n",
+        "   Merchant outcome: {}\n",
         text(details["status"].as_str().unwrap_or("unavailable"))
     ));
     if let Some(error) = details["error"].as_str() {
@@ -657,6 +672,48 @@ pub(crate) fn text(value: &str) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+
+fn selected_catalog_records(choice: &serde_json::Value) -> String {
+    let Some(records) = choice["records"]
+        .as_array()
+        .filter(|records| !records.is_empty())
+    else {
+        return String::new();
+    };
+    let mut table = Table::new();
+    table.load_style(UTF8_FULL_CONDENSED).set_header([
+        "Merchant ID",
+        "Name",
+        "Website",
+        "Markets",
+        "Search score",
+    ]);
+    for (index, merchant) in records.iter().enumerate() {
+        table.add_row([
+            text(merchant["id"].as_str().unwrap_or("")),
+            text(merchant["name"].as_str().unwrap_or("")),
+            text(merchant["website"].as_str().unwrap_or("—")),
+            merchant["markets"]
+                .as_array()
+                .map(|markets| {
+                    markets
+                        .iter()
+                        .filter_map(|market| market.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default(),
+            choice["record_scores"][index]
+                .as_f64()
+                .map(|score| format!("{score:.3}"))
+                .unwrap_or_else(|| "—".into()),
+        ]);
+    }
+    format!(
+        "\n   {} catalog records for the selected business:\n{table}\n",
+        records.len()
+    )
 }
 
 pub fn merchant_dedupe(report: &ultrafinance_core::dedupe::Report, json: bool) -> Result<()> {
@@ -939,7 +996,7 @@ pub fn merchant_stats(stats: &MerchantStats, json: bool) -> Result<()> {
     ))
 }
 
-fn write_output(rendered: &str) -> Result<()> {
+pub(crate) fn write_output(rendered: &str) -> Result<()> {
     // Unix pipelines such as `logs | head` may close stdout early.
     match writeln!(io::stdout().lock(), "{rendered}") {
         Err(error) if error.kind() != io::ErrorKind::BrokenPipe => return Err(error.into()),
@@ -1045,3 +1102,7 @@ pub fn logo_detail(
     }
     write_output(&table.to_string())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/output/enrichment_tests.rs"]
+mod enrichment_tests;

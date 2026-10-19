@@ -221,6 +221,7 @@ mod tests {
             regex_match_length: None,
             provenance: vec![],
             interpretation_evidence: vec![],
+            business_evidence: serde_json::Value::Null,
             retrieval_evidence: vec![],
             resolution_id: None,
             pending_import: false,

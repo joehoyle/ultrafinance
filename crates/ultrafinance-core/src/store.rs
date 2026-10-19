@@ -15,7 +15,7 @@ pub use search_pipeline::{RetrievalEvidence, SearchTrace};
 
 pub const LOCAL_DATABASE_URL: &str =
     "postgresql://ultrafinance@127.0.0.1:55432/ultrafinance?sslmode=disable";
-pub const POSTGRES_SCHEMA_VERSION: i32 = 19;
+pub const POSTGRES_SCHEMA_VERSION: i32 = 20;
 
 #[derive(Debug)]
 pub struct SchemaMismatch {
@@ -240,6 +240,7 @@ impl MerchantStore {
                 pending_import: false,
                 interpretation_evidence: vec![],
                 retrieval_evidence: vec![],
+                business_evidence: serde_json::Value::Null,
             };
             if mapping.verified {
                 return Ok((vec![candidate], SearchTrace::default()));
@@ -320,13 +321,13 @@ impl MerchantStore {
                 }
             }
         }
-        Ok(search_pipeline::shortlist(
-            found,
-            &interpretation,
-            limit,
-            ranking_country,
-            pool_limit,
-        ))
+        let (mut ranked, trace) =
+            search_pipeline::shortlist(found, &interpretation, limit, ranking_country, pool_limit);
+        for candidate in &mut ranked {
+            let outlets = self.cached_locations(&candidate.merchant.id)?;
+            candidate.business_evidence = crate::business::outlet_summary(request, &outlets);
+        }
+        Ok((ranked, trace))
     }
 
     pub(crate) fn write_logs(
@@ -343,8 +344,9 @@ impl MerchantStore {
                     "started"
                 }
                 .to_owned();
-                let merchant = data["response"]["merchant"]["data"]["id"]
+                let merchant = data["response"]["counterparties"][0]["id"]
                     .as_str()
+                    .or_else(|| data["response"]["merchant"]["data"]["id"].as_str())
                     .map(str::to_owned);
                 Ok((id, batch, status, merchant, serde_json::to_string(&data)?))
             })
@@ -495,7 +497,16 @@ impl MerchantStore {
         self.0.stats()
     }
     pub fn list(&self, market: Option<&str>, limit: usize, offset: usize) -> Result<MerchantPage> {
-        let mut page = self.0.list(market, limit, offset)?;
+        self.list_typed(market, limit, offset, None)
+    }
+    pub fn list_typed(
+        &self,
+        market: Option<&str>,
+        limit: usize,
+        offset: usize,
+        entity_type: Option<crate::CounterpartyType>,
+    ) -> Result<MerchantPage> {
+        let mut page = self.0.list(market, limit, offset, entity_type)?;
         self.apply_logos(page.merchants.iter_mut())?;
         Ok(page)
     }
@@ -512,6 +523,8 @@ impl MerchantStore {
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub business_evidence: Value,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interpretation_evidence: Vec<crate::interpretation::CatalogSupport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

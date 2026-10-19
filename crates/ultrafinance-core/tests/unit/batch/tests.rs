@@ -47,6 +47,7 @@ fn brand_fixture(
         pending_import: false,
         interpretation_evidence: vec![],
         retrieval_evidence: vec![],
+        business_evidence: serde_json::Value::Null,
         provenance: vec![store::SourceRecord {
             merchant,
             source: source.into(),
@@ -60,78 +61,89 @@ fn brand_fixture(
     }
 }
 #[tokio::test]
-async fn duplicate_place_names_use_one_brand_choice_and_resolve_the_brand_record() {
+async fn same_name_businesses_are_resolved_after_name_recognition() {
     let mut enricher = enricher();
-    let place = brand_fixture(
-        "place",
-        "Alpha Cafe",
-        "https://venue.example",
-        "foursquare",
-        "place:one",
-    );
-    let brand = brand_fixture(
-        "alpha",
-        "Alpha Cafe",
-        "https://alpha.example",
-        "open-enrichment",
-        "alpha",
-    );
-    let beta = brand_fixture(
-        "beta",
-        "Beta Shop",
-        "https://beta.example",
-        "merchant-studio",
-        "beta",
-    );
-    let shortlisted = vec![place, brand, beta];
-    let rx = mock_choice(&mut enricher, 1, 200, None, "candidate_1");
-    let (mut results, details) = enricher
-        .enrich_batch_candidates_traced(vec![(
-            request("Beta Shop ON CAN"),
-            Ok(shortlisted.clone()),
-        )])
-        .await;
-    assert!(
-        matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched { data } if data.id == "beta")
-    );
-    let sent = rx.recv().unwrap();
-    let choices = &sent["questions"]["transaction_0"]["criteria"];
-    assert_eq!(choices.as_object().unwrap().len(), 3);
-    assert_eq!(choices["candidate_0"]["merchant"]["name"], "Alpha Cafe");
-    assert_eq!(
-        choices["candidate_0"]["merchant"]["website"],
-        "https://alpha.example"
-    );
-    assert_eq!(
-        choices["candidate_0"]["provenance"]
-            .as_array()
+    let shortlisted = vec![
+        brand_fixture(
+            "place",
+            "Alpha Cafe",
+            "https://venue.example",
+            "foursquare",
+            "place:one",
+        ),
+        brand_fixture(
+            "alpha",
+            "Alpha Cafe",
+            "https://alpha.example",
+            "open-enrichment",
+            "alpha",
+        ),
+        brand_fixture(
+            "beta",
+            "Beta Shop",
+            "https://beta.example",
+            "merchant-studio",
+            "beta",
+        ),
+    ];
+    let rx = mock_responses(&mut enricher, 2, 200, |body| {
+        let answers: Map<_, _> = body["questions"]
+            .as_object()
             .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(choices["candidate_1"]["merchant"]["name"], "Beta Shop");
-    assert_eq!(
-        details[0]["provider_choices"][0]["record_ids"],
-        json!(["place", "alpha"])
-    );
-    assert_eq!(details[0]["provider_choices"][1]["merchant"]["id"], "beta");
-    assert_eq!(
-        details[0]["provider_answer"]["catalog_resolution"],
-        "resolved"
-    );
-    assert!(enricher.store.get("place").unwrap().is_none());
-    let rx = mock(&mut enricher, 1, 200, None);
+            .keys()
+            .map(|key| {
+                (
+                    key.clone(),
+                    answer(if key.starts_with("kind_") {
+                        "purchase"
+                    } else if key.starts_with("identity_") {
+                        "candidate_1"
+                    } else {
+                        "candidate_0"
+                    }),
+                )
+            })
+            .collect();
+        json!({"answers":answers})
+    });
     let (mut results, details) = enricher
         .enrich_batch_candidates_traced(vec![(request("Alpha Cafe ON CAN"), Ok(shortlisted))])
         .await;
     assert!(
         matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched { data } if data.id == "alpha")
     );
+    let sent = rx.recv().unwrap();
+    let names = &sent["questions"]["transaction_0"]["criteria"];
+    assert_eq!(names.as_object().unwrap().len(), 3);
+    assert_eq!(names["candidate_0"]["name"], "Alpha Cafe");
+    assert!(names.get("candidate_1").is_none());
+    assert!(!names.to_string().contains("https://"));
+    let identities = rx.recv().unwrap();
+    let choices = &identities["questions"]["identity_0"]["criteria"];
+    assert_eq!(choices.as_object().unwrap().len(), 3);
+    assert_eq!(
+        choices["candidate_0"]["merchant"]["website"],
+        "https://venue.example"
+    );
+    assert_eq!(
+        choices["candidate_1"]["merchant"]["website"],
+        "https://alpha.example"
+    );
+    assert!(choices.get("candidate_2").is_none());
+    assert_eq!(
+        details[0]["provider_answer"]["name_answer"]["choice"],
+        "candidate_0"
+    );
+    assert_eq!(details[0]["provider_answer"]["decision_stage"], "identity");
+    assert_eq!(details[0]["provider_requests"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        details[0]["provider_choices"][1]["records"][0]["id"],
+        "alpha"
+    );
     assert_eq!(
         details[0]["provider_answer"]["catalog_resolution"],
         "resolved"
     );
-    rx.recv().unwrap();
 }
 #[test]
 fn provider_projection_retains_distinct_evidence_and_caller_context() {
@@ -150,8 +162,8 @@ fn provider_projection_retains_distinct_evidence_and_caller_context() {
     let evidence = candidate_evidence(&candidate);
     assert_eq!(
         evidence["merchant"],
-        json!({"name":"Alpha Cafe",
-        "aliases":["Alpha"],"markets":["CA"],"website":"https://alpha.example"})
+        json!({"name":"Alpha Cafe", "type":"merchant",
+        "aliases":["Alpha"],"markets":["CA"],"website":"https://alpha.example","business_domain":"alpha.example"})
     );
     assert_eq!(
         evidence["provenance"],
@@ -174,9 +186,11 @@ fn provider_projection_retains_distinct_evidence_and_caller_context() {
     let sent = question(&request, &[candidate.clone(), duplicate, alternative]);
     let primary = &sent["criteria"]["candidate_0"];
     assert_eq!(primary["merchant"]["website"], "https://alpha.example");
-    let variants = primary["catalog_identity_variants"].as_array().unwrap();
-    assert_eq!(variants.len(), 1);
-    assert_eq!(variants[0]["merchant"]["website"], "https://other.example");
+    assert_eq!(
+        sent["criteria"]["candidate_1"]["merchant"]["website"],
+        "https://other.example"
+    );
+    assert_eq!(sent["criteria"].as_object().unwrap().len(), 3);
     assert!(!sent.to_string().contains("internal-"));
     assert!(!sent.to_string().contains("irrelevant-source-data"));
     let transaction = &sent["instructions"]["transaction"];
@@ -203,23 +217,11 @@ fn provider_projection_retains_distinct_evidence_and_caller_context() {
     assert_eq!(serde_json::to_value(candidate).unwrap(), before);
 }
 #[tokio::test]
-async fn same_name_unrelated_businesses_remain_unresolved_despite_confident_name_selection() {
+async fn indistinguishable_records_remain_unresolved_despite_confident_selection() {
     let mut enricher = enricher();
-    let alpha = brand_fixture(
-        "alpha",
-        "Alpha Cafe",
-        "https://alpha.example",
-        "merchant-studio",
-        "alpha",
-    );
-    let unrelated = brand_fixture(
-        "other",
-        "Alpha Cafe",
-        "https://unrelated.example",
-        "merchant-studio",
-        "other",
-    );
-    let rx = mock(&mut enricher, 2, 200, None);
+    let alpha = brand_fixture("alpha", "Alpha Cafe", "", "merchant-studio", "alpha");
+    let unrelated = brand_fixture("other", "Alpha Cafe", "", "merchant-studio", "other");
+    let rx = mock(&mut enricher, 1, 200, None);
     let (mut results, details) = enricher
         .enrich_batch_candidates_traced(vec![(
             request("Alpha Cafe ON CAN"),
@@ -235,10 +237,6 @@ async fn same_name_unrelated_businesses_remain_unresolved_despite_confident_name
         details[0]["provider_answer"]["catalog_resolution"],
         "ambiguous"
     );
-    assert_eq!(
-        details[0]["provider_answer"]["identity_answer"]["choice"],
-        "none"
-    );
     assert!(enricher.store.resolutions(None, 10).unwrap().is_empty());
     assert_eq!(
         rx.recv().unwrap()["questions"]["transaction_0"]["criteria"]
@@ -248,220 +246,9 @@ async fn same_name_unrelated_businesses_remain_unresolved_despite_confident_name
         2
     );
 }
-#[tokio::test]
-async fn country_narrows_only_the_selected_name_and_preserves_global_names() {
-    for description in ["Alpha Cafe", "Alpha Cafe TORONTO ON"] {
-        let mut enricher = enricher();
-        enricher.persist_matches = false;
-        let ca = brand_fixture(
-            "ca",
-            "Alpha Cafe",
-            "https://ca.example",
-            "foursquare",
-            "place:ca",
-        );
-        let mut us = brand_fixture(
-            "us",
-            "Alpha Cafe",
-            "https://us.example",
-            "foursquare",
-            "place:us",
-        );
-        us.merchant.markets = vec!["US".into()];
-        let mut foreign_name = brand_fixture(
-            "foreign",
-            "Beta Shop",
-            "https://beta.example",
-            "foursquare",
-            "place:beta",
-        );
-        foreign_name.merchant.markets = vec!["US".into()];
-        let mut transaction = request(description);
-        if description.contains("TORONTO") {
-            transaction.country = None;
-        }
-        let rx = mock(&mut enricher, 1, 200, None);
-        let (mut results, details) = enricher
-            .enrich_batch_candidates_traced(vec![(transaction, Ok(vec![us, ca, foreign_name]))])
-            .await;
-        assert!(
-            matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched { data } if data.id == "ca")
-        );
-        let sent = rx.recv().unwrap();
-        assert_eq!(
-            sent["questions"]["transaction_0"]["criteria"]["candidate_1"]["merchant"]["name"],
-            "Beta Shop"
-        );
-        assert_eq!(
-            details[0]["provider_answer"]["identity_candidates"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            details[0]["provider_answer"]["identity_method"],
-            "deterministic"
-        );
-    }
-}
-
-#[tokio::test]
-async fn second_identity_decision_selects_and_traces_the_actual_record() {
-    let mut enricher = enricher();
-    enricher.persist_matches = false;
-    let records = vec![
-        brand_fixture("a", "Alpha", "https://a.example", "foursquare", "place:a"),
-        brand_fixture("b", "Alpha", "https://b.example", "foursquare", "place:b"),
-    ];
-    let rx = mock_identity_choice(&mut enricher, 2, 200, None, "candidate_0", "candidate_1");
-    let (mut results, details) = enricher
-        .enrich_batch_candidates_traced(vec![(request("Alpha"), Ok(records))])
-        .await;
-    assert!(
-        matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched { data } if data.id == "b")
-    );
-    let answer = &details[0]["provider_answer"];
-    assert_eq!(answer["choice"], "candidate_0");
-    assert_eq!(answer["identity_answer"]["choice"], "candidate_1");
-    assert_eq!(answer["catalog_resolution"], "resolved");
-    assert_eq!(details[0]["provider_requests"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        rx.recv().unwrap()["questions"]["transaction_0"]["criteria"]
-            .as_object()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        rx.recv().unwrap()["questions"]["identity"]["criteria"]
-            .as_object()
-            .unwrap()
-            .len(),
-        3
-    );
-}
-
-#[tokio::test]
-async fn identity_provider_selection_threshold_and_errors_are_enforced() {
-    for (selected, threshold, status, missing, expected) in [
-        ("candidate_1", 0.95, 200, None, "matched"),
-        ("candidate_1", 1.0, 200, None, "unresolved"),
-        ("none", 0.95, 200, None, "unresolved"),
-        ("candidate_99", 0.95, 200, None, "error"),
-        ("candidate_1", 0.95, 500, None, "error"),
-        ("candidate_1", 0.95, 200, Some("identity"), "error"),
-    ] {
-        let mut enricher = enricher();
-        enricher.threshold = threshold;
-        let records = vec![
-            brand_fixture("a", "Alpha", "https://a.example", "foursquare", "place:a"),
-            brand_fixture("b", "Alpha", "https://b.example", "foursquare", "place:b"),
-        ];
-        let rx = mock_identity_choice(&mut enricher, 1, status, missing, "candidate_0", selected);
-        let (result, _, _) = enricher
-            .evaluate_identity(&request("Alpha"), &records)
-            .await;
-        match expected {
-            "matched" => assert!(
-                matches!(result.unwrap().merchant, MerchantResult::Matched { data } if data.id == "b")
-            ),
-            "unresolved" => assert!(matches!(
-                result.unwrap().merchant,
-                MerchantResult::Unresolved { .. }
-            )),
-            _ => assert!(result.is_err()),
-        }
-        assert!(rx.recv().unwrap()["questions"]["identity"]["criteria"]["none"].is_string());
-    }
-}
-
 #[test]
-fn identity_country_falls_back_within_selected_name_only() {
-    let mut first = brand_fixture("a", "Alpha", "https://a.example", "foursquare", "place:a");
-    first.merchant.markets = vec!["US".into()];
-    let mut second = first.clone();
-    second.merchant.id = "b".into();
-    second.merchant.markets.clear();
-    let other = brand_fixture(
-        "other",
-        "Beta",
-        "https://b.example",
-        "foursquare",
-        "place:b",
-    );
-    let candidates = vec![first, second, other];
-    let choices = brand_choices(&candidates);
-    assert_eq!(
-        identity_records(&candidates, &choices[0], Some("CA")).len(),
-        2
-    );
-    assert_eq!(
-        identity_records(&candidates, &choices[0], Some("US")).len(),
-        1
-    );
-}
-
-#[test]
-fn identity_websites_refine_only_the_country_filtered_group_with_fallback() {
-    let linked = brand_fixture(
-        "linked",
-        "Alpha",
-        "https://alpha.example",
-        "foursquare",
-        "place:a",
-    );
-    let mut missing = linked.clone();
-    missing.merchant.id = "missing".into();
-    missing.merchant.website = None;
-    let mut blank = linked.clone();
-    blank.merchant.id = "blank".into();
-    blank.merchant.website = Some("  ".into());
-    let mut foreign = linked.clone();
-    foreign.merchant.id = "foreign".into();
-    foreign.merchant.markets = vec!["US".into()];
-    let mut other = linked.clone();
-    other.merchant.id = "other".into();
-    other.merchant.name = "Beta".into();
-    let candidates = vec![
-        missing.clone(),
-        linked,
-        blank.clone(),
-        foreign.clone(),
-        other.clone(),
-    ];
-    let choices = brand_choices(&candidates);
-    let refined = identity_records(&candidates, &choices[0], Some("CA"));
-    assert_eq!(
-        refined
-            .iter()
-            .map(|c| c.merchant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["linked"]
-    );
-    let candidates = vec![missing, blank, foreign, other];
-    let choices = brand_choices(&candidates);
-    let refined = identity_records(&candidates, &choices[0], Some("CA"));
-    assert_eq!(
-        refined
-            .iter()
-            .map(|c| c.merchant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["missing", "blank"]
-    );
-    let refined = identity_records(&candidates, &choices[0], Some("GB"));
-    assert_eq!(
-        refined
-            .iter()
-            .map(|c| c.merchant.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["foreign"]
-    );
-}
-
-#[test]
-fn catalog_resolution_requires_identity_evidence_and_preserves_distinct_names() {
-    let brand = brand_fixture(
+fn business_grouping_uses_identity_without_source_preferences() {
+    let alpha = brand_fixture(
         "alpha",
         "Alpha Cafe",
         "https://alpha.example",
@@ -472,50 +259,42 @@ fn catalog_resolution_requires_identity_evidence_and_preserves_distinct_names() 
         "regional",
         "ALPHA CAFE",
         "http://www.alpha.example/ca",
-        "merchant-studio",
-        "regional",
+        "foursquare",
+        "place:regional",
     );
     assert_eq!(
-        brand_choices(&[brand.clone(), regional])[0].resolved,
-        Some(0)
+        business_choices(&[alpha.clone(), regional])[0]
+            .members
+            .len(),
+        2
     );
-    let place = brand_fixture(
-        "place",
-        "Alpha Cafe",
-        "https://venue.example",
-        "foursquare",
-        "place:one",
-    );
-    assert_eq!(
-        brand_choices(&[place.clone(), brand.clone()])[0].resolved,
-        Some(1)
-    );
-    let other_place = brand_fixture(
-        "other",
-        "Alpha Cafe",
-        "https://other.example",
-        "foursquare",
-        "place:two",
-    );
-    assert_eq!(brand_choices(&[place, other_place])[0].resolved, None);
-    let mut child = brand_fixture(
-        "child",
-        "Alpha Cafe",
-        "https://child.example",
-        "open-enrichment",
-        "child",
-    );
-    child.provenance[0].raw = json!({"parent_id":"parent"});
-    assert!(!established_brand(&child));
-    assert_eq!(brand_choices(&[brand.clone(), child])[0].resolved, None);
-    let distinct = brand_fixture(
-        "distinct",
-        "Alpha Cafe Plus",
-        "https://alpha.example",
-        "merchant-studio",
+    for (source, external_id, trusted) in [
+        ("merchant-studio", "other", false),
+        ("open-enrichment", "other", false),
+        ("foursquare", "brand:other", false),
+        ("manual", "other", true),
+    ] {
+        let mut other = brand_fixture(
+            "other",
+            "Alpha Cafe",
+            "https://other.example",
+            source,
+            external_id,
+        );
+        other.trusted = trusted;
+        let choices = business_choices(&[alpha.clone(), other]);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].resolved, Some(0));
+        assert_eq!(choices[1].resolved, Some(1));
+    }
+    let plus = brand_fixture(
         "plus",
+        "Alpha Cafe+",
+        "https://alpha.example",
+        "foursquare",
+        "place:plus",
     );
-    assert_eq!(brand_choices(&[brand, distinct]).len(), 2);
+    assert_eq!(business_choices(&[alpha, plus]).len(), 2);
 }
 #[tokio::test]
 async fn evaluation_matches_do_not_change_snapshot_or_learn_resolutions() {
@@ -759,22 +538,63 @@ fn mock_choice(
     missing: Option<&'static str>,
     choice: &'static str,
 ) -> mpsc::Receiver<Value> {
-    mock_identity_choice(enricher, count, status, missing, choice, "none")
+    mock_answers(enricher, count, status, missing, choice, "transfer")
 }
-fn mock_identity_choice(
+fn mock_answers(
     enricher: &mut Enricher,
     count: usize,
     status: u16,
     missing: Option<&'static str>,
     choice: &'static str,
-    identity_choice: &'static str,
+    kind: &'static str,
+) -> mpsc::Receiver<Value> {
+    mock_responses(enricher, count, status, move |body| {
+        let answers: Map<String, Value> = body["questions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .rev()
+            .filter(|key| Some(key.as_str()) != missing)
+            .map(|key| {
+                (
+                    key.clone(),
+                    answer(if key.starts_with("kind_") {
+                        kind
+                    } else {
+                        choice
+                    }),
+                )
+            })
+            .collect();
+        json!({"answers":answers})
+    })
+}
+fn mock_responses(
+    enricher: &mut Enricher,
+    count: usize,
+    status: u16,
+    respond: impl Fn(&Value) -> Value + Send + 'static,
 ) -> mpsc::Receiver<Value> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     enricher.provider_url = format!("http://{}/", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
         for _ in 0..count {
-            let (mut stream, _) = listener.accept().unwrap();
+            let started = std::time::Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if started.elapsed() > Duration::from_secs(5) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("mock accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -805,24 +625,7 @@ fn mock_identity_choice(
             }
             let body: Value =
                 serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
-            let answers: Map<String, Value> = body["questions"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .rev()
-                .filter(|key| Some(key.as_str()) != missing)
-                .map(|key| {
-                    (
-                        key.clone(),
-                        answer(if key == "identity" {
-                            identity_choice
-                        } else {
-                            choice
-                        }),
-                    )
-                })
-                .collect();
-            let response = json!({"answers":answers}).to_string();
+            let response = respond(&body).to_string();
             write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
             tx.send(body).unwrap();
         }
@@ -926,7 +729,10 @@ async fn batches_isolate_evidence_and_preserve_order_with_local_and_invalid_item
     assert_eq!(logs[2]["status"], "unresolved");
     assert_eq!(logs[2]["data"]["method"], "no_candidates");
     assert_eq!(logs[3]["data"]["method"], "exact");
-    assert!(logs[3]["data"]["provider_answer"].is_null());
+    assert_eq!(
+        logs[3]["data"]["kind_provider_answer"]["choice"],
+        "transfer"
+    );
     assert_eq!(
         enricher
             .store
@@ -938,7 +744,7 @@ async fn batches_isolate_evidence_and_preserve_order_with_local_and_invalid_item
     let body = rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(body["state"], json!({}));
     let questions = body["questions"].as_object().unwrap();
-    assert_eq!(questions.len(), 2);
+    assert_eq!(questions.len(), 6);
     assert_eq!(
         questions["transaction_0"]["instructions"]["transaction"]["description"],
         "alpha transaction"
@@ -1000,7 +806,7 @@ fn evaluator_receives_catalog_interpretations_with_unconfirmed_locality() {
 async fn count_and_byte_budgets_split_requests_and_missing_answers_are_isolated() {
     let mut enricher = enricher();
     let candidates = candidates(&enricher, "Alpha Cafe");
-    let rx = mock(&mut enricher, 2, 200, Some("transaction_1"));
+    let rx = mock(&mut enricher, 33, 200, Some("transaction_1"));
     let inputs = (0..33)
         .map(|i| (request(&format!("purchase {i}")), Ok(candidates.clone())))
         .collect();
@@ -1008,12 +814,19 @@ async fn count_and_byte_budgets_split_requests_and_missing_answers_are_isolated(
     assert_eq!(results.len(), 33);
     assert!(results[1].is_err());
     assert!(results.iter().enumerate().all(|(i, r)| i == 1 || r.is_ok()));
-    for _ in 0..2 {
+    let mut question_count = 0;
+    let mut request_count = 0;
+    while question_count < 66 {
         let body = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(body["questions"].as_object().unwrap().len() <= MAX_QUESTIONS);
+        let count = body["questions"].as_object().unwrap().len();
+        assert!(count > 0 && count <= MAX_QUESTIONS);
         assert!(serde_json::to_vec(&body).unwrap().len() <= MAX_BODY_BYTES);
+        question_count += count;
+        request_count += 1;
     }
-    let rx = mock(&mut enricher, 2, 200, None);
+    assert_eq!(question_count, 66);
+    assert!(request_count > 1);
+    let rx = mock(&mut enricher, 3, 200, None);
     let mut large = request("purchase");
     large
         .extra
@@ -1026,7 +839,7 @@ async fn count_and_byte_budgets_split_requests_and_missing_answers_are_isolated(
         )
         .await;
     assert!(results.iter().all(Result::is_ok));
-    for _ in 0..2 {
+    for _ in 0..3 {
         assert!(
             serde_json::to_vec(&rx.recv_timeout(Duration::from_secs(2)).unwrap())
                 .unwrap()
@@ -1036,7 +849,7 @@ async fn count_and_byte_budgets_split_requests_and_missing_answers_are_isolated(
     }
 }
 #[tokio::test]
-async fn upstream_failure_preserves_local_results_and_oversized_items_are_rejected() {
+async fn upstream_kind_failure_affects_local_results_and_oversized_items_are_rejected() {
     let mut enricher = enricher();
     let candidates = candidates(&enricher, "Alpha Cafe");
     let mut large = request("purchase");
@@ -1052,7 +865,7 @@ async fn upstream_failure_preserves_local_results_and_oversized_items_are_reject
         ])
         .await;
     assert!(results[0].as_ref().unwrap_err().to_string().contains("429"));
-    assert!(results[1].is_ok());
+    assert!(results[1].as_ref().unwrap_err().to_string().contains("429"));
     assert!(
         results[2]
             .as_ref()
@@ -1061,7 +874,7 @@ async fn upstream_failure_preserves_local_results_and_oversized_items_are_reject
             .contains("budget")
     );
     assert_eq!(details[0]["provider_requests"][0]["status"], "sent");
-    assert!(details[1].get("provider_requests").is_none());
+    assert_eq!(details[1]["provider_requests"][0]["status"], "sent");
     assert_eq!(details[2]["provider_requests"][0]["status"], "not_sent");
     assert!(
         serde_json::to_vec(
@@ -1076,7 +889,7 @@ async fn upstream_failure_preserves_local_results_and_oversized_items_are_reject
             .as_object()
             .unwrap()
             .len(),
-        1
+        3
     );
 }
 #[tokio::test]
@@ -1089,9 +902,343 @@ async fn single_transaction_uses_the_same_provider_question_format() {
         .unwrap();
     assert!(matches!(result.merchant, MerchantResult::Matched { .. }));
     let body = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(body["questions"].as_object().unwrap().len(), 1);
+    assert_eq!(body["questions"].as_object().unwrap().len(), 2);
     assert_eq!(
         body["questions"]["transaction_0"]["instructions"]["transaction"]["description"],
         "Alpha Cafe PURCHASE"
     );
+}
+
+#[tokio::test]
+async fn kind_is_classified_for_empty_and_exact_matches_and_missing_answers_are_isolated() {
+    let mut enricher = enricher();
+    let exact = enricher.store.search("Alpha Cafe", Some("CA"), 10).unwrap();
+    let rx = mock(&mut enricher, 1, 200, Some("kind_1"));
+    let results = enricher
+        .enrich_batch_candidates(vec![
+            (request("INTERAC E-TRANSFER TO JANE SMITH"), Ok(vec![])),
+            (request("Alpha Cafe"), Ok(exact.clone())),
+            (request("Alpha Cafe"), Ok(exact)),
+        ])
+        .await;
+    assert_eq!(results[0].as_ref().unwrap().kind, TransactionKind::Transfer);
+    assert!(matches!(
+        results[0].as_ref().unwrap().merchant,
+        MerchantResult::Unresolved { .. }
+    ));
+    assert!(
+        results[1]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("kind")
+    );
+    assert_eq!(results[2].as_ref().unwrap().kind, TransactionKind::Transfer);
+    assert!(matches!(
+        results[2].as_ref().unwrap().merchant,
+        MerchantResult::Matched { .. }
+    ));
+    let sent = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let questions = sent["questions"].as_object().unwrap();
+    assert_eq!(questions.len(), 3);
+    assert!(questions.keys().all(|key| key.starts_with("kind_")));
+    assert_eq!(
+        questions["kind_0"]["instructions"]["transaction"]["description"],
+        "INTERAC E-TRANSFER TO JANE SMITH"
+    );
+}
+
+#[tokio::test]
+async fn local_enrichment_without_jev_keeps_kind_unknown() {
+    let mut enricher = enricher();
+    enricher.api_key = None;
+    for description in ["Alpha Cafe", "INTERAC E-TRANSFER TO JANE SMITH"] {
+        let result = enricher.enrich(&request(description)).await.unwrap();
+        assert_eq!(result.kind, TransactionKind::Unknown);
+    }
+}
+
+#[tokio::test]
+async fn exact_merchant_does_not_force_purchase_kind() {
+    let mut enricher = enricher();
+    let exact = enricher.store.search("Alpha Cafe", Some("CA"), 10).unwrap();
+    let rx = mock_answers(&mut enricher, 1, 200, None, "candidate_0", "refund");
+    let result = enricher
+        .enrich_batch_candidates(vec![(request("Alpha Cafe"), Ok(exact))])
+        .await
+        .remove(0)
+        .unwrap();
+    assert_eq!(result.kind, TransactionKind::Refund);
+    assert!(matches!(result.merchant, MerchantResult::Matched { .. }));
+    let sent = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(sent["questions"].get("transaction_0").is_none());
+    assert!(sent["questions"].get("kind_0").is_some());
+}
+
+fn same_name_fixture() -> Vec<store::Candidate> {
+    vec![
+        brand_fixture(
+            "place",
+            "Alpha Cafe",
+            "https://venue.example",
+            "foursquare",
+            "one",
+        ),
+        brand_fixture(
+            "alpha",
+            "Alpha Cafe",
+            "https://alpha.example",
+            "foursquare",
+            "two",
+        ),
+        brand_fixture(
+            "beta",
+            "Beta Shop",
+            "https://beta.example",
+            "foursquare",
+            "three",
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn hierarchy_preserves_abstentions_and_isolates_invalid_identity_answers() {
+    let mut enricher = enricher();
+    let rx = mock_responses(&mut enricher, 2, 200, |body| {
+        let answers: Map<_, _> = body["questions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter_map(|key| {
+                if key == "identity_5" {
+                    return None;
+                }
+                let mut result = answer(if key.starts_with("kind_") {
+                    "transfer"
+                } else if key == "transaction_1" || key == "identity_2" {
+                    "none"
+                } else if key == "identity_3" {
+                    "candidate_2"
+                } else if key.starts_with("identity_") {
+                    "candidate_1"
+                } else {
+                    "candidate_0"
+                });
+                if key == "transaction_0" || key == "identity_4" {
+                    let choice = result["choice"].as_str().unwrap().to_string();
+                    result["probabilities"][choice] = json!(0.89);
+                }
+                Some((key.clone(), result))
+            })
+            .collect();
+        json!({"answers":answers})
+    });
+    let (results, details) = enricher
+        .enrich_batch_candidates_traced(
+            (0..7)
+                .map(|i| {
+                    (
+                        request(&format!("Alpha Cafe transaction {i}")),
+                        Ok(same_name_fixture()),
+                    )
+                })
+                .collect(),
+        )
+        .await;
+    for index in [0, 1, 2, 4] {
+        assert!(matches!(
+            &results[index],
+            Ok(EnrichResponse {
+                merchant: MerchantResult::Unresolved { .. },
+                kind: TransactionKind::Transfer,
+                ..
+            })
+        ));
+    }
+    assert!(
+        results[3]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("outside the supplied question")
+    );
+    assert!(results[5].is_err());
+    assert!(
+        matches!(&results[6], Ok(EnrichResponse { merchant: MerchantResult::Matched { data }, .. }) if data.id == "alpha")
+    );
+    rx.recv().unwrap();
+    let followup = rx.recv().unwrap();
+    let questions = followup["questions"].as_object().unwrap();
+    assert_eq!(questions.len(), 5);
+    assert!(!questions.contains_key("identity_0"));
+    assert!(!questions.contains_key("identity_1"));
+    assert_eq!(details[0]["provider_answer"]["decision_stage"], "name");
+    assert_eq!(details[0]["provider_requests"].as_array().unwrap().len(), 1);
+    assert_eq!(details[6]["provider_requests"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn hierarchy_rebatches_large_identity_evidence_and_rejects_oversized_questions() {
+    let mut enricher = enricher();
+    let rx = mock_responses(&mut enricher, 3, 200, |body| {
+        let answers: Map<_, _> = body["questions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|key| {
+                (
+                    key.clone(),
+                    answer(if key.starts_with("kind_") {
+                        "purchase"
+                    } else if key.starts_with("identity_") {
+                        "candidate_1"
+                    } else {
+                        "candidate_0"
+                    }),
+                )
+            })
+            .collect();
+        json!({"answers":answers})
+    });
+    let mut records = same_name_fixture();
+    // Website evidence is absent from recognition and only sent during identity resolution.
+    records[0].merchant.website = Some(format!("https://venue.example/?{}", "x".repeat(16_000)));
+    records[0].provenance.clear();
+    let mut oversized = records.clone();
+    oversized[0].merchant.website = Some(format!("https://venue.example/?{}", "x".repeat(25_000)));
+    let (results, details) = enricher
+        .enrich_batch_candidates_traced(vec![
+            (request("Alpha Cafe first"), Ok(records.clone())),
+            (request("Alpha Cafe second"), Ok(records.clone())),
+            (request("Alpha Cafe third"), Ok(records)),
+            (request("Alpha Cafe fourth"), Ok(oversized)),
+        ])
+        .await;
+    assert!(results[..3].iter().all(|result| matches!(
+        result,
+        Ok(EnrichResponse {
+            merchant: MerchantResult::Matched { .. },
+            ..
+        })
+    )));
+    assert!(
+        results[3]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("identity evidence exceeds")
+    );
+    for _ in 0..3 {
+        let sent = rx.recv().unwrap();
+        assert!(serde_json::to_vec(&sent).unwrap().len() <= MAX_BODY_BYTES);
+        assert!(sent["questions"].as_object().unwrap().len() <= MAX_QUESTIONS);
+        for question in sent["questions"].as_object().unwrap().values() {
+            assert!(serde_json::to_vec(question).unwrap().len() <= MAX_QUESTION_BYTES);
+        }
+    }
+    assert_eq!(details[3]["provider_requests"][1]["status"], "not_sent");
+}
+
+#[tokio::test]
+async fn institution_counterparty_survives_provider_matching_and_kind_classification() {
+    let bank: Merchant = serde_json::from_value(json!({"id":"bank", "name":"Example Bank",
+        "type":"financial_institution", "aliases":["EXAMPLE MONTHLY FEE"]}))
+    .unwrap();
+    let mut enricher =
+        Enricher::new(Some("test-key".into()), "unused".into(), 0.95, vec![bank]).unwrap();
+    let candidates = candidates(&enricher, "EXAMPLE MONTHLY FEE");
+    let rx = mock_answers(&mut enricher, 1, 200, None, "candidate_0", "fee");
+    let (mut results, details) = enricher
+        .enrich_batch_candidates_traced(vec![(request("EXAMPLE MONTHLY FEE"), Ok(candidates))])
+        .await;
+    let result = results.remove(0).unwrap();
+    assert_eq!(result.kind, TransactionKind::Fee);
+    assert_eq!(result.counterparties[0].id, "bank");
+    assert_eq!(
+        result.counterparties[0].counterparty_type,
+        crate::CounterpartyType::FinancialInstitution
+    );
+    assert!(matches!(result.merchant, MerchantResult::Unresolved { .. }));
+    assert_eq!(details[0]["status"], "matched");
+    let sent = rx.recv().unwrap().to_string();
+    assert!(sent.contains("financial_institution"));
+}
+
+#[path = "identity_live_tests.rs"]
+mod identity_live_tests;
+
+#[tokio::test]
+async fn identity_refinement_preserves_global_names_and_prefers_country_then_website() {
+    for inferred in [false, true] {
+        let mut enricher = enricher();
+        enricher.persist_matches = false;
+        let mut shortlisted = vec![
+            brand_fixture(
+                "foreign",
+                "Alpha Cafe",
+                "https://foreign.example",
+                "foursquare",
+                "foreign",
+            ),
+            brand_fixture("blank", "Alpha Cafe", "", "foursquare", "blank"),
+            brand_fixture(
+                "alpha",
+                "Alpha Cafe",
+                "https://alpha.example",
+                "foursquare",
+                "alpha",
+            ),
+            brand_fixture(
+                "beta",
+                "Beta Shop",
+                "https://beta.example",
+                "foursquare",
+                "beta",
+            ),
+        ];
+        shortlisted[0].merchant.markets = vec!["US".into()];
+        shortlisted[3].merchant.markets = vec!["US".into()];
+        let rx = mock_responses(&mut enricher, 1, 200, |body| {
+            let answers: Map<_, _> = body["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        answer(if key.starts_with("kind_") {
+                            "purchase"
+                        } else {
+                            "candidate_0"
+                        }),
+                    )
+                })
+                .collect();
+            json!({"answers":answers})
+        });
+        let mut req = request("Alpha Cafe TORONTO ON");
+        if inferred {
+            req.country = None;
+        }
+        let (mut results, details) = enricher
+            .enrich_batch_candidates_traced(vec![(req, Ok(shortlisted))])
+            .await;
+        assert!(
+            matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched {data} if data.id == "alpha")
+        );
+        let sent = rx.recv().unwrap();
+        assert_eq!(
+            sent["questions"]["transaction_0"]["criteria"]["candidate_3"]["name"],
+            "Beta Shop"
+        );
+        assert_eq!(details[0]["provider_answer"]["identity_country"], "CA");
+        assert_eq!(
+            details[0]["provider_answer"]["identity_choices"],
+            json!(["candidate_2"])
+        );
+        assert_eq!(
+            details[0]["provider_answer"]["identity_method"],
+            "deterministic"
+        );
+    }
 }
