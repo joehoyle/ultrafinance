@@ -99,6 +99,100 @@ fn structured_input_is_independent_and_conflicts_do_not_mix_geography() {
 }
 
 #[test]
+fn sole_outlet_matches_without_descriptor_evidence_but_respects_conflicts() {
+    let mut outlet = records().remove(0);
+    outlet.location.id = Some("loc_only".into());
+    let outlets = [outlet];
+    let (result, credits) = enrich(&request("MERCHANT PURCHASE"), &outlets);
+    assert_eq!(
+        result,
+        LocationResult::Matched {
+            data: outlets[0].location.clone()
+        }
+    );
+    assert_eq!(credits.len(), 1);
+
+    let mut req = request("MERCHANT PURCHASE");
+    req.country = Some("CA".into());
+    assert!(!matches!(
+        enrich(&req, &outlets).0,
+        LocationResult::Matched { .. }
+    ));
+    req.country = Some("AU".into());
+    assert!(matches!(
+        enrich(&req, &outlets).0,
+        LocationResult::Matched { .. }
+    ));
+    for hint in [
+        json!({"city":"Sydney"}),
+        json!({"address":"Another street"}),
+        json!({"store_number":"R9999"}),
+    ] {
+        req.location = Some(serde_json::from_value(hint).unwrap());
+        assert!(!matches!(
+            enrich(&req, &outlets).0,
+            LocationResult::Matched { .. }
+        ));
+    }
+    assert!(!matches!(
+        enrich(&request("MERCHANT SYDNEY NSW AU"), &outlets).0,
+        LocationResult::Matched { .. }
+    ));
+    // A country filter can reduce a multi-outlet merchant to one branch.
+    let mut overseas = outlets[0].clone();
+    overseas.location.country = Some("CA".into());
+    req.location = None;
+    assert!(matches!(
+        enrich(&req, &[outlets[0].clone(), overseas]).0,
+        LocationResult::Matched { .. }
+    ));
+}
+
+#[test]
+fn geography_filters_outlets_before_selecting_a_unique_branch() {
+    let outlets = records();
+    for hint in [
+        json!({"city":"Canberra"}),
+        json!({"region":"ACT"}),
+        json!({"postal_code":"2601"}),
+        json!({"address":outlets[0].location.address}),
+        json!({"store_number":"R483"}),
+    ] {
+        let mut req = request("MERCHANT PURCHASE");
+        req.location = Some(serde_json::from_value(hint).unwrap());
+        assert_eq!(
+            enrich(&req, &outlets).0,
+            LocationResult::Matched {
+                data: outlets[0].location.clone()
+            }
+        );
+    }
+    assert_eq!(
+        enrich(&request("MERCHANT CANBERRA ACT AU"), &outlets).0,
+        LocationResult::Matched {
+            data: outlets[0].location.clone()
+        }
+    );
+    let mut overseas = outlets[1].clone();
+    overseas.location.country = Some("CA".into());
+    let choices = [outlets[0].clone(), overseas];
+    assert_eq!(
+        enrich(&request("MERCHANT AU"), &choices).0,
+        LocationResult::Matched {
+            data: outlets[0].location.clone()
+        }
+    );
+    assert!(!matches!(
+        enrich(&request("MERCHANT US"), &choices).0,
+        LocationResult::Matched { .. }
+    ));
+    assert!(!matches!(
+        enrich(&request("MERCHANT PURCHASE"), &choices).0,
+        LocationResult::Matched { .. }
+    ));
+}
+
+#[test]
 fn outlets_need_specific_evidence_and_ambiguity_or_conflicts_abstain() {
     let mut outlets = records();
     for (index, record) in outlets.iter_mut().enumerate() {

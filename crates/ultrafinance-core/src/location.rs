@@ -297,7 +297,14 @@ pub(crate) fn enrich(
         fill!(address, city, region, postal_code, country, store_number);
     }
     let query = normalize(&request.description);
-    let matched: Vec<_> = outlets
+    // A trailing country code can filter catalog outlets even without a city.
+    // Keep it out of extracted geography: a country hint alone is not a place.
+    let descriptor_country =
+        (!crate::descriptor_location::billing_description(&request.description))
+            .then(|| request.description.split_whitespace().last())
+            .flatten()
+            .and_then(|word| crate::gazetteer::country(&normalize(word)));
+    let eligible: Vec<_> = outlets
         .iter()
         .filter(|record| {
             let place = record.location.geography();
@@ -312,6 +319,20 @@ pub(crate) fn enrich(
             if !compatible(&geography, &place) {
                 return false;
             }
+            if descriptor_country
+                .zip(place.country.as_deref())
+                .is_some_and(|(a, b)| a != b)
+            {
+                return false;
+            }
+            true
+        })
+        .collect();
+    let matched: Vec<_> = eligible
+        .iter()
+        .copied()
+        .filter(|record| {
+            let place = record.location.geography();
             let alias = record.aliases.iter().any(|a| normalize(a) == query);
             let pattern = record
                 .transaction_pattern
@@ -333,7 +354,9 @@ pub(crate) fn enrich(
                 && place.address.is_some()
                 && geography.address.as_ref().map(|s| normalize(s))
                     == place.address.as_ref().map(|s| normalize(s));
-            alias || pattern || store || address
+            // Geography narrows the matched merchant's outlets before deciding
+            // whether additional descriptor evidence is needed.
+            eligible.len() == 1 || alias || pattern || store || address
         })
         .collect();
     if let [record] = matched.as_slice() {

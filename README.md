@@ -578,6 +578,12 @@ there is insufficient evidence. A merchant can match without a location, and
 geography can be extracted without identifying a merchant. Successful responses
 always include `location`, including single, batch, and CLI enrichment.
 
+Enrichment first filters a matched merchant's outlets using transaction country
+and recognized descriptor or structured location evidence (city, region, address,
+postal code, and store number). If exactly one outlet remains, it is selected,
+including when the merchant has only one known outlet. If several remain, an
+outlet alias or transaction pattern must identify a unique branch.
+
 ```json
 {
   "merchant": {"status": "unresolved", "data": null},
@@ -616,8 +622,8 @@ Structured evidence appears as `extracted` unless a unique outlet is identified.
 Conflicting descriptor geography is discarded rather than combined with caller
 fields. Top-level `country` describes the transaction and can exclude incompatible outlets; it is
 never copied into the location result. Outlet matching requires a matched
-merchant plus a unique alias/pattern, store number, or street address, without
-contradictory location evidence. Merely knowing a city does not pick an outlet.
+merchant and no contradictory location evidence. A city or other location clue
+can select a branch when it leaves exactly one compatible outlet.
 Coordinates come only from reviewed outlet records and must be a valid pair.
 
 Reviewed outlets are imported explicitly with `locations import FILE` and
