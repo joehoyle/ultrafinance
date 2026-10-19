@@ -347,6 +347,33 @@ pub fn interpret(request: &EnrichRequest) -> Interpretation {
         })
         .collect();
     hypotheses.extend(cleaned);
+    // Delimited long references are alternative interpretations, never aliases.
+    // Do not strip arbitrary numeric brand names or alphabetic product suffixes.
+    let without_references: Vec<_> = hypotheses
+        .iter()
+        .filter_map(|hypothesis| {
+            let text = &hypothesis.merchant_text;
+            let (at, reference) = text.match_indices('*').find_map(|(at, _)| {
+                let reference = text[at + 1..].split_whitespace().next()?;
+                (at > 0
+                    && reference.len() >= 6
+                    && reference.chars().all(|c| c.is_ascii_alphanumeric())
+                    && reference.chars().any(|c| c.is_ascii_digit()))
+                .then_some((at, reference))
+            })?;
+            let removed = format!("*{reference}");
+            if !unverified_tokens.contains(&removed) {
+                unverified_tokens.push(removed);
+            }
+            let mut next = hypothesis.clone();
+            next.merchant_text = format!("{} {}", &text[..at], &text[at + 1 + reference.len()..])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(next)
+        })
+        .collect();
+    hypotheses.extend(without_references);
     let mut seen = std::collections::HashSet::new();
     hypotheses.retain(|h| {
         let name = normalize(&h.merchant_text);

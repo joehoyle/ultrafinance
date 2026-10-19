@@ -409,3 +409,34 @@ fn ambiguous_names_dates_references_and_processor_boundaries_survive() {
     assert_eq!(parsed.hypotheses[0].merchant_text, description);
     assert!(parsed.unverified_tokens.iter().any(|s| s == "REF: AB123"));
 }
+
+#[test]
+fn delimited_reference_adds_name_hypothesis_and_keeps_original() {
+    let request = serde_json::from_value(serde_json::json!({
+        "description":"Amazon.ca*353873PQ3 TORONTO ON"
+    }))
+    .unwrap();
+    let parsed = interpret(&request);
+    assert!(
+        parsed
+            .hypotheses
+            .iter()
+            .any(|h| h.merchant_text == "Amazon.ca"
+                && h.location_hint.as_ref().and_then(|l| l.country.as_deref()) == Some("CA"))
+    );
+    assert!(
+        parsed
+            .hypotheses
+            .iter()
+            .any(|h| h.merchant_text == request.description)
+    );
+    assert!(parsed.unverified_tokens.contains(&"*353873PQ3".into()));
+    for description in ["STUDIO 54", "7 ELEVEN", "NOVEL*PREMIUM", "NOVEL*123"] {
+        let request =
+            serde_json::from_value(serde_json::json!({"description":description})).unwrap();
+        assert!(
+            interpret(&request).unverified_tokens.is_empty(),
+            "{description}"
+        );
+    }
+}

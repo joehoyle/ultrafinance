@@ -9,6 +9,9 @@ use std::collections::HashMap;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 #[path = "postgres_store.rs"]
 mod postgres_store;
+#[path = "search_pipeline.rs"]
+mod search_pipeline;
+pub use search_pipeline::{RetrievalEvidence, SearchTrace};
 
 pub const LOCAL_DATABASE_URL: &str =
     "postgresql://ultrafinance@127.0.0.1:55432/ultrafinance?sslmode=disable";
@@ -191,9 +194,18 @@ impl MerchantStore {
         request: &crate::EnrichRequest,
         limit: usize,
     ) -> Result<Vec<Candidate>> {
+        self.search_request_traced(request, limit)
+            .map(|(candidates, _)| candidates)
+    }
+
+    pub fn search_request_traced(
+        &self,
+        request: &crate::EnrichRequest,
+        limit: usize,
+    ) -> Result<(Vec<Candidate>, SearchTrace)> {
         request.validate()?;
         if limit == 0 {
-            return Ok(vec![]);
+            return Ok((vec![], SearchTrace::default()));
         }
         let context = crate::resolution::context(request);
         let id = crate::resolution::key(&context);
@@ -201,7 +213,12 @@ impl MerchantStore {
             .resolutions(Some(&id), 1)?
             .into_iter()
             .find(|r| r.context == context);
-        let mut found = self.search(&request.description, request.country.as_deref(), limit)?;
+        let interpretation = crate::interpretation::interpret(request);
+        let ranking_country = ranking_country(request, &interpretation);
+        // Keep a larger pool per interpretation; spend the final budget on names
+        // only after combining evidence, retaining their competing identities.
+        let pool_limit = limit.saturating_mul(6).clamp(64, 254);
+        let mut found = self.search(&request.description, ranking_country, pool_limit)?;
         if let Some(mapping) = mapping
             && let Some(merchant) = self.get(&mapping.merchant.id)?
         {
@@ -222,9 +239,10 @@ impl MerchantStore {
                 resolution_id: Some(id),
                 pending_import: false,
                 interpretation_evidence: vec![],
+                retrieval_evidence: vec![],
             };
             if mapping.verified {
-                return Ok(vec![candidate]);
+                return Ok((vec![candidate], SearchTrace::default()));
             }
             if !found
                 .iter()
@@ -234,19 +252,24 @@ impl MerchantStore {
                 found.insert(0, candidate);
             }
         }
-        let interpretation = crate::interpretation::interpret(request);
         let mut searched = std::collections::HashSet::from([normalize(&request.description)]);
         // Never upgrade a partial-name hypothesis to an exact or trusted alias.
-        for (index, hypothesis) in interpretation.hypotheses.iter().enumerate() {
+        for hypothesis in &interpretation.hypotheses {
             if !searched.insert(normalize(&hypothesis.merchant_text)) {
                 continue;
             }
             for mut candidate in
-                self.search(&hypothesis.merchant_text, request.country.as_deref(), limit)?
+                self.search(&hypothesis.merchant_text, ranking_country, pool_limit)?
             {
                 candidate.exact = false;
                 candidate.trusted = false;
-                candidate.score = candidate.score.min(0.9 - 0.05 * index as f64);
+                // Explicit evidence, not hypothesis enumeration order, controls priority.
+                let cap = if hypothesis.location_hint.is_some() {
+                    0.95
+                } else {
+                    0.90
+                };
+                candidate.score = candidate.score.min(cap);
                 if excluded(&normalize(&request.description), &candidate.provenance) {
                     continue;
                 }
@@ -255,6 +278,9 @@ impl MerchantStore {
                     .find(|c| c.merchant.id == candidate.merchant.id)
                 {
                     existing.score = existing.score.max(candidate.score);
+                    existing
+                        .retrieval_evidence
+                        .extend(candidate.retrieval_evidence);
                 } else {
                     found.push(candidate);
                 }
@@ -294,13 +320,12 @@ impl MerchantStore {
                 }
             }
         }
-        Ok(rank_candidates(
-            found
-                .into_iter()
-                .map(|c| (c.merchant.id.clone(), c))
-                .collect(),
+        Ok(search_pipeline::shortlist(
+            found,
+            &interpretation,
             limit,
-            request.country.as_deref(),
+            ranking_country,
+            pool_limit,
         ))
     }
 
@@ -489,6 +514,8 @@ impl MerchantStore {
 pub struct Candidate {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interpretation_evidence: Vec<crate::interpretation::CatalogSupport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retrieval_evidence: Vec<RetrievalEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_id: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -595,25 +622,47 @@ pub struct ImportDelta {
     pub unchanged: usize,
 }
 
+// Inferred geography only breaks retrieval ties. It does not verify a purchase
+// location, filter other markets, or change the request's resolution context.
+pub(crate) fn ranking_country<'a>(
+    request: &'a crate::EnrichRequest,
+    interpretation: &'a crate::interpretation::Interpretation,
+) -> Option<&'a str> {
+    request
+        .country
+        .as_deref()
+        .or_else(|| request.location.as_ref()?.country.as_deref())
+        .or_else(|| {
+            let mut countries = interpretation
+                .hypotheses
+                .iter()
+                .filter_map(|h| h.location_hint.as_ref()?.country.as_deref());
+            let first = countries.next()?;
+            countries.all(|country| country == first).then_some(first)
+        })
+}
+
+fn candidate_order(a: &Candidate, b: &Candidate, country: Option<&str>) -> std::cmp::Ordering {
+    b.exact
+        .cmp(&a.exact)
+        .then_with(|| b.regex_match_length.cmp(&a.regex_match_length))
+        .then_with(|| b.score.total_cmp(&a.score))
+        .then_with(|| {
+            let known = |c: &Candidate| {
+                country.is_some_and(|country| c.merchant.markets.iter().any(|m| m == country))
+            };
+            known(b).cmp(&known(a))
+        })
+        .then_with(|| a.merchant.id.cmp(&b.merchant.id))
+}
+
 fn rank_candidates(
     found: HashMap<String, Candidate>,
     limit: usize,
     country: Option<&str>,
 ) -> Vec<Candidate> {
     let mut results: Vec<_> = found.into_values().collect();
-    results.sort_by(|a, b| {
-        b.exact
-            .cmp(&a.exact)
-            .then_with(|| b.regex_match_length.cmp(&a.regex_match_length))
-            .then_with(|| b.score.total_cmp(&a.score))
-            .then_with(|| {
-                let known = |c: &Candidate| {
-                    country.is_some_and(|country| c.merchant.markets.iter().any(|m| m == country))
-                };
-                known(b).cmp(&known(a))
-            })
-            .then_with(|| a.merchant.id.cmp(&b.merchant.id))
-    });
+    results.sort_by(|a, b| candidate_order(a, b, country));
     // Preserve exact collisions and equally specific regex hits even at limit=1.
     let exact_count = results.iter().take_while(|r| r.exact).count();
     let regex_ties = results

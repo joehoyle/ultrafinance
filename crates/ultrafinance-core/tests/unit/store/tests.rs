@@ -280,6 +280,71 @@ fn structured_location_hypotheses_retrieve_the_merchant_without_learning_aliases
     assert!(store.get("cafe")?.unwrap().aliases.is_empty());
     Ok(())
 }
+
+#[test]
+fn inferred_country_ranks_merchants_before_shortlist_truncation() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    for index in 0..12 {
+        store.put(&merchant(
+            &format!("a-us-{index:02}"),
+            "Northstar Books",
+            "US",
+        ))?;
+    }
+    store.put(&merchant("z-ca", "Northstar Books", "CA"))?;
+    let mut request: crate::EnrichRequest = serde_json::from_value(serde_json::json!({
+        "description":"NORTHSTAR BOOKS TORONTO ON"
+    }))?;
+    let candidates = store.search_request(&request, 1)?;
+    assert_eq!(candidates[0].merchant.id, "z-ca");
+    assert!(!candidates[0].exact && !candidates[0].trusted);
+    assert!(
+        candidates[0]
+            .interpretation_evidence
+            .iter()
+            .all(|e| e.outlet.is_none())
+    );
+    let all = store.search_request(&request, 20)?;
+    assert_eq!(all.len(), 13);
+    assert!(all.iter().any(|c| c.merchant.markets == ["US"]));
+    assert!(request.country.is_none());
+    assert!(store.get("z-ca")?.unwrap().aliases.is_empty());
+
+    request.country = Some("US".into());
+    assert_eq!(
+        store.search_request(&request, 1)?[0].merchant.markets,
+        ["US"]
+    );
+    request.country = None;
+    request.location = Some(serde_json::from_value(serde_json::json!({"country":"US"}))?);
+    assert_eq!(
+        store.search_request(&request, 1)?[0].merchant.markets,
+        ["US"]
+    );
+    Ok(())
+}
+
+#[test]
+fn conflicting_inferred_countries_do_not_choose_a_ranking_country() -> Result<()> {
+    let request = serde_json::from_value(serde_json::json!({
+        "description":"NORTHSTAR BOOKS TORONTO ON"
+    }))?;
+    let mut interpretation = crate::interpretation::interpret(&request);
+    assert_eq!(ranking_country(&request, &interpretation), Some("CA"));
+    let mut conflicting = interpretation
+        .hypotheses
+        .iter()
+        .find(|h| h.location_hint.is_some())
+        .unwrap()
+        .clone();
+    conflicting.location_hint.as_mut().unwrap().country = Some("US".into());
+    interpretation.hypotheses.push(conflicting);
+    assert_eq!(ranking_country(&request, &interpretation), None);
+    interpretation.hypotheses.clear();
+    assert_eq!(ranking_country(&request, &interpretation), None);
+    Ok(())
+}
+
 fn record(id: &str, name: &str) -> SourceRecord {
     SourceRecord {
         source: "test".into(),
@@ -456,4 +521,104 @@ fn updates_replace_aliases_and_handle_query_syntax_as_data() {
     );
     assert!(db.search("NEW DESCRIPTION", None, 10).unwrap()[0].exact);
     db.search("\" OR * (NEAR) --", None, 10).unwrap();
+}
+
+#[test]
+fn alias_spans_retrieve_specific_domains_beyond_common_word_pool() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    // More distractors than the single-word and pair-query limits, inserted first.
+    for index in 0..110 {
+        store.put(&merchant(&format!("amazon-{index:03}"), "Amazon", "US"))?;
+    }
+    store.put(&merchant("amazon-ca", "Amazon.ca", "CA"))?;
+    store.put(&merchant("toronto", "Toronto", "CA"))?;
+    let request = serde_json::from_value(serde_json::json!({
+        "description":"Amazon.ca*353873PQ3 TORONTO ON"
+    }))?;
+    let (hits, trace) = store.search_request_traced(&request, 10)?;
+    assert_eq!(hits[0].merchant.id, "amazon-ca");
+    assert!(!hits[0].exact && !hits[0].trusted);
+    assert!(
+        hits[0]
+            .retrieval_evidence
+            .iter()
+            .any(|e| e.path == "alias_span" && e.query == "amazon ca")
+    );
+    assert!(
+        trace
+            .considered
+            .iter()
+            .any(|c| c.merchant_id == "toronto" && c.location_only)
+    );
+    assert!(hits.iter().filter(|c| c.merchant.name == "Amazon").count() >= 2);
+    // No new learned aliases or resolutions are created by search.
+    assert!(store.resolutions(None, 100)?.is_empty());
+    assert!(
+        !store
+            .get("amazon-ca")?
+            .unwrap()
+            .aliases
+            .contains(&request.description)
+    );
+    Ok(())
+}
+
+#[test]
+fn name_budget_preserves_competing_identities_and_short_specific_names() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    for index in 0..12 {
+        store.put(&merchant(&format!("a-{index:02}"), "Northstar", "CA"))?;
+    }
+    store.put(&merchant("specific", "Northstar.ca", "CA"))?;
+    let request = serde_json::from_value(
+        serde_json::json!({"description":"Northstar.ca*12AB34CD TORONTO ON"}),
+    )?;
+    let hits = store.search_request(&request, 2)?;
+    assert_eq!(hits[0].merchant.id, "specific");
+    assert_eq!(
+        hits.iter()
+            .filter(|c| c.merchant.name == "Northstar")
+            .count(),
+        12
+    );
+    assert!(hits.iter().all(|c| !c.exact && !c.trusted));
+    Ok(())
+}
+
+#[test]
+fn complete_alias_spans_outrank_generic_fragments_without_merging() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    for (id, name) in [
+        ("full", "Northstar Coffee Roasters"),
+        ("fragment", "Northstar"),
+        ("suffix", "Coffee Roasters"),
+        ("other", "Cardinal Coffee"),
+    ] {
+        store.put(&merchant(id, name, "CA"))?;
+    }
+    let request = serde_json::from_value(
+        serde_json::json!({"description":"Northstar Coffee Roasters*123ABC TORONTO ON"}),
+    )?;
+    let (hits, trace) = store.search_request_traced(&request, 10)?;
+    assert_eq!(hits[0].merchant.id, "full");
+    assert!(!hits[0].exact && !hits[0].trusted);
+    for id in ["fragment", "suffix"] {
+        let evidence = trace
+            .considered
+            .iter()
+            .find(|c| c.merchant_id == id)
+            .unwrap();
+        assert_eq!(
+            evidence.shadowed_by.as_deref(),
+            Some("northstar coffee roasters")
+        );
+        assert!(evidence.score <= 0.34);
+    }
+    assert!(store.get("fragment")?.is_some());
+    // Full raw exact names retain their ordinary priority and trust behavior.
+    let request = serde_json::from_value(serde_json::json!({"description":"Northstar"}))?;
+    let hits = store.search_request(&request, 1)?;
+    assert_eq!(hits[0].merchant.id, "fragment");
+    assert!(hits[0].exact && hits[0].trusted);
+    Ok(())
 }

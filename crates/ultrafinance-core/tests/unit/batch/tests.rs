@@ -46,6 +46,7 @@ fn brand_fixture(
         resolution_id: None,
         pending_import: false,
         interpretation_evidence: vec![],
+        retrieval_evidence: vec![],
         provenance: vec![store::SourceRecord {
             merchant,
             source: source.into(),
@@ -218,7 +219,7 @@ async fn same_name_unrelated_businesses_remain_unresolved_despite_confident_name
         "merchant-studio",
         "other",
     );
-    let rx = mock(&mut enricher, 1, 200, None);
+    let rx = mock(&mut enricher, 2, 200, None);
     let (mut results, details) = enricher
         .enrich_batch_candidates_traced(vec![(
             request("Alpha Cafe ON CAN"),
@@ -234,6 +235,10 @@ async fn same_name_unrelated_businesses_remain_unresolved_despite_confident_name
         details[0]["provider_answer"]["catalog_resolution"],
         "ambiguous"
     );
+    assert_eq!(
+        details[0]["provider_answer"]["identity_answer"]["choice"],
+        "none"
+    );
     assert!(enricher.store.resolutions(None, 10).unwrap().is_empty());
     assert_eq!(
         rx.recv().unwrap()["questions"]["transaction_0"]["criteria"]
@@ -243,6 +248,217 @@ async fn same_name_unrelated_businesses_remain_unresolved_despite_confident_name
         2
     );
 }
+#[tokio::test]
+async fn country_narrows_only_the_selected_name_and_preserves_global_names() {
+    for description in ["Alpha Cafe", "Alpha Cafe TORONTO ON"] {
+        let mut enricher = enricher();
+        enricher.persist_matches = false;
+        let ca = brand_fixture(
+            "ca",
+            "Alpha Cafe",
+            "https://ca.example",
+            "foursquare",
+            "place:ca",
+        );
+        let mut us = brand_fixture(
+            "us",
+            "Alpha Cafe",
+            "https://us.example",
+            "foursquare",
+            "place:us",
+        );
+        us.merchant.markets = vec!["US".into()];
+        let mut foreign_name = brand_fixture(
+            "foreign",
+            "Beta Shop",
+            "https://beta.example",
+            "foursquare",
+            "place:beta",
+        );
+        foreign_name.merchant.markets = vec!["US".into()];
+        let mut transaction = request(description);
+        if description.contains("TORONTO") {
+            transaction.country = None;
+        }
+        let rx = mock(&mut enricher, 1, 200, None);
+        let (mut results, details) = enricher
+            .enrich_batch_candidates_traced(vec![(transaction, Ok(vec![us, ca, foreign_name]))])
+            .await;
+        assert!(
+            matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched { data } if data.id == "ca")
+        );
+        let sent = rx.recv().unwrap();
+        assert_eq!(
+            sent["questions"]["transaction_0"]["criteria"]["candidate_1"]["merchant"]["name"],
+            "Beta Shop"
+        );
+        assert_eq!(
+            details[0]["provider_answer"]["identity_candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            details[0]["provider_answer"]["identity_method"],
+            "deterministic"
+        );
+    }
+}
+
+#[tokio::test]
+async fn second_identity_decision_selects_and_traces_the_actual_record() {
+    let mut enricher = enricher();
+    enricher.persist_matches = false;
+    let records = vec![
+        brand_fixture("a", "Alpha", "https://a.example", "foursquare", "place:a"),
+        brand_fixture("b", "Alpha", "https://b.example", "foursquare", "place:b"),
+    ];
+    let rx = mock_identity_choice(&mut enricher, 2, 200, None, "candidate_0", "candidate_1");
+    let (mut results, details) = enricher
+        .enrich_batch_candidates_traced(vec![(request("Alpha"), Ok(records))])
+        .await;
+    assert!(
+        matches!(results.remove(0).unwrap().merchant, MerchantResult::Matched { data } if data.id == "b")
+    );
+    let answer = &details[0]["provider_answer"];
+    assert_eq!(answer["choice"], "candidate_0");
+    assert_eq!(answer["identity_answer"]["choice"], "candidate_1");
+    assert_eq!(answer["catalog_resolution"], "resolved");
+    assert_eq!(details[0]["provider_requests"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        rx.recv().unwrap()["questions"]["transaction_0"]["criteria"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        rx.recv().unwrap()["questions"]["identity"]["criteria"]
+            .as_object()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn identity_provider_selection_threshold_and_errors_are_enforced() {
+    for (selected, threshold, status, missing, expected) in [
+        ("candidate_1", 0.95, 200, None, "matched"),
+        ("candidate_1", 1.0, 200, None, "unresolved"),
+        ("none", 0.95, 200, None, "unresolved"),
+        ("candidate_99", 0.95, 200, None, "error"),
+        ("candidate_1", 0.95, 500, None, "error"),
+        ("candidate_1", 0.95, 200, Some("identity"), "error"),
+    ] {
+        let mut enricher = enricher();
+        enricher.threshold = threshold;
+        let records = vec![
+            brand_fixture("a", "Alpha", "https://a.example", "foursquare", "place:a"),
+            brand_fixture("b", "Alpha", "https://b.example", "foursquare", "place:b"),
+        ];
+        let rx = mock_identity_choice(&mut enricher, 1, status, missing, "candidate_0", selected);
+        let (result, _, _) = enricher
+            .evaluate_identity(&request("Alpha"), &records)
+            .await;
+        match expected {
+            "matched" => assert!(
+                matches!(result.unwrap().merchant, MerchantResult::Matched { data } if data.id == "b")
+            ),
+            "unresolved" => assert!(matches!(
+                result.unwrap().merchant,
+                MerchantResult::Unresolved { .. }
+            )),
+            _ => assert!(result.is_err()),
+        }
+        assert!(rx.recv().unwrap()["questions"]["identity"]["criteria"]["none"].is_string());
+    }
+}
+
+#[test]
+fn identity_country_falls_back_within_selected_name_only() {
+    let mut first = brand_fixture("a", "Alpha", "https://a.example", "foursquare", "place:a");
+    first.merchant.markets = vec!["US".into()];
+    let mut second = first.clone();
+    second.merchant.id = "b".into();
+    second.merchant.markets.clear();
+    let other = brand_fixture(
+        "other",
+        "Beta",
+        "https://b.example",
+        "foursquare",
+        "place:b",
+    );
+    let candidates = vec![first, second, other];
+    let choices = brand_choices(&candidates);
+    assert_eq!(
+        identity_records(&candidates, &choices[0], Some("CA")).len(),
+        2
+    );
+    assert_eq!(
+        identity_records(&candidates, &choices[0], Some("US")).len(),
+        1
+    );
+}
+
+#[test]
+fn identity_websites_refine_only_the_country_filtered_group_with_fallback() {
+    let linked = brand_fixture(
+        "linked",
+        "Alpha",
+        "https://alpha.example",
+        "foursquare",
+        "place:a",
+    );
+    let mut missing = linked.clone();
+    missing.merchant.id = "missing".into();
+    missing.merchant.website = None;
+    let mut blank = linked.clone();
+    blank.merchant.id = "blank".into();
+    blank.merchant.website = Some("  ".into());
+    let mut foreign = linked.clone();
+    foreign.merchant.id = "foreign".into();
+    foreign.merchant.markets = vec!["US".into()];
+    let mut other = linked.clone();
+    other.merchant.id = "other".into();
+    other.merchant.name = "Beta".into();
+    let candidates = vec![
+        missing.clone(),
+        linked,
+        blank.clone(),
+        foreign.clone(),
+        other.clone(),
+    ];
+    let choices = brand_choices(&candidates);
+    let refined = identity_records(&candidates, &choices[0], Some("CA"));
+    assert_eq!(
+        refined
+            .iter()
+            .map(|c| c.merchant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["linked"]
+    );
+    let candidates = vec![missing, blank, foreign, other];
+    let choices = brand_choices(&candidates);
+    let refined = identity_records(&candidates, &choices[0], Some("CA"));
+    assert_eq!(
+        refined
+            .iter()
+            .map(|c| c.merchant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["missing", "blank"]
+    );
+    let refined = identity_records(&candidates, &choices[0], Some("GB"));
+    assert_eq!(
+        refined
+            .iter()
+            .map(|c| c.merchant.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["foreign"]
+    );
+}
+
 #[test]
 fn catalog_resolution_requires_identity_evidence_and_preserves_distinct_names() {
     let brand = brand_fixture(
@@ -543,6 +759,16 @@ fn mock_choice(
     missing: Option<&'static str>,
     choice: &'static str,
 ) -> mpsc::Receiver<Value> {
+    mock_identity_choice(enricher, count, status, missing, choice, "none")
+}
+fn mock_identity_choice(
+    enricher: &mut Enricher,
+    count: usize,
+    status: u16,
+    missing: Option<&'static str>,
+    choice: &'static str,
+    identity_choice: &'static str,
+) -> mpsc::Receiver<Value> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     enricher.provider_url = format!("http://{}/", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::channel();
@@ -585,7 +811,16 @@ fn mock_choice(
                 .keys()
                 .rev()
                 .filter(|key| Some(key.as_str()) != missing)
-                .map(|key| (key.clone(), answer(choice)))
+                .map(|key| {
+                    (
+                        key.clone(),
+                        answer(if key == "identity" {
+                            identity_choice
+                        } else {
+                            choice
+                        }),
+                    )
+                })
                 .collect();
             let response = json!({"answers":answers}).to_string();
             write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();

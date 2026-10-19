@@ -58,6 +58,7 @@ pub struct CaseResult {
     pub description: String,
     pub request: EnrichRequest,
     pub candidates: Vec<crate::store::Candidate>,
+    pub search_trace: crate::store::SearchTrace,
     pub expected: Expected,
     pub expected_local_id: Option<String>,
     pub candidate_ids: Vec<String>,
@@ -222,8 +223,9 @@ pub async fn run_with_progress(
             };
             let db = store.clone();
             let request = case.request.clone();
-            let candidates =
-                tokio::task::spawn_blocking(move || db.search_request(&request, 10)).await??;
+            let (candidates, search_trace) =
+                tokio::task::spawn_blocking(move || db.search_request_traced(&request, 10))
+                    .await??;
             let candidate_ids: Vec<_> = candidates.iter().map(|c| c.merchant.id.clone()).collect();
             let expected_rank = expected_local_id
                 .as_ref()
@@ -232,6 +234,7 @@ pub async fn run_with_progress(
             let result = CaseResult {
                 request: case.request.clone(),
                 candidates: candidates.clone(),
+                search_trace,
                 id: case.id,
                 description: case.request.description.clone(),
                 expected: case.expected,
@@ -307,6 +310,9 @@ pub async fn run_with_progress(
                 include_str!("../migrations/011_search_words.sql"),
                 include_str!("postgres_store/read_cache.rs"),
                 include_str!("search_score.rs"),
+                include_str!("search_pipeline.rs"),
+                include_str!("interpretation.rs"),
+                include_str!("bank_formats.rs"),
                 include_str!("regex_rules.rs"),
                 include_str!("import.rs"),
                 include_str!("eval.rs"),

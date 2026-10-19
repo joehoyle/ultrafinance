@@ -52,6 +52,7 @@ fn catalog_payload_is_bounded_and_omits_source_records_and_unrelated_aliases() -
         trusted: true,
         provenance: vec![record],
         interpretation_evidence: vec![],
+        retrieval_evidence: vec![],
         resolution_id: Some("private-resolution".into()),
         pending_import: false,
         regex_match_length: None,

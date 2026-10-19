@@ -94,8 +94,16 @@ curl -s http://127.0.0.1:3000/v1/enrich \
 A supported match returns `merchant.status = "matched"` with the catalog merchant
 in `merchant.data`. Merchant IDs belong to this service's catalog and must remain
 stable when names or aliases change. Request `country` describes the transaction
-country and prefers candidates with known coverage there. Merchant `markets`
-are countries with evidence of operation; missing coverage never excludes a match.
+country and prefers candidates with known coverage there without excluding global
+merchant-name choices. After Jev selects a name, its catalog records are narrowed
+to that country if any list it; otherwise all records for that name remain. The
+same rule applies to a structured location country or an unambiguously inferred
+country. Within that group, records without a non-empty website are excluded if
+any records have one; otherwise they remain eligible. Deterministic identity rules
+run next, then a second Jev choice resolves
+remaining ambiguity when supported by evidence. Both provider decisions must meet
+the confidence and probability threshold; indistinguishable records remain unresolved.
+Merchant `markets` are countries with evidence of operation.
 
 Only `description` is required. Optional structured fields are `amount` (a decimal
 string), `currency`, `date` (ISO date string), and `country`. `extra` is a JSON
@@ -934,14 +942,39 @@ Imported aliases remain unverified and cannot bypass Jev. Manual names, websites
 Manual markets supplement imported known markets. `ULTRAFINANCE_DATABASE_URL` (or `--database-url`) selects the PostgreSQL database for merchant commands, dataset application, enrichment, and evaluations. Prefer the environment variable so credentials do not appear in shell history.
 
 Search removes accents, folds case, and normalizes punctuation and whitespace.
-Exact aliases are indexed separately; PostgreSQL full-text and trigram
-indexes retrieve a bounded fuzzy pool. Rust ranks candidates using edit distance
-and token overlap. Search scores are retrieval scores, not match probabilities.
+Exact aliases are indexed separately. Search also looks up up to 81 contiguous
+alias spans from the first 16 normalized tokens, preserving short domain suffixes
+inside phrases such as `Amazon.ca`. Span hits are unverified retrieval evidence.
+PostgreSQL full-text and trigram queries contribute separate bounded pools;
+word-pair queries retain short tokens as well as the longer-word combinations.
+Search transactions prefer indexes locally to avoid scanning the entire catalog
+for absent terms; this does not change database-wide planner settings.
+Rust ranks candidates using edit distance, token overlap, and interpretation
+support. Long digit-containing references after `*` generate an additional name
+hypothesis while the original text and reference remain available. Hypothesis
+priority depends on location evidence rather than generation order. Candidates
+sharing only structured locality tokens are demoted; location does not establish
+merchant identity. When a longer observed alias contains a shorter alias, the
+shorter fragment is demoted; leading merchant-name spans get a small preference.
+These rules retain raw exact aliases, source regex rules, and saved resolutions.
+Search scores are retrieval scores, not match probabilities.
 Short descriptors such as `LS` don't generate fuzzy candidates from letters alone.
+
+Request matching pools at least 64 records per query before choosing ten distinct
+normalized names. Retrieved identity variants of each selected name remain
+available for ambiguity checks; equal names are not merged. The final 254-record
+ceiling admits whole name groups only. Raw exact aliases and regex rules retain
+their existing priority. Evaluation reports include retrieval paths and scores,
+the pooled candidates, country preference, locality demotions, and final shortlist
+selection in `search_trace`. Its considered pool is after each query's retrieval
+limit, not an exhaustive search of every matching catalog record.
 A unique exact match of at least three normalized characters resolves locally;
-ambiguous exact aliases and fuzzy results go to Jev. Transaction country breaks ranking ties in favor of known markets; all other
-markets and merchants without known markets remain eligible. Exact alias
-collisions still require evaluation, even if only one candidate has that market.
+ambiguous exact aliases and fuzzy results go to Jev. Transaction country breaks
+ranking ties in favor of known markets. If it is absent, request location country
+or an unambiguous country inferred from descriptor location hints supplies that
+country. Country narrowing applies only within the name selected by Jev, not to
+the global name shortlist. Conflicting inferred countries supply no country filter.
+Country evidence does not itself make an untrusted merchant match trusted.
 
 View catalog totals and breakdowns by imported source, known market, and source dataset region:
 

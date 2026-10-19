@@ -22,6 +22,7 @@ fn discovery_choices_use_their_own_shortlist_and_null_context_is_omitted() {
         description: "BANK ORIGINAL".into(),
         request: serde_json::from_value(json!({"description":"BANK ORIGINAL"})).unwrap(),
         candidates: vec![],
+        search_trace: Default::default(),
         expected: eval::Expected::Unlabeled,
         expected_local_id: None,
         candidate_ids: vec![],

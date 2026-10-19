@@ -1,8 +1,8 @@
 //! Synchronous store on a dedicated worker: postgres owns a Tokio runtime and
 //! must never be constructed or dropped on the API/CLI's async runtime threads.
 use super::{
-    Candidate, Merchant, MerchantPage, SourceRecord, excluded_aliases, normalize, rank_candidates,
-    validate,
+    Candidate, Merchant, MerchantPage, RetrievalEvidence, SourceRecord, excluded_aliases,
+    normalize, rank_candidates, search_pipeline, validate,
 };
 use super::{MerchantSourceStats, MerchantStats, STATS_SOURCES, STATS_TOTALS, location_reference};
 use crate::location::LocationRecord;
@@ -891,11 +891,14 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
         let owner = self.0.clone();
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
+            // LIMIT does not bound a sequential scan for an absent term. Prefer
+            // the existing alias/GIN indexes for these small, independent pools.
+            tx.batch_execute("SET LOCAL enable_seqscan=off")?;
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
             let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.merchant_key WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
             for row in exact {
-                add_candidate(&mut found, &row, true, None, &mut scorer)?;
+                add_candidate(&mut found, &row, true, None, &mut scorer, ("exact_alias", &query))?;
             }
             let mut matches: HashMap<String, usize> = HashMap::new();
             let rules = owner.reads.lock().unwrap().rules(&mut tx)?;
@@ -907,9 +910,25 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             for (id, length) in matches {
                 if !found.contains_key(&id) {
                     let row = tx.query_one("SELECT id,name,aliases,markets FROM merchants WHERE id=$1", &[&id])?;
-                    add_candidate(&mut found, &row, false, Some(length), &mut scorer)?;
+                    add_candidate(&mut found, &row, false, Some(length), &mut scorer, ("source_regex", &query))?;
                 }
                 if let Some(candidate) = found.get_mut(&id) { candidate.regex_match_length = Some(length); }
+            }
+            // Alias spans have their own indexed budget, independent of common
+            // full-text posting lists. A span is retrieval evidence, never trust.
+            let spans = search_pipeline::alias_spans(&query);
+            if !spans.is_empty() {
+                for row in tx.query(
+                    "SELECT m.id,m.name,m.aliases,m.markets,span.text FROM unnest($1::text[]) span(text)
+                     CROSS JOIN LATERAL (
+                         SELECT merchant_id FROM aliases WHERE normalized=span.text
+                         ORDER BY merchant_id LIMIT 64
+                     ) a JOIN merchants m ON m.merchant_key=a.merchant_id",
+                    &[&spans],
+                )? {
+                    add_candidate(&mut found, &row, false, None, &mut scorer,
+                        ("alias_span", row.get::<_, &str>(4)))?;
+                }
             }
             let tokens: Vec<_> = query.split_whitespace().filter(|t| t.chars().count()>=3).take(16).collect();
             let terms: Vec<_> = tokens.iter().map(|t| format!("'{t}'")).collect();
@@ -917,10 +936,13 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             // business containing both appears. Intersect adjacent words in
             // the index as an additional bounded pool, retaining the original
             // single-word queries for abbreviations and noisy descriptors.
-            let combined_terms: Vec<_> = tokens.windows(2)
-                .filter(|pair| pair[0] != pair[1])
+            let phrase_tokens: Vec<_> = query.split_whitespace().take(16).collect();
+            let mut combined_terms: Vec<_> = phrase_tokens.windows(2).chain(tokens.windows(2))
+                .filter(|pair| pair[0] != pair[1] && pair.iter().any(|t| t.chars().count() >= 3))
                 .map(|pair| format!("'{}' & '{}'", pair[0], pair[1]))
                 .collect();
+            combined_terms.sort_unstable();
+            combined_terms.dedup();
             if !combined_terms.is_empty() {
                 for row in tx.query(
                     "SELECT m.id,m.name,m.aliases,m.markets FROM (
@@ -934,7 +956,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                     ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
                     &[&combined_terms],
                 )? {
-                    add_candidate(&mut found,&row,false,None,&mut scorer)?;
+                    add_candidate(&mut found,&row,false,None,&mut scorer,("token_pair", &query))?;
                 }
             }
             // Bound each word independently: common words must not crowd rare
@@ -953,7 +975,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                     ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
                     &[&terms],
                 )? {
-                    add_candidate(&mut found,&row,false,None,&mut scorer)?;
+                    add_candidate(&mut found,&row,false,None,&mut scorer,("token", &query))?;
                 }
             }
             // Fuzzy-match the much smaller word vocabulary, then retrieve IDs
@@ -975,7 +997,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                     ) s JOIN merchants m ON m.merchant_key=s.merchant_id",
                     &[&fuzzy_words],
                 )? {
-                    add_candidate(&mut found,&row,false,None,&mut scorer)?;
+                    add_candidate(&mut found,&row,false,None,&mut scorer,("fuzzy_token", &query))?;
                 }
             }
             // Trust and negative aliases affect eligibility/ranking. Read only
@@ -1094,6 +1116,7 @@ fn add_candidate(
     exact: bool,
     regex_match_length: Option<usize>,
     scorer: &mut crate::search_score::Scorer<'_>,
+    retrieval: (&'static str, &str),
 ) -> Result<()> {
     // Rank with just identity, names and markets; hydrate the final shortlist.
     let merchant = Merchant {
@@ -1106,7 +1129,12 @@ fn add_candidate(
         logo_source: None,
         sources: vec![],
     };
-    if found.contains_key(&merchant.id) {
+    if let Some(existing) = found.get_mut(&merchant.id) {
+        existing.retrieval_evidence.push(RetrievalEvidence {
+            path: retrieval.0,
+            query: retrieval.1.into(),
+            score: existing.score,
+        });
         return Ok(());
     }
     let score = if exact || regex_match_length.is_some() {
@@ -1126,6 +1154,11 @@ fn add_candidate(
             resolution_id: None,
             pending_import: false,
             interpretation_evidence: vec![],
+            retrieval_evidence: vec![RetrievalEvidence {
+                path: retrieval.0,
+                query: retrieval.1.into(),
+                score,
+            }],
             merchant,
             score,
             exact,

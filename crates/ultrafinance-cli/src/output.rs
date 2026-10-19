@@ -286,6 +286,71 @@ fn provider_answer(
     rendered
 }
 
+fn ambiguous_records(
+    answer: &serde_json::Value,
+    choices: Option<&Vec<serde_json::Value>>,
+    records: Option<&Vec<serde_json::Value>>,
+) -> String {
+    let Some(ids) = answer["choice"]
+        .as_str()
+        .and_then(|choice| choice.strip_prefix("candidate_"))
+        .and_then(|index| index.parse::<usize>().ok())
+        .and_then(|index| choices.and_then(|choices| choices.get(index)))
+        .and_then(|choice| choice["record_ids"].as_array())
+    else {
+        return String::new();
+    };
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_width(160)
+        .set_header([
+            "Merchant ID",
+            "Merchant",
+            "Website",
+            "Markets",
+            "Search similarity",
+        ]);
+    for id in ids.iter().filter_map(serde_json::Value::as_str) {
+        let record = records
+            .into_iter()
+            .flatten()
+            .find(|record| record["merchant"]["id"].as_str() == Some(id));
+        let merchant = record.map(|record| &record["merchant"]);
+        let field = |name: &str| {
+            text(
+                merchant
+                    .and_then(|merchant| merchant[name].as_str())
+                    .unwrap_or("—"),
+            )
+        };
+        let markets = merchant
+            .and_then(|merchant| merchant["markets"].as_array())
+            .map(|markets| {
+                markets
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|markets| !markets.is_empty())
+            .unwrap_or_else(|| "—".into());
+        let score = record
+            .and_then(|record| record["score"].as_f64())
+            .map(|score| format!("{score:.3}"))
+            .unwrap_or_else(|| "—".into());
+        table.add_row([
+            text(id),
+            field("name"),
+            field("website"),
+            text(&markets),
+            score,
+        ]);
+    }
+    format!("   Ambiguous catalog records (search similarity is not match confidence):\n{table}\n")
+}
+
 pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
     let mut rendered = String::from("1. Interpret descriptor\n");
     let interpretation = &details["interpretation"];
@@ -403,35 +468,10 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
             choices.len()
         ));
     }
-    if let Some(requests) = details["provider_requests"].as_array() {
-        for request in requests {
-            if request.get("body").is_none()
-                && request["request_id"].is_string()
-                && request["owner_log_id"].is_null()
-            {
-                rendered.push_str(&format!(
-                    "\n   Shared Jev request {} · full body recorded once in the batch report\n",
-                    text(request["request_id"].as_str().unwrap())
-                ));
-                continue;
-            }
-            if let Some(owner) = request["owner_log_id"].as_str() {
-                rendered.push_str(&format!(
-                    "\n   Shared Jev request {} ({}) · full body in log {}\n",
-                    text(request["request_id"].as_str().unwrap_or("")),
-                    text(request["status"].as_str().unwrap_or("unavailable")),
-                    text(owner)
-                ));
-                continue;
-            }
-            rendered.push_str(&format!(
-                "\n   Jev request body ({}, {} bytes):\n{}\n\n",
-                text(request["status"].as_str().unwrap_or("unavailable")),
-                serde_json::to_vec(&request["body"])?.len(),
-                serde_json::to_string_pretty(&request["body"])?
-            ));
-        }
-    } else {
+    if details["provider_requests"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+    {
         rendered.push_str("   No Jev request was sent.\n");
     }
     for (key, label) in [
@@ -449,8 +489,55 @@ pub fn enrichment_details(details: &serde_json::Value) -> Result<()> {
                     .or_else(|| details["candidates"].as_array())
             };
             rendered.push_str(&provider_answer(label, answer, answer_candidates));
+            if let Some(records) = answer["identity_candidates"].as_array() {
+                rendered.push_str(&format!(
+                    "   Identity resolution: {} · country: {}\n",
+                    text(answer["identity_method"].as_str().unwrap_or("unavailable")),
+                    text(answer["identity_country"].as_str().unwrap_or("unspecified"))
+                ));
+                let choices = vec![
+                    serde_json::json!({"record_ids":records.iter().map(|r| &r["merchant"]["id"]).collect::<Vec<_>>()}),
+                ];
+                rendered.push_str(
+                    &ambiguous_records(
+                        &serde_json::json!({"choice":"candidate_0"}),
+                        Some(&choices),
+                        Some(records),
+                    )
+                    .replacen(
+                        "Ambiguous catalog records",
+                        "Identity candidates after country and website refinement",
+                        1,
+                    ),
+                );
+                if let Some(identity_answer) =
+                    answer.get("identity_answer").filter(|a| !a.is_null())
+                {
+                    let mut labeled = records.clone();
+                    for record in &mut labeled {
+                        record["merchant"]["name"] = serde_json::json!(format!(
+                            "{} [{}]",
+                            record["merchant"]["name"].as_str().unwrap_or(""),
+                            record["merchant"]["id"].as_str().unwrap_or("")
+                        ));
+                    }
+                    rendered.push_str(&provider_answer(
+                        "Identity provider answer",
+                        identity_answer,
+                        Some(&labeled),
+                    ));
+                }
+            }
             if answer["catalog_resolution"] == "ambiguous" {
                 rendered.push_str("   Merchant name selected, but catalog identity is ambiguous; no record matched.\n");
+                let records = if key == "catalog_provider_answer" {
+                    details["catalog_candidates"].as_array().or(candidates)
+                } else {
+                    details["candidates"].as_array()
+                };
+                if answer["identity_candidates"].is_null() {
+                    rendered.push_str(&ambiguous_records(answer, answer_candidates, records));
+                }
             }
         }
     }

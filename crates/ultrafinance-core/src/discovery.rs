@@ -159,6 +159,7 @@ fn candidate(place: Place) -> Result<Candidate> {
         resolution_id: None,
         pending_import: true,
         interpretation_evidence: vec![],
+        retrieval_evidence: vec![],
     })
 }
 

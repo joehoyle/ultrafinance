@@ -433,6 +433,7 @@ struct EnrichArgs {
     /// Transaction date in YYYY-MM-DD form.
     #[arg(long)]
     date: Option<String>,
+    /// Prefer this country; narrow same-name identities to it when matching records exist.
     #[arg(long)]
     country: Option<String>,
     /// Structured transaction geography as a JSON object.
