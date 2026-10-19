@@ -121,6 +121,12 @@
     .lookup-form .primary { border: 0; cursor: pointer; font-size: 13px; font-weight: 600; justify-self: start; }
     .lookup-form .primary:disabled { opacity: .6; cursor: wait; transform: none; }
     .lookup-result { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: #f0f3e9; padding: 23px; }
+    .lookup-tabs { margin-bottom: 18px; }
+    .lookup-pretty h3 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+    .lookup-pretty p { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+    .lookup-map { width: 100%; height: 230px; border: 1px solid var(--line); border-radius: 8px; margin-top: 12px; }
+    .lookup-attributions { margin-top: 20px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+    .lookup-attributions summary { cursor: pointer; }
     .lookup-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; }
     .lookup-result[data-state="error"] { background: #fff4ef; border-color: #e7cbbd; }
     .lookup-result[data-state="matched"] { background: #edf5df; }
@@ -223,7 +229,12 @@
           <div class="lookup-result" id="lookup-result" data-state="idle" aria-busy="false">
             <div class="label">Live API response</div>
             <div role="status" aria-live="polite" aria-atomic="true"><div class="lookup-summary"><span class="merchant-logo" id="lookup-logo" hidden></span><p id="lookup-status">Ready when you are.</p></div><p id="lookup-message">Your lookup result will appear here. Uncertain matches can stay unresolved.</p></div>
-            <pre id="lookup-json" tabindex="0" aria-label="Lookup response JSON" hidden></pre>
+            <div class="tabs lookup-tabs" id="lookup-tabs" role="tablist" aria-label="Lookup result view" hidden>
+              <button class="tab" id="lookup-pretty-tab" type="button" role="tab" aria-selected="true" aria-controls="lookup-pretty">Pretty</button>
+              <button class="tab" id="lookup-json-tab" type="button" role="tab" aria-selected="false" aria-controls="lookup-json" tabindex="-1">JSON</button>
+            </div>
+            <div class="lookup-pretty" id="lookup-pretty" role="tabpanel" aria-labelledby="lookup-pretty-tab" tabindex="0" hidden></div>
+            <pre id="lookup-json" role="tabpanel" aria-labelledby="lookup-json-tab" tabindex="0" hidden></pre>
           </div>
         </div>
       </section>
@@ -387,18 +398,38 @@
         if (generation === catalogGeneration) catalogGrid.setAttribute('aria-busy', 'false');
       }
     }
-    document.getElementById('catalog-form').addEventListener('submit', event => {
-      event.preventDefault();
+    let catalogDebounce;
+    function searchMerchants() {
+      clearTimeout(catalogDebounce);
+      if (!document.getElementById('catalog-form').checkValidity()) return;
       catalogFilter = {
         q: document.getElementById('catalog-query').value.trim(),
         market: document.getElementById('catalog-market').value.trim().toUpperCase(),
       };
       loadMerchants();
+    }
+    for (const field of ['catalog-query', 'catalog-market']) {
+      document.getElementById(field).addEventListener('input', () => {
+        clearTimeout(catalogDebounce);
+        ++catalogGeneration;
+        catalogController?.abort();
+        catalogGrid.replaceChildren();
+        catalogGrid.setAttribute('aria-busy', 'true');
+        catalogPrev.disabled = catalogNext.disabled = true;
+        document.getElementById('catalog-pagination').hidden = true;
+        const valid = document.getElementById('catalog-form').checkValidity();
+        catalogStatus.textContent = valid ? 'Searching merchants…' : 'Enter a two-letter market code, or leave it empty.';
+        if (valid) catalogDebounce = setTimeout(searchMerchants, 250);
+        else catalogGrid.setAttribute('aria-busy', 'false');
+      });
+    }
+    document.getElementById('catalog-form').addEventListener('submit', event => {
+      event.preventDefault();
+      searchMerchants();
     });
     document.getElementById('catalog-reset').addEventListener('click', () => {
       document.getElementById('catalog-form').reset();
-      catalogFilter = {q:'', market:''};
-      loadMerchants();
+      searchMerchants();
     });
     catalogPrev.addEventListener('click', () => loadMerchants(Math.max(0, catalogOffset - catalogPageSize)));
     catalogNext.addEventListener('click', () => loadMerchants(catalogOffset + catalogPageSize));
@@ -409,6 +440,91 @@
     const lookupStatus = document.getElementById('lookup-status');
     const lookupMessage = document.getElementById('lookup-message');
     const lookupLogo = document.getElementById('lookup-logo');
+    const lookupPretty = document.getElementById('lookup-pretty');
+    const lookupTabs = document.getElementById('lookup-tabs');
+    function showLookupView() {
+      const pretty = document.getElementById('lookup-pretty-tab').getAttribute('aria-selected') === 'true';
+      lookupPretty.hidden = lookupTabs.hidden || !pretty;
+      lookupJson.hidden = lookupTabs.hidden || pretty;
+    }
+    function renderPretty(result) {
+      lookupPretty.replaceChildren();
+      function paragraph(text, className = '') {
+        const element = document.createElement('p');
+        element.className = className;
+        element.textContent = text;
+        lookupPretty.append(element);
+      }
+      function link(url, label) {
+        const element = document.createElement('a');
+        element.className = 'merchant-link';
+        element.href = url;
+        element.textContent = label;
+        element.target = '_blank';
+        element.rel = 'noopener noreferrer';
+        lookupPretty.append(element);
+      }
+      const merchant = result.merchant?.status === 'matched' ? result.merchant.data : null;
+      if (merchant) {
+        const identity = document.createElement('div');
+        identity.className = 'merchant-identity';
+        const name = document.createElement('h3');
+        name.textContent = merchant.name;
+        identity.append(merchantLogo(merchant, false), name);
+        lookupPretty.append(identity);
+        const website = safeWebsite(merchant.website);
+        if (website) link(website.href, `${website.hostname} ↗`);
+        if (merchant.markets?.length) paragraph(`Known markets: ${merchant.markets.join(', ')}`);
+      } else {
+        paragraph('No merchant matched.');
+      }
+      const location = ['matched', 'extracted'].includes(result.location?.status) ? result.location.data : null;
+      if (location) {
+        const heading = document.createElement('h4');
+        heading.textContent = result.location.status === 'matched' ? 'Matched location' : 'Extracted location · outlet unconfirmed';
+        lookupPretty.append(heading);
+        if (location.name) paragraph(location.name);
+        const address = [location.address, location.city, location.region, location.postal_code, location.country].filter(Boolean).join(', ');
+        if (address) paragraph(address);
+        if (location.store_number) paragraph(`Store ${location.store_number}`);
+        const lat = location.latitude;
+        const lon = location.longitude;
+        if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+          const params = new URLSearchParams({
+            bbox: [Math.max(-180, lon - .01), Math.max(-90, lat - .006), Math.min(180, lon + .01), Math.min(90, lat + .006)].join(','),
+            layer: 'mapnik', marker: `${lat},${lon}`,
+          });
+          const map = document.createElement('iframe');
+          map.className = 'lookup-map';
+          map.title = `Map of ${location.name || address || 'enriched location'}`;
+          map.loading = 'lazy';
+          map.referrerPolicy = 'no-referrer';
+          map.src = `https://www.openstreetmap.org/export/embed.html?${params}`;
+          lookupPretty.append(map);
+          link(`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`, 'View larger map ↗');
+        } else {
+          paragraph('No coordinates available for this location.', 'note');
+          if (address) link(`https://www.openstreetmap.org/search?${new URLSearchParams({query: address})}`, 'Search this address on OpenStreetMap ↗');
+        }
+      } else {
+        paragraph('No confident location match.', 'note');
+      }
+      const sources = [...(result.attributions || [])];
+      if (merchant?.logo_source) sources.push(`Logo: ${merchant.logo_source}`);
+      if (sources.length) {
+        const details = document.createElement('details');
+        details.className = 'lookup-attributions';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Sources & attribution';
+        details.append(summary);
+        for (const source of sources) {
+          const item = document.createElement('p');
+          item.textContent = source;
+          details.append(item);
+        }
+        lookupPretty.append(details);
+      }
+    }
     document.getElementById('description').addEventListener('input', event => event.target.setCustomValidity(''));
     lookupForm.addEventListener('submit', async event => {
       event.preventDefault();
@@ -433,7 +549,9 @@
       lookupMessage.textContent = 'Evaluating the description and available evidence.';
       lookupLogo.hidden = true;
       lookupLogo.replaceChildren();
-      lookupJson.hidden = true;
+      lookupTabs.hidden = true;
+      lookupPretty.replaceChildren();
+      showLookupView();
       lookupJson.textContent = '';
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 65000);
@@ -456,7 +574,7 @@
           lookupStatus.textContent = result.merchant.data.name;
           lookupLogo.replaceChildren(...merchantLogo(result.merchant.data, false).childNodes);
           lookupLogo.hidden = false;
-          lookupMessage.textContent = 'Merchant matched. The complete response is below.';
+          lookupMessage.textContent = 'Merchant matched. Explore the details or view the full JSON response.';
         } else if (result?.merchant?.status === 'unresolved') {
           lookupResult.dataset.state = 'unresolved';
           lookupStatus.textContent = 'No confident match yet.';
@@ -465,7 +583,10 @@
           throw new Error('The service returned an unexpected result. Please try again.');
         }
         lookupJson.textContent = JSON.stringify(result, null, 2);
-        lookupJson.hidden = false;
+        renderPretty(result);
+        lookupTabs.hidden = false;
+        if (!response.ok) selectTab(document.getElementById('lookup-json-tab'));
+        showLookupView();
       } catch (error) {
         lookupResult.dataset.state = 'error';
         lookupStatus.textContent = 'Couldn’t complete the lookup.';
@@ -483,7 +604,8 @@
     });
     const tabs = [...document.querySelectorAll('[role="tab"]')];
     function selectTab(tab) {
-      tabs.forEach(item => {
+      const group = [...tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];
+      group.forEach(item => {
         const selected = item === tab;
         item.setAttribute('aria-selected', String(selected));
         item.tabIndex = selected ? 0 : -1;
@@ -491,19 +613,21 @@
       });
       document.getElementById('copy-label').textContent = 'Copy';
     }
-    tabs.forEach((tab, index) => {
+    tabs.forEach(tab => {
+      const group = [...tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];
+      const index = group.indexOf(tab);
       tab.addEventListener('click', () => selectTab(tab));
       tab.addEventListener('keydown', event => {
         let next;
-        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') next = tabs[(index + 1) % tabs.length];
-        if (event.key === 'Home') next = tabs[0];
-        if (event.key === 'End') next = tabs[tabs.length - 1];
+        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') next = group[(index + (event.key === 'ArrowRight' ? 1 : group.length - 1)) % group.length];
+        if (event.key === 'Home') next = group[0];
+        if (event.key === 'End') next = group[group.length - 1];
         if (next) { event.preventDefault(); selectTab(next); next.focus(); }
       });
     });
     let copyTimer;
     document.getElementById('copy').addEventListener('click', async () => {
-      const panel = document.querySelector('[role="tabpanel"]:not([hidden])');
+      const panel = document.querySelector('.demo [role="tabpanel"]:not([hidden])');
       try {
         await navigator.clipboard.writeText(panel.textContent);
         document.getElementById('copy-label').textContent = 'Copied!';
