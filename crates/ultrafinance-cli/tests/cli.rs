@@ -2055,3 +2055,93 @@ fn enrich_research_flag_is_opt_in_and_preserved_in_json_input() {
     let batch: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(batch["transactions"][0]["research"], true);
 }
+
+#[test]
+fn catalog_type_filters_apply_before_pagination_and_search_limits() {
+    use ultrafinance_core::store::MerchantStore;
+    let store = MerchantStore::temporary().unwrap();
+    // Fill both exact and word retrieval pools with the other type first.
+    for n in 0..260 {
+        store
+            .put(
+                &serde_json::from_value(json!({
+                    "id":format!("shop-{n:03}"), "name":format!("Shared Shop {n:03}"),
+                    "aliases":["Shared"], "markets":["CA"]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    for (id, name, market) in [
+        ("z-bank-a", "Shared Bank A", "CA"),
+        ("z-bank-b", "Shared Bank B", "CA"),
+        ("z-bank-c", "Shared Bank C", "US"),
+    ] {
+        store.put(&serde_json::from_value(json!({"id":id,"name":name,"type":"financial_institution","aliases":["Shared"],"markets":[market]})).unwrap()).unwrap();
+    }
+    let call = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .args(args)
+            .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let page = call(&[
+        "merchants",
+        "list",
+        "--type",
+        "financial_institution",
+        "--market",
+        "CA",
+        "--limit",
+        "1",
+        "--offset",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["merchants"][0]["name"], "Shared Bank B");
+    let merchants = call(&["counterparties", "list", "--type", "merchant", "--json"]);
+    assert_eq!(merchants["total"], 260);
+    assert_eq!(call(&["merchants", "list", "--json"])["total"], 263);
+    for description in ["Shared", "Shared Bank", "Sharred"] {
+        let results = call(&[
+            "counterparties",
+            "search",
+            description,
+            "--type",
+            "financial_institution",
+            "--limit",
+            "1",
+            "--json",
+        ]);
+        let candidates = results.as_array().unwrap();
+        // Exact collisions are intentionally preserved even at limit=1.
+        assert_eq!(
+            candidates.len(),
+            if description == "Shared" { 3 } else { 1 },
+            "{description}: {results}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c["merchant"]["type"] == "financial_institution")
+        );
+    }
+    for command in ["list", "search"] {
+        let mut args = vec!["merchants", command];
+        if command == "search" {
+            args.push("Shared");
+        }
+        args.extend(["--type", "invalid"]);
+        let output = run(&args, None);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported counterparty type"));
+    }
+}

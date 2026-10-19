@@ -895,6 +895,16 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
         country: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Candidate>> {
+        self.search_typed(description, country, limit, None)
+    }
+    pub fn search_typed(
+        &self,
+        description: &str,
+        country: Option<&str>,
+        limit: usize,
+        entity_type: Option<crate::CounterpartyType>,
+    ) -> Result<Vec<Candidate>> {
+        let entity_type = entity_type.map(|t| t.as_str());
         let query = normalize(description);
         if query.is_empty() || limit == 0 {
             return Ok(vec![]);
@@ -906,7 +916,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
             let mut found = HashMap::new();
             let mut scorer = crate::search_score::Scorer::new(&query);
-            let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.merchant_key WHERE a.normalized=$1 ORDER BY m.id LIMIT 255", &[&query])?;
+            let exact = tx.query("SELECT m.id,m.name,m.aliases,m.markets FROM merchants m JOIN aliases a ON a.merchant_id=m.merchant_key WHERE a.normalized=$1 AND ($2::text IS NULL OR m.counterparty_type=$2) ORDER BY m.id LIMIT 255", &[&query, &entity_type])?;
             for row in exact {
                 add_candidate(&mut found, &row, true, None, &mut scorer)?;
             }
@@ -919,7 +929,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             }
             for (id, length) in matches {
                 if !found.contains_key(&id) {
-                    let row = tx.query_one("SELECT id,name,aliases,markets FROM merchants WHERE id=$1", &[&id])?;
+                    let Some(row) = tx.query_opt("SELECT id,name,aliases,markets FROM merchants WHERE id=$1 AND ($2::text IS NULL OR counterparty_type=$2)", &[&id, &entity_type])? else { continue; };
                     add_candidate(&mut found, &row, false, Some(length), &mut scorer)?;
                 }
                 if let Some(candidate) = found.get_mut(&id) { candidate.regex_match_length = Some(length); }
@@ -935,7 +945,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                 .map(|pair| format!("'{}' & '{}'", pair[0], pair[1]))
                 .collect();
             if !combined_terms.is_empty() {
-                for row in search_terms::query(&mut tx, &combined_terms, 32, false)? {
+                for row in search_terms::query(&mut tx, &combined_terms, 32, false, entity_type)? {
                     add_candidate(&mut found,&row,false,None,&mut scorer)?;
                 }
             }
@@ -943,7 +953,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             // ones out before Rust scores merchant names. A post-sort LIMIT alone
             // does not bound work on a million-row catalog.
             if !terms.is_empty() {
-                for row in search_terms::query(&mut tx, &terms, 100, false)? {
+                for row in search_terms::query(&mut tx, &terms, 100, false, entity_type)? {
                     add_candidate(&mut found,&row,false,None,&mut scorer)?;
                 }
             }
@@ -954,7 +964,7 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
                 .filter(|token| token.chars().any(char::is_alphabetic)).collect();
             let fuzzy_words = owner.reads.lock().unwrap().fuzzy_words(&mut tx, &fuzzy_tokens)?;
             if !fuzzy_words.is_empty() {
-                for row in search_terms::query(&mut tx, &fuzzy_words, 32, true)? {
+                for row in search_terms::query(&mut tx, &fuzzy_words, 32, true, entity_type)? {
                     add_candidate(&mut found,&row,false,None,&mut scorer)?;
                 }
             }

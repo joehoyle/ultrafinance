@@ -1813,3 +1813,15 @@ metadata. Set `ULTRAFINANCE_RESEARCH_MODEL` to choose the server-side research m
 For managed AWS deployment, configure the sensitive `openai_api_key` variable and
 optional `research_model` through the existing OpenTofu workflow; no settings are
 changed by compiling the application.
+
+Catalog listing and search can filter counterparties by type (omitting `--type`
+includes all types). Both `merchants` and its `counterparties` alias accept:
+
+```sh
+ultrafinance merchants list --type financial_institution --market CA --json
+ultrafinance merchants search "Royal Bank" --type financial_institution --country CA
+ultrafinance counterparties list --type merchant --limit 20 --offset 20
+```
+
+Listing totals and pagination apply to the filtered catalog. Search filters each
+candidate pool before its limits and ranking; `--country` remains a ranking hint.

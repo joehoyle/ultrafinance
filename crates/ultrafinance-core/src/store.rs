@@ -502,6 +502,19 @@ impl MerchantStore {
         self.apply_logos(candidates.iter_mut().map(|c| &mut c.merchant))?;
         Ok(candidates)
     }
+    pub fn search_typed(
+        &self,
+        description: &str,
+        country: Option<&str>,
+        limit: usize,
+        entity_type: Option<crate::CounterpartyType>,
+    ) -> Result<Vec<Candidate>> {
+        let mut candidates = self
+            .0
+            .search_typed(description, country, limit, entity_type)?;
+        self.apply_logos(candidates.iter_mut().map(|c| &mut c.merchant))?;
+        Ok(candidates)
+    }
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {

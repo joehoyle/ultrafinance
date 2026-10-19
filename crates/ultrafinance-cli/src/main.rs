@@ -330,9 +330,12 @@ enum MerchantCommand {
         #[arg(long)]
         id: Option<String>,
     },
-    /// List stored merchants alphabetically, without calling Jev.
+    /// List stored counterparties alphabetically, without calling Jev.
     #[command(alias = "ls")]
     List {
+        /// Filter by merchant or financial_institution; defaults to all types.
+        #[arg(long = "type")]
+        counterparty_type: Option<ultrafinance_core::CounterpartyType>,
         /// Filter by known operating country; merchants without that country are excluded.
         #[arg(long = "market")]
         market: Option<String>,
@@ -346,6 +349,9 @@ enum MerchantCommand {
     },
     /// Show exact and fuzzy candidates without calling Jev.
     Search {
+        /// Filter by merchant or financial_institution; defaults to all types.
+        #[arg(long = "type")]
+        counterparty_type: Option<ultrafinance_core::CounterpartyType>,
         description: String,
         /// Print complete candidates and source evidence as JSON for scripts.
         #[arg(long)]
@@ -1110,15 +1116,18 @@ async fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&merchant)?);
                 }
                 MerchantCommand::List {
+                    counterparty_type,
                     market,
                     limit,
                     offset,
                     json,
                 } => {
-                    let page = store.list(market.as_deref(), limit, offset)?;
+                    let page =
+                        store.list_typed(market.as_deref(), limit, offset, counterparty_type)?;
                     output::merchant_list(&page, json)?;
                 }
                 MerchantCommand::Search {
+                    counterparty_type,
                     description,
                     country,
                     limit,
@@ -1127,7 +1136,12 @@ async fn main() -> Result<()> {
                     if !(1..=254).contains(&limit) {
                         bail!("limit must be between 1 and 254");
                     }
-                    let candidates = store.search(&description, country.as_deref(), limit)?;
+                    let candidates = store.search_typed(
+                        &description,
+                        country.as_deref(),
+                        limit,
+                        counterparty_type,
+                    )?;
                     output::merchant_search(&description, &candidates, json)?;
                 }
                 MerchantCommand::Import {
