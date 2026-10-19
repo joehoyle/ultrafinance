@@ -85,7 +85,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
     // Reinitialization must not recreate either audit table.
     let initialized = PostgresStore::connect(&url, true)?;
     initialized.run(|client| {
-        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 20);
+        assert_eq!(client.query_one("SELECT version FROM ultrafinance_schema", &[])?.get::<_, i32>(0), 21);
         assert!(client.query_one(
             "SELECT to_regclass('merchant_merge_runs') IS NULL AND to_regclass('location_merge_runs') IS NULL",
             &[],
@@ -215,7 +215,7 @@ fn postgres_idle_session_reconnects_before_work_without_replaying_jobs() -> Resu
             .query_one("SELECT version FROM ultrafinance_schema", &[])?
             .get(0);
         assert_eq!(
-            version, 20,
+            version, 21,
             "market migration must run before application use"
         );
         let idle: String = client.query_one("SHOW idle_session_timeout", &[])?.get(0);
@@ -807,9 +807,55 @@ fn version_nineteen_counterparty_migration_preserves_legacy_identities() -> Resu
         assert_eq!(
             c.query_one("SELECT version FROM ultrafinance_schema", &[])?
                 .get::<_, i32>(0),
-            20
+            21
         );
         Ok(())
     })?;
+    Ok(())
+}
+
+#[test]
+fn version_twenty_upgrades_types_without_changing_existing_identities() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
+    let lease = PostgresStore::temporary(&base)?;
+    let records = crate::import::catalog(r#"[{"id":"old","name":"Existing Shop"}]"#, "fixture")?;
+    lease.import(&records)?;
+    let id = lease.resolve_source("fixture", "old")?;
+    lease.run(|client| {
+        for (table,column) in [("merchants","counterparty_type"),("manual_merchants","counterparty_type"),("source_records","input_counterparty_type")] {
+            client.batch_execute(&format!("ALTER TABLE {table} DROP CONSTRAINT {table}_{column}_check; ALTER TABLE {table} ADD CONSTRAINT {table}_{column}_check CHECK ({column} IN ('merchant','financial_institution'))"))?;
+        }
+        client.batch_execute("UPDATE ultrafinance_schema SET version=20")?;
+        Ok(())
+    })?;
+    let url = lease.temporary_url().unwrap().to_owned();
+    assert!(PostgresStore::connect(&url, false).is_err());
+    let upgraded = PostgresStore::connect(&url, true)?;
+    assert_eq!(upgraded.resolve_source("fixture", "old")?, id);
+    let records = crate::import::catalog(
+        r#"[{"id":"processor","name":"Example Payments","type":"payment_processor"}]"#,
+        "fixture",
+    )?;
+    upgraded.import(&records)?;
+    let processor_id = upgraded.resolve_source("fixture", "processor")?.unwrap();
+    let processor = upgraded.get(&processor_id)?.unwrap();
+    upgraded.put(&processor)?;
+    assert_eq!(
+        processor.counterparty_type,
+        crate::CounterpartyType::PaymentProcessor
+    );
+    assert_eq!(
+        upgraded.search("Example Payments", None, 10)?[0]
+            .merchant
+            .counterparty_type,
+        crate::CounterpartyType::PaymentProcessor
+    );
+    assert_eq!(
+        upgraded
+            .list(None, 10, 0, Some(crate::CounterpartyType::PaymentProcessor))?
+            .total,
+        1
+    );
     Ok(())
 }

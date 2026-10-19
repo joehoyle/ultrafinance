@@ -2145,3 +2145,52 @@ fn catalog_type_filters_apply_before_pagination_and_search_limits() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported counterparty type"));
     }
 }
+
+#[test]
+fn payment_processors_can_be_added_listed_and_searched_by_type() {
+    let store = ultrafinance_core::store::MerchantStore::temporary().unwrap();
+    let call = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .args(args)
+            .env("ULTRAFINANCE_DATABASE_URL", store.temporary_url())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let added = call(&[
+        "merchants",
+        "add",
+        "--name",
+        "Example Payments",
+        "--type",
+        "payment_processor",
+    ]);
+    assert_eq!(added["type"], "payment_processor");
+    let page = call(&[
+        "counterparties",
+        "list",
+        "--type",
+        "payment_processor",
+        "--json",
+    ]);
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["merchants"][0]["id"], added["id"]);
+    let results = call(&[
+        "merchants",
+        "search",
+        "Example Payments",
+        "--type",
+        "payment_processor",
+        "--json",
+    ]);
+    assert_eq!(results[0]["merchant"]["id"], added["id"]);
+    assert_eq!(
+        call(&["merchants", "list", "--type", "merchant", "--json"])["total"],
+        0
+    );
+}

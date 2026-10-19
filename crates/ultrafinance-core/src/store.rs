@@ -12,7 +12,7 @@ mod postgres_store;
 
 pub const LOCAL_DATABASE_URL: &str =
     "postgresql://ultrafinance@127.0.0.1:55432/ultrafinance?sslmode=disable";
-pub const POSTGRES_SCHEMA_VERSION: i32 = 20;
+pub const POSTGRES_SCHEMA_VERSION: i32 = 21;
 
 #[derive(Debug)]
 pub struct SchemaMismatch {

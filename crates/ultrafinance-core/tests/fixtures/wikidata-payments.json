@@ -1,0 +1,46 @@
+{
+  "results": {
+    "bindings": [
+      {
+        "item": {
+          "value": "http://www.wikidata.org/entity/Q123"
+        },
+        "name": {
+          "value": "Example Payments"
+        },
+        "country": {
+          "value": "CA"
+        },
+        "lei": {
+          "value": "12345678901234567890"
+        },
+        "alias": {
+          "value": "Example Pay"
+        },
+        "paymentProviderCategory": {
+          "value": "https://en.wikipedia.org/wiki/Category:Payment_service_providers"
+        },
+        "organization": {
+          "value": "http://www.wikidata.org/entity/Q43229"
+        }
+      }
+    ]
+  },
+  "category": {
+    "query": {
+      "categorymembers": [
+        {
+          "pageid": 42,
+          "ns": 0,
+          "title": "Example Payments"
+        }
+      ]
+    }
+  },
+  "members": [
+    {
+      "title": "Example Payments",
+      "qid": "Q123"
+    }
+  ]
+}

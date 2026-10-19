@@ -293,6 +293,10 @@ impl PostgresStore {
                         tx.batch_execute(include_str!("../migrations/020_counterparty_types.sql"))
                             .context("schema migration 20 (counterparty types) failed")?;
                     }
+                    if version < 21 {
+                        tx.batch_execute(include_str!("../migrations/021_payment_processors.sql"))
+                            .context("schema migration 21 (payment processor type) failed")?;
+                    }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     // Run historical normalizer backfills after key conversion.
                     if version < 12 { indexed_import::backfill(&mut tx)?; }

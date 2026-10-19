@@ -175,6 +175,10 @@ fn registry(source: DatasetSource) -> Registration {
             let (license, purpose, url) = datasets::financial::metadata(Source::Gleif);
             (Source::Gleif, purpose, url, license)
         }
+        DatasetSource::WikidataPayments => {
+            let (license, purpose, url) = datasets::financial::metadata(Source::WikidataPayments);
+            (Source::WikidataPayments, purpose, url, license)
+        }
         DatasetSource::Wikidata => {
             let (license, purpose, url) = datasets::financial::metadata(Source::Wikidata);
             (Source::Wikidata, purpose, url, license)
@@ -257,6 +261,7 @@ fn urls(source: Source, region: &str) -> Result<Vec<(&'static str, String)>> {
         Source::Fdic => vec![("input.json", "https://api.fdic.gov/banks/institutions?filters=ACTIVE%3A1".into())],
         Source::Ncua => vec![("input.csv", datasets::financial::NCUA_URL.into())],
         Source::Gleif => vec![("input.json", "https://api.gleif.org/api/v1/lei-records".into())],
+        Source::WikidataPayments => vec![("input.json", datasets::financial::PAYMENTS_URL.into())],
         Source::Wikidata => vec![("input.json", "https://query.wikidata.org/sparql".into())],
         Source::Osfi => vec![("input.csv", datasets::osfi::DOWNLOAD_URL.into())],
         Source::Foursquare => vec![],
@@ -647,6 +652,7 @@ fn validate_file(source: Source, name: &str, bytes: &[u8]) -> Result<()> {
             | Source::Ncua
             | Source::Gleif
             | Source::Wikidata
+            | Source::WikidataPayments
             | Source::Osfi
             | Source::MerchantStudio
             | Source::LunchMoney => unreachable!(),
@@ -838,6 +844,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 DatasetSource::Ncua,
                 DatasetSource::Gleif,
                 DatasetSource::Wikidata,
+                DatasetSource::WikidataPayments,
             ]
             .map(registry);
             if !as_json {
@@ -986,6 +993,7 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                         | Source::Fdic
                         | Source::Gleif
                         | Source::Wikidata
+                        | Source::WikidataPayments
                 ) {
                     "input.json"
                 } else {

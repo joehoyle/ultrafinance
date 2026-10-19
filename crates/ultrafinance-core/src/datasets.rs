@@ -64,6 +64,7 @@ pub enum Source {
     Ncua,
     Gleif,
     Wikidata,
+    WikidataPayments,
     MerchantStudio,
     OpenEnrichment,
     DoDataThings,
@@ -80,6 +81,7 @@ impl Source {
             Self::Ncua => "ncua",
             Self::Gleif => "gleif",
             Self::Wikidata => "wikidata",
+            Self::WikidataPayments => "wikidata-payments",
             Self::MerchantStudio => "merchant-studio",
             Self::OpenEnrichment => "open-enrichment",
             Self::DoDataThings => "dodatathings",
@@ -453,7 +455,11 @@ pub fn prepare(
     let mut skipped_places = 0;
     let mut retained_places = 0;
     let (license, credit, url, kind) = match source {
-        Source::Fdic | Source::Ncua | Source::Gleif | Source::Wikidata => {
+        Source::Fdic
+        | Source::Ncua
+        | Source::Gleif
+        | Source::Wikidata
+        | Source::WikidataPayments => {
             if example_data.is_some() {
                 bail!("financial institution sources do not accept transaction examples");
             }

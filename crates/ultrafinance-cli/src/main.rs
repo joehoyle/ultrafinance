@@ -263,6 +263,7 @@ enum DatasetSource {
     Ncua,
     Gleif,
     Wikidata,
+    WikidataPayments,
     MerchantStudio,
     OpenEnrichment,
     Dodatathings,
@@ -307,7 +308,7 @@ enum MerchantCommand {
     },
     /// Add a verified merchant, or replace one by supplying its existing ID.
     Add {
-        /// Entity type: merchant or financial_institution.
+        /// Entity type: merchant, financial_institution, or payment_processor.
         #[arg(long = "type", default_value = "merchant")]
         counterparty_type: ultrafinance_core::CounterpartyType,
         #[arg(long)]
@@ -333,7 +334,7 @@ enum MerchantCommand {
     /// List stored counterparties alphabetically, without calling Jev.
     #[command(alias = "ls")]
     List {
-        /// Filter by merchant or financial_institution; defaults to all types.
+        /// Filter by merchant, financial_institution, or payment_processor; defaults to all types.
         #[arg(long = "type")]
         counterparty_type: Option<ultrafinance_core::CounterpartyType>,
         /// Filter by known operating country; merchants without that country are excluded.
@@ -349,7 +350,7 @@ enum MerchantCommand {
     },
     /// Show exact and fuzzy candidates without calling Jev.
     Search {
-        /// Filter by merchant or financial_institution; defaults to all types.
+        /// Filter by merchant, financial_institution, or payment_processor; defaults to all types.
         #[arg(long = "type")]
         counterparty_type: Option<ultrafinance_core::CounterpartyType>,
         description: String,
@@ -821,6 +822,9 @@ async fn main() -> Result<()> {
                     DatasetSource::Ncua => ultrafinance_core::datasets::Source::Ncua,
                     DatasetSource::Gleif => ultrafinance_core::datasets::Source::Gleif,
                     DatasetSource::Wikidata => ultrafinance_core::datasets::Source::Wikidata,
+                    DatasetSource::WikidataPayments => {
+                        ultrafinance_core::datasets::Source::WikidataPayments
+                    }
                     DatasetSource::Foursquare => ultrafinance_core::datasets::Source::Foursquare,
                     DatasetSource::MerchantStudio => {
                         ultrafinance_core::datasets::Source::MerchantStudio

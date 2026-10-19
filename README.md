@@ -1169,7 +1169,7 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 20 before running this application. See
+schema version 21 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
 Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
@@ -1825,3 +1825,44 @@ ultrafinance counterparties list --type merchant --limit 20 --offset 20
 
 Listing totals and pagination apply to the filtered catalog. Search filters each
 candidate pool before its limits and ranking; `--country` remains a ranking hint.
+
+Payment processors use counterparty type `payment_processor`, including payment
+facilitators and gateways. The type is accepted by native imports, manual adds,
+CLI list/search filters, and `/v1/counterparties?type=payment_processor`. They are
+returned in enrichment `counterparties`; matching a processor alone leaves the
+legacy merchant result unresolved and does not determine the transaction kind.
+This adds a catalog identity type; descriptor parsing does not yet produce a
+separate processor and underlying merchant from a single compound descriptor.
+
+The `wikidata-payments` source imports organizations selected from the English
+Wikipedia [payment service provider category](https://en.wikipedia.org/wiki/Category:Payment_service_providers),
+including SumUp where present in the published selection. It resolves every
+category page to its Wikidata QID, then requires an organization classification,
+an English label, and no dissolution date. Generic concepts, list pages and
+unmapped pages are excluded. The importer has no provider-specific entries or
+name rules. It preserves category membership and QID mappings in its JSON
+snapshot alongside the Wikidata names, aliases, country hints and websites.
+Category selection is editorial, not a regulator license or exhaustive directory.
+
+```sh
+ultrafinance sources show wikidata-payments
+ultrafinance sources import wikidata-payments --dry-run
+ultrafinance sources raw wikidata-payments --limit 10
+ultrafinance sources import wikidata-payments --offline
+ultrafinance merchants search SumUp --type payment_processor --json
+ultrafinance merchants list --type payment_processor --json
+```
+
+As with the financial sources, this source supports `--refresh`, `--input` JSON,
+`--region global` or a lowercase country code, and normal import reconciliation.
+Country filtering uses source country hints, not every operating market. Partial
+API pages and invalid selection evidence fail before publishing a snapshot.
+Repeated imports preserve source IDs and apply changed evidence only. Missing
+records do not automatically retire prior imports. Multiple official websites
+are omitted when no single unambiguous URL exists. No logos, synthetic statement
+aliases or transaction labels are inferred. Wikidata structured data is CC0;
+Wikipedia selection provenance is credited under CC BY-SA 4.0. Original source
+links and attribution are retained in snapshots, bundles and imported provenance.
+
+Existing databases need `ultrafinance database init` with this release to apply
+schema migration 21 before using payment processors.
