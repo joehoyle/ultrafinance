@@ -69,7 +69,7 @@ impl PostgresStore {
 fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe::Snapshot> {
     let sources = c
         .query(
-            "SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id ORDER BY s.source,external_id",
+            "SELECT s.*,source_category_ids(s.source,s.external_id) AS input_category_ids,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id ORDER BY s.source,external_id",
             &[],
         )?
         .iter()
@@ -94,12 +94,12 @@ fn postgres_dedupe_snapshot(c: &mut impl GenericClient) -> Result<crate::dedupe:
     };
     Ok(crate::dedupe::Snapshot {
         merchants: c
-            .query("SELECT * FROM merchants ORDER BY id", &[])?
+            .query("SELECT *,merchant_category_ids(id) AS category_ids FROM merchants ORDER BY id", &[])?
             .iter()
             .map(rows::merchant)
             .collect::<Result<_>>()?,
         manual: c
-            .query("SELECT * FROM manual_merchants ORDER BY id", &[])?
+            .query("SELECT *,merchant_category_ids(id,true) AS category_ids FROM manual_merchants ORDER BY id", &[])?
             .iter()
             .map(rows::merchant)
             .collect::<Result<_>>()?,

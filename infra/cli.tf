@@ -115,7 +115,6 @@ resource "aws_ecs_task_definition" "cli" {
       { name = "TMPDIR", value = "/scratch/tmp" },
       { name = "ULTRAFINANCE_RESEARCH_MODEL", value = var.research_model },
       { name = "ULTRAFINANCE_LOGO_BUCKET", value = aws_s3_bucket.logos[0].id },
-      { name = "ULTRAFINANCE_LOGO_BASE_URL", value = "https://${var.domain_name == null ? aws_cloudfront_distribution.app[0].domain_name : var.domain_name}" },
       { name = "ULTRAFINANCE_DATABASE_HOST", value = aws_rds_cluster.database[0].endpoint },
       { name = "ULTRAFINANCE_DATABASE_NAME", value = aws_rds_cluster.database[0].database_name }
     ]

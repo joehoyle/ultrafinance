@@ -109,7 +109,8 @@ fn foursquare_existing_merchants_keep_distinct_outlets_and_refresh_ids() -> Resu
         .unwrap();
     assert_eq!(zero.location.city.as_deref(), Some("Toronto"));
     assert_eq!(zero.location.latitude, Some(43.65));
-    assert_eq!(zero.place_ids["foursquare"], "0");
+    assert_eq!(zero.source, "foursquare");
+    assert_eq!(zero.external_id, "place:0");
     let mut refresh = record(0);
     refresh.raw["places"][0]["address"] = json!("Updated Street");
     let report = store.reconcile_import(
@@ -223,5 +224,63 @@ fn foursquare_file_limits_and_late_errors_are_atomic_for_locations() -> Result<(
         crate::dedupe::DEFAULT_IMPORT_CHUNK_SIZE + 1
     );
     std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn legacy_grouped_category_changes_replace_each_places_assignments() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    let mut brand = record(0);
+    brand.external_id = "brand:legacy".into();
+    let mut first = brand.raw["places"][0].clone();
+    first["fsq_category_ids"] = json!(["old"]);
+    let mut second = record(1).raw["places"][0].clone();
+    second["fsq_category_ids"] = json!(["keep"]);
+    let mut addressless = record(2).raw["places"][0].clone();
+    addressless["address"] = json!("");
+    addressless["fsq_category_ids"] = json!(["addressless"]);
+    brand.raw["places"] = json!([first, second, addressless]);
+    store.import(std::slice::from_ref(&brand))?;
+    let id = store
+        .resolve_source("foursquare", &brand.external_id)?
+        .unwrap();
+    assert_eq!(
+        store.get(&id)?.unwrap().category_ids,
+        ["addressless", "keep", "old"]
+    );
+    brand.raw["places"][0]["fsq_category_ids"] = json!(["new"]);
+    brand.raw["places"][2]["fsq_category_ids"] = json!([]);
+    store.import(std::slice::from_ref(&brand))?;
+    // Place assignments change independently of the merchant's creation-time
+    // categories, including when replaying a legacy grouped bundle.
+    assert_eq!(
+        store.get(&id)?.unwrap().category_ids,
+        ["addressless", "keep", "old"]
+    );
+    store.0.run(|c| {
+        assert_eq!(
+            c.query_one("SELECT foursquare_category_ids('place:0')", &[])?
+                .get::<_, Vec<String>>(0),
+            ["new"]
+        );
+        assert!(
+            c.query_one("SELECT foursquare_category_ids('place:2')", &[])?
+                .get::<_, Vec<String>>(0)
+                .is_empty()
+        );
+        Ok(())
+    })?;
+    // Replaying a grouped bundle must not rewrite visible records or caches.
+    let revision = store.0.run(|c| {
+        Ok(c.query_one("SELECT revision FROM catalog_revision", &[])?
+            .get::<_, i64>(0))
+    })?;
+    store.import(std::slice::from_ref(&brand))?;
+    assert_eq!(
+        store.0.run(|c| Ok(c
+            .query_one("SELECT revision FROM catalog_revision", &[])?
+            .get::<_, i64>(0)))?,
+        revision
+    );
     Ok(())
 }

@@ -5,6 +5,11 @@ use postgres::GenericClient;
 pub(crate) fn postgres_merchants(c: &mut impl GenericClient, id: &str, data: &str) -> Result<()> {
     let m: crate::Merchant = serde_json::from_str(data)?;
     c.execute("INSERT INTO merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources,counterparty_type=excluded.counterparty_type", &[&id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&m.counterparty_type.as_str()])?;
+    crate::store::postgres_store::category_assignments::write(
+        c,
+        crate::store::postgres_store::category_assignments::Owner::Merchant,
+        &[(id, "", &m.category_ids)],
+    )?;
     let mut merchant = m;
     merchant.id = id.to_owned();
     postgres_identity_key(c, &merchant)?;
@@ -32,6 +37,11 @@ pub(crate) fn postgres_manual_merchants(
 ) -> Result<()> {
     let m: crate::Merchant = serde_json::from_str(data)?;
     c.execute("INSERT INTO manual_merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name,website=excluded.website,logo_url=excluded.logo_url,logo_source=excluded.logo_source,markets=excluded.markets,aliases=excluded.aliases,sources=excluded.sources,counterparty_type=excluded.counterparty_type", &[&id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&m.counterparty_type.as_str()])?;
+    crate::store::postgres_store::category_assignments::write(
+        c,
+        crate::store::postgres_store::category_assignments::Owner::Manual,
+        &[(id, "", &m.category_ids)],
+    )?;
     Ok(())
 }
 pub(crate) fn postgres_source_records(
@@ -43,6 +53,7 @@ pub(crate) fn postgres_source_records(
 ) -> Result<()> {
     let record: crate::store::SourceRecord = serde_json::from_str(data)?;
     let m = &record.merchant;
+    let input_id = (m.id != external_id).then_some(m.id.as_str());
     let strings = |key: &str| -> Vec<String> {
         record.raw[key]
             .as_array()
@@ -60,7 +71,12 @@ pub(crate) fn postgres_source_records(
         "INSERT INTO source_provenance(source,attribution,license,url) VALUES($1,$2,$3,$4) ON CONFLICT(source,attribution,license,url) DO UPDATE SET source=excluded.source RETURNING id",
         &[&source,&record.attribution,&record.license,&record.url],
     )?.get(0);
-    c.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases,input_counterparty_type=excluded.input_counterparty_type", &[&source,&external_id,&merchant_id,&record.version,&provenance_id,&pattern,&parent,&m.id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&hints,&region,&negative_aliases,&m.counterparty_type.as_str()])?;
+    c.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases,input_counterparty_type=excluded.input_counterparty_type", &[&source,&external_id,&merchant_id,&record.version,&provenance_id,&pattern,&parent,&input_id,&m.name,&m.website,&m.logo_url,&m.logo_source,&m.markets,&m.aliases,&m.sources,&hints,&region,&negative_aliases,&m.counterparty_type.as_str()])?;
+    crate::store::postgres_store::category_assignments::write(
+        c,
+        crate::store::postgres_store::category_assignments::Owner::Source,
+        &[(external_id, source, &m.category_ids)],
+    )?;
     Ok(())
 }
 #[allow(clippy::too_many_arguments)]
@@ -82,12 +98,12 @@ pub(crate) fn postgres_location_records(
     let location = &record.location;
     let precision = serde_json::to_value(location.precision)?;
     let precision = precision.as_str();
-    c.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,name,precision,address,city,region,postal_code,country,store_number,latitude,longitude,aliases,place_ids,transaction_pattern,manual_override,source_provenance_id) VALUES($1,$2,$3,merchant_key($4),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,name=excluded.name,precision=excluded.precision,address=excluded.address,city=excluded.city,region=excluded.region,postal_code=excluded.postal_code,country=excluded.country,store_number=excluded.store_number,latitude=excluded.latitude,longitude=excluded.longitude,aliases=excluded.aliases,place_ids=excluded.place_ids,transaction_pattern=excluded.transaction_pattern,manual_override=excluded.manual_override,source_provenance_id=excluded.source_provenance_id", &[
+    c.execute("INSERT INTO location_records(id,source,external_id,merchant_id,merchant_source,merchant_external_id,name,precision,address,city,region,postal_code,country,store_number,latitude,longitude,aliases,transaction_pattern,manual_override,source_provenance_id) VALUES($1,$2,$3,merchant_key($4),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,merchant_source=excluded.merchant_source,merchant_external_id=excluded.merchant_external_id,name=excluded.name,precision=excluded.precision,address=excluded.address,city=excluded.city,region=excluded.region,postal_code=excluded.postal_code,country=excluded.country,store_number=excluded.store_number,latitude=excluded.latitude,longitude=excluded.longitude,aliases=excluded.aliases,transaction_pattern=excluded.transaction_pattern,manual_override=excluded.manual_override,source_provenance_id=excluded.source_provenance_id", &[
         &id,&source,&external_id,&merchant_id,&merchant_source,&merchant_external_id,
         &location.name,&precision,&location.address,&location.city,&location.region,
         &location.postal_code,&location.country,&location.store_number,
         &location.latitude,&location.longitude,&record.aliases,
-        &postgres::types::Json(&record.place_ids),&record.transaction_pattern,
+        &record.transaction_pattern,
         &record.manual_override,&provenance_id,
     ])?;
     Ok(())

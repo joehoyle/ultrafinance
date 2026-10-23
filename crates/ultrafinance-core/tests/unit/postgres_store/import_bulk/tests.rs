@@ -432,3 +432,36 @@ fn new_only_buckets_still_respect_multiple_manual_anchors() -> Result<()> {
     assert_eq!(store.stats()?.total, 4);
     Ok(())
 }
+
+#[test]
+fn category_assignments_roundtrip_source_copy_updates_and_manual_columns() -> Result<()> {
+    let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| super::super::super::LOCAL_DATABASE_URL.into());
+    let store = PostgresStore::temporary(&base)?;
+    let mut input: SourceRecord = serde_json::from_value(serde_json::json!({
+        "source":"fixture", "external_id":"1", "attribution":"fixture", "license":"fixture", "url":"https://example.test",
+        "merchant":{"id":"input", "name":"Category Fixture", "category_ids":["one"]}, "raw":{}
+    }))?;
+    store.reconcile_import(vec![input.clone()], false, 1)?;
+    let id = store.resolve_source("fixture", "1")?.unwrap();
+    assert_eq!(store.get(&id)?.unwrap().category_ids, ["one"]);
+    input.merchant.category_ids = vec!["two".into()];
+    store.reconcile_import(vec![input], false, 1)?;
+    assert_eq!(store.get(&id)?.unwrap().category_ids, ["two"]);
+    let sources = store.source_records("fixture", Some("1"), 10, 0)?;
+    assert_eq!(
+        sources[0]["record"]["merchant"]["category_ids"],
+        serde_json::json!(["two"])
+    );
+    let mut manual = store.get(&id)?.unwrap();
+    manual.category_ids = vec!["three".into()];
+    store.put(&manual)?;
+    assert!(
+        store
+            .get(&id)?
+            .unwrap()
+            .category_ids
+            .contains(&"three".into())
+    );
+    Ok(())
+}

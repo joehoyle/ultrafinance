@@ -1606,6 +1606,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-openssl"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06743eefaa1a5c0ef2ccb6d9abf6528790a229eabd62ddcabf9b2a3aeff09fa4"
+dependencies = [
+ "openssl",
+ "tokio",
+ "tokio-openssl",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "postgres-protocol"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2496,6 +2508,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-openssl"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59df6849caa43bb7567f9a36f863c447d95a11d5903c9cc334ba32576a27eadd"
+dependencies = [
+ "openssl",
+ "openssl-sys",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-postgres"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2637,6 +2660,7 @@ dependencies = [
  "axum",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "ultrafinance-core",
@@ -2679,8 +2703,10 @@ dependencies = [
  "anyhow",
  "csv",
  "native-tls",
+ "openssl",
  "postgres",
  "postgres-native-tls",
+ "postgres-openssl",
  "rapidfuzz",
  "regex",
  "reqwest",

@@ -10,7 +10,7 @@ pub fn enrichment(
 ) -> Result<()> {
     use ultrafinance_core::{MerchantResult, location::LocationResult};
     if json {
-        return write_output(&serde_json::to_string_pretty(response)?);
+        return write_output(&crate::result_json::pretty(response)?);
     }
     let mut rendered = format!("Transaction\n  Description: {}\n", text(description));
     rendered.push_str(&format!(
@@ -84,15 +84,6 @@ pub fn enrichment(
             }
         }
     }
-    let mut seen = std::collections::HashSet::new();
-    for credit in &response.attributions {
-        if seen.insert(credit) {
-            if seen.len() == 1 {
-                rendered.push_str("\nAttributions\n");
-            }
-            rendered.push_str(&format!("  • {}\n", text(credit)));
-        }
-    }
     write_output(rendered.trim_end())
 }
 
@@ -101,7 +92,7 @@ pub fn interpretation_formats(
     json: bool,
 ) -> Result<()> {
     if json {
-        return write_output(&serde_json::to_string_pretty(inventory)?);
+        return write_output(&crate::result_json::pretty(inventory)?);
     }
     let mut rendered = format!("Descriptor rules ({})\n", inventory.formats.len());
     for (index, rule) in inventory.formats.iter().enumerate() {
@@ -153,14 +144,12 @@ pub fn interpretation_formats(
 
 fn gazetteer_summary(metadata: &serde_json::Value) -> String {
     format!(
-        "Offline gazetteer: {}\nSnapshot: {} · {} places · {} countries · {} aliases\nSource: {} · License: {}\nRegion mappings: {} ISO mappings; {} regions retain full names.\nAliases: {}\nGeoNames IDs preserve ambiguity; these are locality clues, not outlet evidence.",
+        "Offline gazetteer: {}\nSnapshot: {} · {} places · {} countries · {} aliases\nRegion mappings: {} ISO mappings; {} regions retain full names.\nAliases: {}\nGeoNames IDs preserve ambiguity; these are locality clues, not outlet evidence.",
         metadata["source"].as_str().unwrap_or(""),
         metadata["snapshot_date"].as_str().unwrap_or(""),
         metadata["records"],
         metadata["countries"],
         metadata["aliases"],
-        metadata["source_url"].as_str().unwrap_or(""),
-        metadata["license"].as_str().unwrap_or(""),
         metadata["mapped_regions"],
         metadata["unmapped_regions"],
         metadata["alias_policy"].as_str().unwrap_or("")
@@ -178,7 +167,7 @@ pub fn gazetteer(
         .map(|city| ultrafinance_core::gazetteer::lookup(city, country, region))
         .unwrap_or_default();
     if json {
-        return write_output(&serde_json::to_string_pretty(
+        return write_output(&crate::result_json::pretty(
             &serde_json::json!({"gazetteer":metadata,"matches":matches}),
         )?);
     }
@@ -218,7 +207,7 @@ pub fn gazetteer_list(
     let (total, matches) = ultrafinance_core::gazetteer::list(country, region, limit, offset);
     let metadata = ultrafinance_core::gazetteer::metadata();
     if json {
-        return write_output(&serde_json::to_string_pretty(&serde_json::json!({
+        return write_output(&crate::result_json::pretty(&serde_json::json!({
             "gazetteer": metadata, "total": total, "limit": limit, "offset": offset,
             "matches": matches
         }))?);
@@ -433,9 +422,7 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
             match processor["status"].as_str() {
                 Some("matched") => {
                     rendered.push_str(&format!("Matched stored format: {}\nPattern: {}\nScope: {}\nNo Jev processor request.\n", text(processor["format"]["id"].as_str().unwrap_or("—")), text(processor["format"]["pattern"].as_str().unwrap_or("—")), text(processor["format"]["scope"].as_str().unwrap_or("—"))));
-                    for source in processor["format"]["sources"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str) {
-                        rendered.push_str(&format!("Source: {}\n", text(source)));
-                    }
+
                 }
                 Some("ambiguous_format") => rendered.push_str("Conflicting stored formats matched; descriptor retained. No Jev processor request.\n"),
                 Some("no_format") => rendered.push_str("No stored format matched; descriptor retained. No Jev processor request.\n"),
@@ -720,16 +707,6 @@ fn render_enrichment_details(details: &serde_json::Value) -> Result<String> {
                     .unwrap_or("No supported result available.")
             )
         ));
-        for evidence in research["proposal"]["evidence"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            rendered.push_str(&format!(
-                "Source: {}\n",
-                text(evidence["url"].as_str().unwrap_or("—"))
-            ));
-        }
     } else if details["discovery_attempted"] != true {
         rendered.push_str("No fallback attempted.\n");
     }
@@ -764,7 +741,7 @@ fn catalog_choice<'a>(
 
 pub fn enrichment_logs(logs: &[serde_json::Value], json: bool, offset: usize) -> Result<()> {
     let rendered = if json {
-        serde_json::to_string_pretty(logs)?
+        crate::result_json::pretty(logs)?
     } else if logs.is_empty() {
         format!("No enrichment logs on this page (offset {offset}).")
     } else {
@@ -861,7 +838,7 @@ fn selected_catalog_records(choice: &serde_json::Value) -> String {
 
 pub fn merchant_dedupe(report: &ultrafinance_core::dedupe::Report, json: bool) -> Result<()> {
     if json {
-        return write_output(&serde_json::to_string_pretty(report)?);
+        return write_output(&crate::result_json::pretty(report)?);
     }
     write_output(&render_dedupe(report))
 }
@@ -1012,7 +989,7 @@ fn render_dedupe(report: &ultrafinance_core::dedupe::Report) -> String {
 
 pub fn merchant_search(description: &str, candidates: &[Candidate], json: bool) -> Result<()> {
     if json {
-        return write_output(&serde_json::to_string_pretty(candidates)?);
+        return write_output(&crate::result_json::pretty(candidates)?);
     }
     if candidates.is_empty() {
         return write_output(&format!("No candidates found for {}.", text(description)));
@@ -1054,7 +1031,7 @@ pub fn merchant_search(description: &str, candidates: &[Candidate], json: bool) 
         ]);
     }
     write_output(&format!(
-        "Search: {}\n{table}\n\n{} candidates. Scores measure search similarity; Jev was not called. Use --json for full evidence.",
+        "Search: {}\n{table}\n\n{} candidates. Scores measure search similarity; Jev was not called. Use --json for candidate details.",
         text(description),
         candidates.len()
     ))
@@ -1062,7 +1039,7 @@ pub fn merchant_search(description: &str, candidates: &[Candidate], json: bool) 
 
 pub fn merchant_list(page: &MerchantPage, json: bool) -> Result<()> {
     let rendered = if json {
-        serde_json::to_string_pretty(page)?
+        crate::result_json::pretty(page)?
     } else if page.merchants.is_empty() {
         format!(
             "No merchants on this page. {} total; offset {}.",
@@ -1073,14 +1050,24 @@ pub fn merchant_list(page: &MerchantPage, json: bool) -> Result<()> {
         table
             .load_style(UTF8_FULL_CONDENSED)
             .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(["ID", "Name", "Markets", "Website", "Aliases"]);
+            .set_header(["ID", "Name", "Categories", "Markets", "Website", "Aliases"]);
         if !io::stdout().is_terminal() {
-            table.set_width(120);
+            table.set_width(140);
         }
         for merchant in &page.merchants {
+            let categories = ultrafinance_core::categories::resolve(&merchant.category_ids)
+                .into_iter()
+                .map(|category| category.name.unwrap_or(category.id))
+                .collect::<Vec<_>>()
+                .join(", ");
             table.add_row([
                 text(&merchant.id),
                 text(&merchant.name),
+                text(if categories.is_empty() {
+                    "—"
+                } else {
+                    &categories
+                }),
                 text(&merchant.markets.join(", ")),
                 text(merchant.website.as_deref().unwrap_or("—")),
                 merchant.aliases.len().to_string(),
@@ -1098,18 +1085,7 @@ pub fn merchant_list(page: &MerchantPage, json: bool) -> Result<()> {
 
 pub fn merchant_stats(stats: &MerchantStats, json: bool) -> Result<()> {
     if json {
-        return write_output(&serde_json::to_string_pretty(stats)?);
-    }
-    let mut sources = Table::new();
-    sources
-        .load_style(UTF8_FULL_CONDENSED)
-        .set_header(["Source", "Merchants", "Source records"]);
-    for source in &stats.by_source {
-        sources.add_row([
-            text(&source.source),
-            source.merchants.to_string(),
-            source.records.to_string(),
-        ]);
+        return write_output(&crate::result_json::pretty(stats)?);
     }
     let mut markets = Table::new();
     markets
@@ -1118,24 +1094,9 @@ pub fn merchant_stats(stats: &MerchantStats, json: bool) -> Result<()> {
     for market in &stats.by_market {
         markets.add_row([text(&market.market), market.merchants.to_string()]);
     }
-    let mut regions = Table::new();
-    regions.load_style(UTF8_FULL_CONDENSED).set_header([
-        "Source",
-        "Dataset region",
-        "Merchants",
-        "Source records",
-    ]);
-    for region in &stats.by_source_region {
-        regions.add_row([
-            text(&region.source),
-            text(&region.region),
-            region.merchants.to_string(),
-            region.records.to_string(),
-        ]);
-    }
     write_output(&format!(
-        "Total merchants: {}\nManual entries / corrections: {}\nWithout imported source: {}\nNo known markets: {}\n\nBy source\n{sources}\n\nCounts are distinct per source; a merchant linked to multiple sources appears in each.\n\nBy known market\n{markets}\n\nMarkets are known coverage, not exhaustive. A merchant can count in multiple markets.\n\nBy source dataset region\n{regions}",
-        stats.total, stats.manual, stats.without_source, stats.without_markets
+        "Total merchants: {}\nManual entries / corrections: {}\nNo known markets: {}\n\nBy known market\n{markets}\n\nMarkets are known coverage, not exhaustive. A merchant can count in multiple markets.",
+        stats.total, stats.manual, stats.without_markets
     ))
 }
 
@@ -1154,7 +1115,7 @@ mod dedupe_tests;
 
 pub fn logo_list(page: &ultrafinance_core::logos::LogoPage, json: bool) -> Result<()> {
     if json {
-        return write_output(&serde_json::to_string_pretty(page)?);
+        return write_output(&crate::result_json::pretty(page)?);
     }
     if page.logos.is_empty() {
         return write_output(&format!(
@@ -1166,9 +1127,7 @@ pub fn logo_list(page: &ultrafinance_core::logos::LogoPage, json: bool) -> Resul
     table
         .load_style(UTF8_FULL_CONDENSED)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header([
-            "Website", "Kind", "Original", "Display", "Logo URL", "Checked",
-        ]);
+        .set_header(["Website", "Kind", "Display", "Logo URL", "Checked"]);
     if !io::stdout().is_terminal() {
         table.set_width(120);
     }
@@ -1178,11 +1137,8 @@ pub fn logo_list(page: &ultrafinance_core::logos::LogoPage, json: bool) -> Resul
             logo.kind.as_str().into(),
             format!(
                 "{} {}×{}",
-                text(&logo.original.mime_type),
-                logo.original.width,
-                logo.original.height
+                logo.display.mime_type, logo.display.width, logo.display.height
             ),
-            format!("{}×{}", logo.display.width, logo.display.height),
             text(&logo.display.url),
             text(logo.checked_at.as_deref().unwrap_or("—")),
         ]);
@@ -1201,7 +1157,7 @@ pub fn logo_detail(
     json: bool,
 ) -> Result<()> {
     if json {
-        return write_output(&serde_json::to_string_pretty(&logo)?);
+        return write_output(&crate::result_json::pretty(&logo)?);
     }
     let Some(logo) = logo else {
         return write_output(&format!("No saved logo for {}.", text(website)));
@@ -1217,16 +1173,6 @@ pub fn logo_detail(
     for (label, value) in [
         ("Website", logo.website_url.clone()),
         ("Kind", logo.kind.as_str().into()),
-        ("Source URL", logo.source_url.clone()),
-        ("Original URL", logo.original.url.clone()),
-        ("Original type", logo.original.mime_type.clone()),
-        (
-            "Original size",
-            format!(
-                "{}×{} · {} bytes",
-                logo.original.width, logo.original.height, logo.original.byte_length
-            ),
-        ),
         ("Display URL", logo.display.url.clone()),
         ("Display type", logo.display.mime_type.clone()),
         (

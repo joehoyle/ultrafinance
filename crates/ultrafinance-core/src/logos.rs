@@ -25,6 +25,8 @@ impl LogoKind {
 pub struct ImageAsset {
     /// SHA-256 of the stored bytes; immutable and shared across websites.
     pub id: String,
+    /// Managed assets use /logos/assets/<hash>.<extension>, relative to the API origin.
+    /// Absolute HTTP(S) URLs remain supported for existing records.
     pub url: String,
     pub mime_type: String,
     pub width: u32,
@@ -36,7 +38,6 @@ pub struct WebsiteLogo {
     pub website_url: String,
     pub source_url: String,
     pub kind: LogoKind,
-    pub original: ImageAsset,
     pub display: ImageAsset,
     /// Database timestamp; refreshed only by an explicit discovery run.
     pub checked_at: Option<String>,
@@ -48,6 +49,40 @@ pub struct LogoPage {
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
+}
+
+/// Remove a deployment origin from older managed asset URLs, preserving external logos.
+pub fn asset_url(value: &str, id: &str) -> String {
+    if let Ok(url) = Url::parse(value)
+        && matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && is_asset_path(url.path(), id)
+    {
+        return url.path().to_owned();
+    }
+    value.to_owned()
+}
+
+/// Managed image path, independent of the deployment origin.
+pub fn is_asset_path(value: &str, id: &str) -> bool {
+    let Some(filename) = value.strip_prefix("/logos/assets/") else {
+        return false;
+    };
+    let Some((hash, extension)) = filename.split_once('.') else {
+        return false;
+    };
+    hash == id
+        && hash.len() == 64
+        && hash
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        && matches!(
+            extension,
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "ico" | "svg"
+        )
 }
 
 /// Preserve storefront paths and queries: different shops on one host need not
@@ -73,6 +108,27 @@ pub fn normalize_website(value: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_managed_urls_use_current_origin_but_external_logos_stay_absolute() {
+        let id = "a".repeat(64);
+        let path = format!("/logos/assets/{id}.webp");
+        assert_eq!(
+            asset_url(&format!("https://127.0.0.1:3000{path}"), &id),
+            path
+        );
+        assert_eq!(
+            asset_url(&format!("https://ultrafinance.app{path}"), &id),
+            path
+        );
+        for value in [
+            "https://example.com/logo.png".to_owned(),
+            format!("https://example.com{path}?token=x"),
+            format!("https://example.com/logos/assets/{}.webp", "b".repeat(64)),
+        ] {
+            assert_eq!(asset_url(&value, &id), value);
+        }
+    }
+
     #[test]
     fn normalize_keeps_storefronts_separate() {
         assert_eq!(
@@ -100,6 +156,8 @@ mod tests {
         use crate::{Merchant, store::MerchantStore};
         let store = MerchantStore::temporary().unwrap();
         let mut merchant = Merchant {
+            categories: None,
+            category_ids: vec![],
             counterparty_type: Default::default(),
             id: "example".into(),
             name: "Example".into(),
@@ -125,7 +183,6 @@ mod tests {
                 website_url: "example.com".into(),
                 source_url: "https://example.com/logo.png".into(),
                 kind: LogoKind::Logo,
-                original: asset.clone(),
                 display: asset,
                 checked_at: None,
             })

@@ -9,13 +9,20 @@ use crate::location::LocationRecord;
 use crate::markets::MarketCountries;
 use anyhow::{Context, Result, bail};
 use postgres::{Client, GenericClient, IsolationLevel, Transaction};
+#[cfg(not(target_os = "macos"))]
 use postgres_native_tls::MakeTlsConnector;
+#[cfg(target_os = "macos")]
+use postgres_openssl::MakeTlsConnector;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
+#[path = "postgres_store/category_assignments.rs"]
+pub(crate) mod category_assignments;
+#[path = "postgres_store/foursquare_categories.rs"]
+mod foursquare_categories;
 #[path = "postgres_store/foursquare_identity.rs"]
 mod foursquare_identity;
 #[path = "postgres_store/foursquare_locations.rs"]
@@ -32,6 +39,9 @@ mod logos;
 mod merchant_provenance;
 #[path = "postgres_store/numeric_ids.rs"]
 mod numeric_ids;
+#[cfg(test)]
+#[path = "../tests/unit/postgres_store/performance_tests.rs"]
+mod performance_tests;
 #[path = "postgres_store/processor_formats.rs"]
 mod processor_formats;
 #[path = "postgres_store/read_cache.rs"]
@@ -77,7 +87,7 @@ impl Drop for TemporaryDatabase {
         let name = self.name.clone();
         // Native postgres owns a runtime; construct and drop it off async callers.
         let _ = std::thread::spawn(move || -> Result<()> {
-            let tls = MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?);
+            let tls = tls_connector()?;
             let mut client = config.connect(tls)?;
             client.batch_execute(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))?;
             Ok(())
@@ -86,6 +96,34 @@ impl Drop for TemporaryDatabase {
     }
 }
 const WRITE_LOCK: i64 = 0x756c74726166696e;
+
+fn tls_connector() -> Result<MakeTlsConnector> {
+    // Security.framework rejects Aurora's certificate EKU on macOS. OpenSSL
+    // validates the same chain and hostname without disabling either check.
+    #[cfg(target_os = "macos")]
+    let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())?;
+    #[cfg(not(target_os = "macos"))]
+    let mut builder = native_tls::TlsConnector::builder();
+    // Match the production image's RDS trust roots for local tunneled clients.
+    // Certificate and hostname verification remain enabled.
+    for pem in [
+        include_bytes!("../../../deploy/rds-ca/ca-central-1-1.crt").as_slice(),
+        include_bytes!("../../../deploy/rds-ca/ca-central-1-2.crt").as_slice(),
+        include_bytes!("../../../deploy/rds-ca/ca-central-1-3.crt").as_slice(),
+    ] {
+        #[cfg(target_os = "macos")]
+        builder
+            .cert_store_mut()
+            .add_cert(openssl::x509::X509::from_pem(pem)?)?;
+        #[cfg(not(target_os = "macos"))]
+        builder.add_root_certificate(native_tls::Certificate::from_pem(pem)?);
+    }
+    #[cfg(target_os = "macos")]
+    let connector = MakeTlsConnector::new(builder.build());
+    #[cfg(not(target_os = "macos"))]
+    let connector = MakeTlsConnector::new(builder.build()?);
+    Ok(connector)
+}
 
 impl PostgresStore {
     pub fn temporary(url: &str) -> Result<Self> {
@@ -100,7 +138,7 @@ impl PostgresStore {
         let config = admin.clone();
         let database = name.clone();
         std::thread::spawn(move || -> Result<()> {
-            let tls = MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?);
+            let tls = tls_connector()?;
             let mut client = config.connect(tls).context("local PostgreSQL unavailable; run dev/postgres.sh up or set ULTRAFINANCE_TEST_DATABASE_URL")?;
             client.batch_execute(&format!("CREATE DATABASE \"{database}\" TEMPLATE template0"))?;
             Ok(())
@@ -119,7 +157,7 @@ impl PostgresStore {
         let id = id.to_owned();
         self.run(move |c| {
             let mut tx = c.transaction()?;
-            let row = tx.query_opt("SELECT * FROM merchants WHERE id=$1", &[&id])?;
+            let row = tx.query_opt("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[&id])?;
             row.map(|r| rows::merchant(&r)).transpose()
         })
     }
@@ -195,7 +233,7 @@ impl PostgresStore {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new().name("merchant-postgres".into()).spawn(move || {
             let connect = || -> Result<Client> {
-                let tls = MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?);
+                let tls = tls_connector()?;
                 let mut client = config.connect(tls).context("PostgreSQL connection failed")?;
                 // Server-side expiry continues while Lambda's worker is frozen.
                 client.batch_execute("SET statement_timeout = '15s'; SET lock_timeout = '10s'; SET idle_in_transaction_session_timeout = '30s'; SET idle_session_timeout = '60s'")?;
@@ -317,6 +355,26 @@ impl PostgresStore {
                     if version < 25 {
                         tx.batch_execute(include_str!("../migrations/025_processor_format_revision.sql"))
                             .context("schema migration 25 (processor format cache invalidation) failed")?;
+                    }
+                    if version < 26 {
+                        tx.batch_execute(include_str!("../migrations/026_foursquare_categories.sql"))
+                            .context("schema migration 26 (Foursquare categories) failed")?;
+                    }
+                    if version < 27 {
+                        tx.batch_execute(include_str!("../migrations/027_foursquare_category_assignments.sql"))
+                            .context("schema migration 27 (per-place Foursquare categories) failed")?;
+                    }
+                    if version < 28 {
+                        tx.batch_execute(include_str!("../migrations/028_provider_identifiers.sql"))
+                            .context("schema migration 28 (provider identifier normalization) failed")?;
+                    }
+                    if version < 29 {
+                        tx.batch_execute(include_str!("../migrations/029_category_tables.sql"))
+                            .context("schema migration 29 (category taxonomy and integer references) failed")?;
+                    }
+                    if version < 30 {
+                        tx.batch_execute(include_str!("../migrations/030_foursquare_import_fingerprints.sql"))
+                            .context("schema migration 30 (Foursquare import fingerprints) failed")?;
                     }
                     if version < 4 { refresh_market_lookup(&mut tx,None)?; }
                     // Run historical normalizer backfills after key conversion.
@@ -446,9 +504,15 @@ impl PostgresStore {
     pub fn locations(&self, merchant_id: &str) -> Result<Vec<LocationRecord>> {
         Ok(self.cached_locations(merchant_id)?.as_ref().clone())
     }
-    pub fn cached_locations_many(&self, mut ids: Vec<String>) -> Result<HashMap<String, Arc<Vec<LocationRecord>>>> {
-        if ids.is_empty() { return Ok(HashMap::new()); }
-        ids.sort_unstable(); ids.dedup();
+    pub fn cached_locations_many(
+        &self,
+        mut ids: Vec<String>,
+    ) -> Result<HashMap<String, Arc<Vec<LocationRecord>>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        ids.sort_unstable();
+        ids.dedup();
         let owner = self.0.clone();
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
@@ -551,7 +615,7 @@ impl PostgresStore {
             if source == "foursquare" {
                 return client.query("SELECT external_id,merchant_id FROM source_identities WHERE source='foursquare' AND ($1::text IS NULL OR external_id=$1) ORDER BY external_id LIMIT $2 OFFSET $3", &[&external_id,&limit,&offset])?.iter().map(|r| Ok(serde_json::json!({"merchant_id":r.get::<_,String>("merchant_id"),"record":{"source":"foursquare","external_id":r.get::<_,String>("external_id")},"identity_only":true}))).collect();
             }
-            client.query("SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source=$1 AND ($2::text IS NULL OR external_id=$2) ORDER BY external_id LIMIT $3 OFFSET $4", &[&source,&external_id,&limit,&offset])?.into_iter().map(|row| {
+            client.query("SELECT s.*,source_category_ids(s.source,s.external_id) AS input_category_ids,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source=$1 AND ($2::text IS NULL OR external_id=$2) ORDER BY external_id LIMIT $3 OFFSET $4", &[&source,&external_id,&limit,&offset])?.into_iter().map(|row| {
                 let record = rows::source(&row)?;
                 let mut document = serde_json::to_value(&record)?;
                 // Source listings retain explicit null/empty input fields.
@@ -561,6 +625,9 @@ impl PostgresStore {
                     "logo_url":merchant.logo_url,"logo_source":merchant.logo_source,
                     "markets":merchant.markets,"aliases":merchant.aliases,"sources":merchant.sources
                 });
+                if !merchant.category_ids.is_empty() {
+                    document["merchant"]["category_ids"] = serde_json::json!(merchant.category_ids);
+                }
                 Ok(serde_json::json!({"merchant_id": row.try_get::<_,String>("merchant_id")?, "record": document}))
             }).collect()
         })
@@ -921,11 +988,22 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
         let market = market.map(str::to_owned);
         let entity_type = entity_type.map(|t| t.as_str());
         let sql_offset = i64::try_from(offset)?;
+        let owner = self.0.clone();
         self.run(move |client| {
             let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
-            let total: i64 = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) AND ($2::text IS NULL OR m.counterparty_type=$2)", &[&market,&entity_type])?.get(0);
+            let total: i64 = {
+                let mut reads = owner.reads.lock().unwrap();
+                reads.refresh(&mut tx)?;
+                let key = (market.clone(), entity_type.map(str::to_owned));
+                if let Some(total) = reads.catalog_totals.get(&key) { *total } else {
+                    let total = tx.query_one("SELECT COUNT(*) FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) AND ($2::text IS NULL OR m.counterparty_type=$2)", &[&market,&entity_type])?.get(0);
+                    if reads.catalog_totals.len() >= 1024 { reads.catalog_totals.clear(); }
+                    reads.catalog_totals.insert(key,total);
+                    total
+                }
+            };
             let mut merchants = Vec::new();
-            for row in tx.query("SELECT m.* FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) AND ($4::text IS NULL OR m.counterparty_type=$4) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset,&entity_type])? {
+            for row in tx.query("SELECT m.*,merchant_category_ids(m.id) AS category_ids,category_details(merchant_category_ids(m.id))::text AS resolved_categories FROM merchants m WHERE ($1::text IS NULL OR m.markets @> ARRAY[$1::text]) AND ($4::text IS NULL OR m.counterparty_type=$4) ORDER BY lower(name) COLLATE \"C\",id LIMIT $2 OFFSET $3", &[&market,&(limit as i64),&sql_offset,&entity_type])? {
                 merchants.push(rows::merchant(&row)?);
             }
             let page = MerchantPage {merchants,total:usize::try_from(total)?,limit,offset};
@@ -933,19 +1011,40 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             Ok(page)
         })
     }
-    pub fn cached_searches(&self, descriptions: Vec<String>, country: Option<String>, limit: usize, primary: bool) -> Result<Option<HashMap<String, Vec<Candidate>>>> {
+    pub fn cached_searches(
+        &self,
+        descriptions: Vec<String>,
+        country: Option<String>,
+        limit: usize,
+        primary: bool,
+    ) -> Result<Option<HashMap<String, Vec<Candidate>>>> {
         let owner = self.0.clone();
         self.run(move |client| {
-            let mut tx = client.build_transaction().isolation_level(IsolationLevel::RepeatableRead).read_only(true).start()?;
+            let mut tx = client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()?;
             let mut reads = owner.reads.lock().unwrap();
             reads.refresh(&mut tx)?;
-            let types: Vec<_> = if primary { vec![Some("merchant"),Some("financial_institution")] } else { vec![None] };
+            let types: Vec<_> = if primary {
+                vec![Some("merchant"), Some("financial_institution")]
+            } else {
+                vec![None]
+            };
             let mut output = HashMap::new();
             for description in descriptions {
                 let mut pool = Vec::new();
                 for entity_type in &types {
-                    let key = read_cache::SearchKey { description: description.clone(), country: country.clone(), limit, entity_type:entity_type.map(str::to_owned) };
-                    let Some(candidates) = reads.cached_search(&key) else { return Ok(None); };
+                    let key = read_cache::SearchKey {
+                        description: description.clone(),
+                        country: country.clone(),
+                        limit,
+                        entity_type: entity_type.map(str::to_owned),
+                    };
+                    let Some(candidates) = reads.cached_search(&key) else {
+                        return Ok(None);
+                    };
                     pool.extend(candidates);
                 }
                 output.insert(description, pool);
@@ -1096,8 +1195,13 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             }
             // Trust and negative aliases affect eligibility/ranking. Read only
             // those fields for the retrieval pool, then hydrate the shortlist.
+            if found.is_empty() {
+                owner.reads.lock().unwrap().cache_search(cache_key, vec![]);
+                tx.commit()?;
+                return Ok(vec![]);
+            }
             let ids: Vec<_> = found.keys().cloned().collect();
-            for row in tx.query("SELECT * FROM manual_merchants WHERE id=ANY($1)", &[&ids])? {
+            for row in tx.query("SELECT *,merchant_category_ids(id,true) AS category_ids FROM manual_merchants WHERE id=ANY($1)", &[&ids])? {
                 let manual = rows::merchant(&row)?;
                 if let Some(candidate) = found.get_mut(&manual.id) {
                     candidate.trusted = std::iter::once(&manual.name).chain(&manual.aliases)
@@ -1115,11 +1219,11 @@ SELECT merchant_public_id(c.left_id),merchant_public_id(c.right_id),c.exact,a.no
             let mut shortlisted = rank_candidates(found, limit, country.as_deref());
             let ids: Vec<_> = shortlisted.iter().map(|c| c.merchant.id.clone()).collect();
             let mut merchants: HashMap<String, Merchant> = tx
-                .query("SELECT * FROM merchants WHERE id=ANY($1)", &[&ids])?
+                .query("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=ANY($1)", &[&ids])?
                 .into_iter()
                 .map(|row| Ok((row.get("id"), rows::merchant(&row)?)))
                 .collect::<Result<_>>()?;
-            let mut sources = merchant_provenance::read(&mut tx, &ids)?;
+            let mut sources = merchant_provenance::read_with_merchants(&mut tx, &ids, &merchants)?;
             for candidate in &mut shortlisted {
                 candidate.merchant = merchants.remove(&candidate.merchant.id)
                     .context("shortlisted merchant disappeared within its snapshot")?;
@@ -1171,7 +1275,10 @@ fn postgres_markets(
             "$1::text[] IS NULL".into()
         }
     };
-    let manual_sql = format!("SELECT * FROM manual_merchants WHERE {}", filter("id"));
+    let manual_sql = format!(
+        "SELECT *,merchant_category_ids(id,true) AS category_ids FROM manual_merchants WHERE {}",
+        filter("id")
+    );
     for row in tx.query(&manual_sql, &[&ids])? {
         index.declaration(row.get("id"), &rows::merchant(&row)?);
     }
@@ -1215,6 +1322,8 @@ fn add_candidate(
 ) -> Result<()> {
     // Rank with just identity, names and markets; hydrate the final shortlist.
     let merchant = Merchant {
+        categories: None,
+        category_ids: vec![],
         counterparty_type: Default::default(),
         id: row.get(0),
         name: row.get(1),
@@ -1275,7 +1384,7 @@ fn rebuild_with_market_refresh(
     refresh_markets: bool,
 ) -> Result<()> {
     let mut merchant = tx
-        .query_opt("SELECT * FROM manual_merchants WHERE id=$1", &[&id])?
+        .query_opt("SELECT *,merchant_category_ids(id,true) AS category_ids FROM manual_merchants WHERE id=$1", &[&id])?
         .map(|r| rows::merchant(&r))
         .transpose()?;
     typed_sources::for_each(tx, &[id.to_owned()], |record| {
@@ -1378,7 +1487,7 @@ fn refresh_market_lookup(c: &mut impl GenericClient, ids: Option<&[String]>) -> 
             .collect(),
     };
     for id in ids {
-        if let Some(row) = c.query_opt("SELECT * FROM merchants WHERE id=$1", &[&id])? {
+        if let Some(row) = c.query_opt("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[&id])? {
             let merchant = rows::merchant(&row)?;
             let markets = index.hydrate(merchant).markets;
             c.execute(
@@ -1448,7 +1557,7 @@ fn import_records(
         .map(|m| m.id.clone())
         .collect();
     let previous_query =
-        tx.prepare("SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source=$1 AND external_id=$2")?;
+        tx.prepare("SELECT s.*,source_category_ids(s.source,s.external_id) AS input_category_ids,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE s.source=$1 AND external_id=$2")?;
     let merchant_query = tx.prepare("SELECT id FROM merchants WHERE id=$1")?;
     for (index, record) in records.iter().enumerate() {
         let previous: Option<(String, SourceRecord)> = if baseline.is_some() {
@@ -1566,13 +1675,14 @@ fn merge_groups(tx: &mut Transaction<'_>, groups: &[Vec<String>]) -> Result<()> 
             let fsq: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM source_identities WHERE source='foursquare' AND merchant_id=$1)", &[retired])?.get(0);
             if fsq {
                 let mut target_merchant = rows::merchant(
-                    &tx.query_one("SELECT * FROM merchants WHERE id=$1", &[target])?,
+                    &tx.query_one("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[target])?,
                 )?;
                 let retired_merchant = rows::merchant(
-                    &tx.query_one("SELECT * FROM merchants WHERE id=$1", &[retired])?,
+                    &tx.query_one("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[retired])?,
                 )?;
+                let before = HashMap::from([(target_merchant.id.clone(), target_merchant.clone())]);
                 crate::dedupe::combine(&mut target_merchant, &retired_merchant);
-                import_bulk::write_current_merchants(tx, &[target_merchant])?;
+                import_bulk::write_current_merchants(tx, &[target_merchant], &before)?;
             }
             tx.execute(
                 "UPDATE foursquare_unlocated SET merchant_id=merchant_key($1) WHERE merchant_id=merchant_key($2)",
@@ -1702,7 +1812,7 @@ fn postgres_snapshot_for_ids_inner(
 ) -> Result<crate::dedupe::Snapshot> {
     let merchants = c
         .query(
-            "SELECT * FROM merchants WHERE id=ANY($1) ORDER BY id",
+            "SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=ANY($1) ORDER BY id",
             &[&ids],
         )?
         .iter()
@@ -1710,7 +1820,7 @@ fn postgres_snapshot_for_ids_inner(
         .collect::<Result<_>>()?;
     let manual = c
         .query(
-            "SELECT * FROM manual_merchants WHERE id=ANY($1) ORDER BY id",
+            "SELECT *,merchant_category_ids(id,true) AS category_ids FROM manual_merchants WHERE id=ANY($1) ORDER BY id",
             &[&ids],
         )?
         .iter()

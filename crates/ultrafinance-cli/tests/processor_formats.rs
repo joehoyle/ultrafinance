@@ -45,6 +45,11 @@ fn researched_formats_import_preview_and_enrichment_need_no_provider() {
     let listed: Value =
         serde_json::from_slice(&run(&["processor-formats", "list"]).stdout).unwrap();
     assert_eq!(listed[0]["processor_id"], "test-processor");
+    assert!(listed[0].get("sources").is_none());
+    assert_eq!(
+        store.processor_formats().unwrap()[0].sources,
+        vec!["https://example.test/docs"]
+    );
     assert!(listed[0].get("positive_examples").is_none());
     assert!(listed[0].get("negative_examples").is_none());
     let matched: Value =

@@ -740,3 +740,30 @@ about 18% for merchants-only and 16% for the full import. The earlier isolated
 SQL key experiment excluded preparation/grouping and is not an end-to-end
 speedup forecast. Results describe fresh loads, not the duration or temporary
 disk requirements of migrating an existing large database.
+
+### Reprocessing existing places
+
+Use the normal import command after upgrading to schema 29; no special backfill
+mode is required. Imports resolve existing provider IDs, compare current fields,
+and write only changed records. Category or logo edits retain alias/search and
+identity-index rows. Address edits update the affected outlet; country edits also
+refresh merchant coverage. Identical replays retain the catalog revision and API
+read caches. Schema 30 caches applied input fingerprints: identical places skip merchant
+loading and reconciliation after one regular pass populates the cache. Changes
+to merchant state, ownership or place assignments invalidate affected entries.
+Fresh imports still validate and sort the CSV; resume checkpoints
+continue interrupted work rather than replaying completed rows.
+
+Merchant categories are taken from the place that creates the merchant. Later
+Foursquare places and category updates do not change those merchant categories.
+Per-place assignments are still retained and updated independently; imports do
+not aggregate them back into merchant categories. Existing merchant categories
+are preserved without a backfill. A complete reimport is required
+after migration 27 because old merchant category unions cannot be unambiguously
+assigned back to their original places.
+
+Schema 29 stores taxonomy names and hierarchy in `categories` and assignments in
+integer foreign-key tables. It migrates existing category evidence without
+requiring another import. The full import described above is necessary only when
+category evidence was never imported after schema 26/27. API category names and
+paths come from the database; updating taxonomy rows needs no application rebuild.

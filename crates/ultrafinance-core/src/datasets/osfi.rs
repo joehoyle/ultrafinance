@@ -84,6 +84,8 @@ pub fn prepare(contents: &str) -> Result<Vec<SourceRecord>> {
                 source: "osfi".into(),
                 external_id: external_id.clone(),
                 merchant: Counterparty {
+                    categories: None,
+                    category_ids: vec![],
                     id: format!("osfi:{external_id}"),
                     name: (*name).into(),
                     counterparty_type: CounterpartyType::FinancialInstitution,

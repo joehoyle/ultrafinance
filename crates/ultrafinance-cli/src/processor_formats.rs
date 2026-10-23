@@ -14,7 +14,7 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List stored formats and research provenance as JSON.
+    /// List stored descriptor formats as JSON.
     List,
     /// Test stored formats against a descriptor without enrichment or provider calls.
     Match { description: String },
@@ -35,11 +35,11 @@ pub fn run(args: Args, database_url: Option<&str>) -> Result<()> {
                 bail!("descriptor must be nonblank and at most 4096 bytes");
             }
             let mut matches = store.processor_format_matches(&[description])?;
-            println!("{}", serde_json::to_string_pretty(&matches.remove(0))?);
+            println!("{}", crate::result_json::pretty(&matches.remove(0))?);
         }
         Command::List => println!(
             "{}",
-            serde_json::to_string_pretty(&store.processor_formats()?)?
+            crate::result_json::pretty(&store.processor_formats()?)?
         ),
         Command::Import { file, dry_run } => {
             let mut contents = Vec::new();

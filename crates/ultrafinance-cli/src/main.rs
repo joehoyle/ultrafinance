@@ -9,6 +9,7 @@ mod logos;
 mod output;
 mod processor_formats;
 mod research;
+mod result_json;
 mod sources;
 mod text_enrich;
 use anyhow::{Context, Result, bail};
@@ -162,7 +163,7 @@ enum LocationCommand {
     Import { file: PathBuf },
     /// Evaluate location-only labels offline with geography and outlet accuracy.
     Eval { file: PathBuf },
-    /// List catalog outlets for a local merchant ID, including provenance.
+    /// List catalog outlets without source metadata.
     List {
         merchant_id: String,
         /// Show original source records instead of consolidated outlets.
@@ -677,7 +678,7 @@ async fn main() -> Result<()> {
             request.validate()?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ultrafinance_core::interpretation::interpret(
+                crate::result_json::pretty(&ultrafinance_core::interpretation::interpret(
                     &request
                 ))?
             );
@@ -685,10 +686,9 @@ async fn main() -> Result<()> {
         Command::Resolutions { command } => {
             let store = MerchantStore::configured(cli.database_url.as_deref())?;
             match command {
-                ResolutionCommand::List { limit } => println!(
-                    "{}",
-                    serde_json::to_string_pretty(&store.resolutions(None, limit)?)?
-                ),
+                ResolutionCommand::List { limit } => {
+                    println!("{}", result_json::pretty(&store.resolutions(None, limit)?)?)
+                }
                 ResolutionCommand::Confirm { id, evidence } => {
                     let mut mapping = store
                         .resolutions(Some(&id), 1)?
@@ -793,7 +793,7 @@ async fn main() -> Result<()> {
                 let suite = serde_json::from_str(&std::fs::read_to_string(file)?)?;
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&ultrafinance_core::location::evaluate(
+                    crate::result_json::pretty(&ultrafinance_core::location::evaluate(
                         &store, suite
                     )?)?
                 );
@@ -812,14 +812,20 @@ async fn main() -> Result<()> {
             }
             LocationCommand::List { merchant_id, raw } => {
                 let store = MerchantStore::configured(cli.database_url.as_deref())?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&if raw {
-                        store.location_sources(&merchant_id)?
-                    } else {
-                        store.locations(&merchant_id)?
-                    })?
-                );
+                if raw {
+                    // Explicit source administration retains re-importable records.
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&store.location_sources(&merchant_id)?)?
+                    );
+                } else {
+                    let owner = store.resolve_merchant_id(&merchant_id)?;
+                    let records: Vec<_> = store.locations(&merchant_id)?.into_iter().map(|record| serde_json::json!({
+                        "merchant":{"merchant_id":owner},"location":record.location,"aliases":record.aliases,
+                        "transaction_pattern":record.transaction_pattern,"manual_override":record.manual_override
+                    })).collect();
+                    println!("{}", result_json::pretty(&records)?);
+                }
             }
         },
         Command::Datasets { command } => match command {
@@ -1056,10 +1062,7 @@ async fn main() -> Result<()> {
                     }
                 })
                 .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&BatchEnrichResponse { results })?
-            );
+            println!("{}", result_json::pretty(&BatchEnrichResponse { results })?);
             if failed {
                 bail!("some transactions failed; see results above");
             }
@@ -1106,7 +1109,7 @@ async fn main() -> Result<()> {
                     let merchant = store
                         .get(&id)?
                         .with_context(|| format!("merchant not found: {id}"))?;
-                    println!("{}", serde_json::to_string_pretty(&merchant)?);
+                    println!("{}", result_json::pretty(&merchant)?);
                 }
                 MerchantCommand::Stats { json } => {
                     output::merchant_stats(&store.stats()?, json)?;
@@ -1125,6 +1128,8 @@ async fn main() -> Result<()> {
                     markets.sort();
                     markets.dedup();
                     let merchant = Merchant {
+                        categories: None,
+                        category_ids: vec![],
                         counterparty_type,
                         id: id.unwrap_or_else(|| format!("mer_{}", uuid::Uuid::new_v4().simple())),
                         name,
@@ -1138,7 +1143,7 @@ async fn main() -> Result<()> {
                         sources,
                     };
                     store.put(&merchant)?;
-                    println!("{}", serde_json::to_string_pretty(&merchant)?);
+                    println!("{}", result_json::pretty(&merchant)?);
                 }
                 MerchantCommand::List {
                     counterparty_type,
@@ -1187,12 +1192,11 @@ async fn main() -> Result<()> {
                     };
                     let selection = dedupe.select(&mut records);
                     let count = records.len();
-                    let attribution = records.first().map(|r| r.attribution.clone());
                     let result =
                         ultrafinance_core::dedupe::import(store, records, dedupe.options()).await?;
                     println!(
                         "{}",
-                        serde_json::json!({"imported":if result.dedupe.dry_run {0} else {count},"attributions":attribution,"reconciliation":result,"selection":selection})
+                        serde_json::json!({"imported":if result.dedupe.dry_run {0} else {count},"reconciliation":result,"selection":selection})
                     );
                 }
                 MerchantCommand::Link {

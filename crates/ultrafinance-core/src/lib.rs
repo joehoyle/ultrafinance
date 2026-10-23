@@ -1,5 +1,6 @@
 pub mod batch;
 mod business;
+pub mod categories;
 mod columns;
 pub mod datasets;
 pub mod dedupe;
@@ -94,6 +95,12 @@ impl EnrichRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Counterparty {
+    /// Database-resolved taxonomy metadata; never persisted as merchant input.
+    #[serde(skip)]
+    pub categories: Option<Vec<categories::Category>>,
+    /// Assigned Foursquare Places OS category IDs; these describe the business, not purchased items.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub category_ids: Vec<String>,
     /// Explicit catalog classification, independent of transaction kind.
     #[serde(default, rename = "type")]
     pub counterparty_type: CounterpartyType,
@@ -114,6 +121,23 @@ pub struct Counterparty {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
 }
+
+// Resolved metadata is a read projection, not part of the merchant input.
+impl PartialEq for Counterparty {
+    fn eq(&self, other: &Self) -> bool {
+        self.category_ids == other.category_ids
+            && self.counterparty_type == other.counterparty_type
+            && self.id == other.id
+            && self.name == other.name
+            && self.markets == other.markets
+            && self.website == other.website
+            && self.logo_url == other.logo_url
+            && self.logo_source == other.logo_source
+            && self.aliases == other.aliases
+            && self.sources == other.sources
+    }
+}
+impl Eq for Counterparty {}
 
 /// Backwards-compatible name for a catalog identity. New code may use Counterparty.
 pub type Merchant = Counterparty;
@@ -307,9 +331,17 @@ impl Enricher {
     }
 
     pub async fn enrich(&self, request: &EnrichRequest) -> Result<EnrichResponse> {
-        self.enrich_batch(std::slice::from_ref(request))
+        let started = std::time::Instant::now();
+        let result = self
+            .enrich_batch(std::slice::from_ref(request))
             .await
-            .remove(0)
+            .remove(0);
+        eprintln!(
+            "Enrichment timing: stage=total elapsed_ms={} success={}",
+            started.elapsed().as_millis(),
+            result.is_ok()
+        );
+        result
     }
 
     /// Return evidence from the same enrichment run, including failed decisions.

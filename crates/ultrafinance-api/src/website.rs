@@ -51,9 +51,7 @@ fn display_json(value: &Value, depth: usize) -> String {
                 "markets",
                 "website",
                 "logo_url",
-                "logo_source",
                 "location",
-                "attributions",
             ];
             let mut keys: Vec<_> = object.keys().collect();
             keys.sort_by_key(|key| {

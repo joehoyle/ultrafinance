@@ -24,7 +24,9 @@ impl Group {
         }
     }
     fn add(&mut self, record: &SourceRecord) {
+        let categories = std::mem::take(&mut self.merchant.category_ids);
         import_bulk::combine_source(&mut self.merchant, &record.merchant, &record.url);
+        self.merchant.category_ids = categories;
         let hints: Vec<_> = record.raw["countryHints"]
             .as_array()
             .into_iter()
@@ -129,7 +131,7 @@ pub(super) fn load(
             records.push(record);
         }
         import_bulk::write_initial_merchants(tx, &merchants)?;
-        foursquare_identity::persist(tx, &records, &owners, true)?;
+        foursquare_identity::persist_initial(tx, &records, &owners)?;
         selected += records.len();
         progress.report(selected);
     }

@@ -30,3 +30,7 @@ strsim.workspace = true
 [[bench]]
 name = "enrich"
 harness = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+openssl.workspace = true
+postgres-openssl.workspace = true

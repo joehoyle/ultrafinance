@@ -36,3 +36,5 @@ credentials.tfrc.json
 .aws/
 .codex/
 .agents/
+
+/logos/

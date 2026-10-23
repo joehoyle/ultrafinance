@@ -988,7 +988,6 @@ async fn fallback_new_match_creates_merchant_with_descriptor_alias() -> Result<(
         website_url: "https://novel.test/".into(),
         source_url: "https://novel.test/logo.png".into(),
         kind: crate::logos::LogoKind::Logo,
-        original: asset.clone(),
         display: asset,
         checked_at: None,
     })?;

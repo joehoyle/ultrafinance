@@ -9,12 +9,11 @@ use ultrafinance_core::logos::ImageAsset;
 pub struct Storage {
     directory: Option<PathBuf>,
     bucket: Option<String>,
-    base: reqwest::Url,
 }
 impl Storage {
-    pub fn new(directory: Option<PathBuf>, bucket: Option<String>, base: &str) -> Result<Self> {
-        if directory.is_some() == bucket.is_some() {
-            bail!("choose exactly one of --directory or --bucket");
+    pub fn new(directory: Option<PathBuf>, bucket: Option<String>) -> Result<Self> {
+        if directory.is_some() && bucket.is_some() {
+            bail!("choose only one of --directory or --bucket");
         }
         if let Some(bucket) = &bucket
             && (bucket.is_empty()
@@ -24,22 +23,9 @@ impl Storage {
         {
             bail!("invalid S3 bucket name");
         }
-        let base = reqwest::Url::parse(base)?;
-        if base.scheme() != "https"
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-            || base.path() != "/"
-        {
-            bail!("public base URL must be a credential-free HTTPS origin");
-        }
-        Ok(Self {
-            directory,
-            bucket,
-            base,
-        })
+        let local = bucket.is_none();
+        let directory = directory.or_else(|| local.then(|| PathBuf::from("./logos")));
+        Ok(Self { directory, bucket })
     }
     pub fn publish(
         &self,
@@ -48,7 +34,6 @@ impl Storage {
         ext: &str,
         width: u32,
         height: u32,
-        original: bool,
     ) -> Result<ImageAsset> {
         let id: String = Sha256::digest(bytes)
             .iter()
@@ -57,7 +42,7 @@ impl Storage {
         // One immutable location per content hash, shared across associations.
         let key = format!("logos/assets/{id}.{ext}");
         if let Some(directory) = &self.directory {
-            let path = directory.join(&key);
+            let path = directory.join(format!("assets/{id}.{ext}"));
             std::fs::create_dir_all(path.parent().unwrap())?;
             let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
             temporary.write_all(bytes)?;
@@ -77,11 +62,7 @@ impl Storage {
                     "--cache-control",
                     "public,max-age=31536000,immutable",
                     "--content-disposition",
-                    if original && mime == "image/svg+xml" {
-                        "attachment"
-                    } else {
-                        "inline"
-                    },
+                    "inline",
                     "--only-show-errors",
                 ])
                 .stdin(Stdio::null())
@@ -93,7 +74,7 @@ impl Storage {
         }
         Ok(ImageAsset {
             id,
-            url: self.base.join(&key)?.to_string(),
+            url: format!("/{key}"),
             mime_type: mime.into(),
             width,
             height,
@@ -108,39 +89,23 @@ mod tests {
     #[test]
     fn stores_immutable_files_with_matching_metadata() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::new(
-            Some(directory.path().into()),
-            None,
-            "https://assets.example.com",
-        )
-        .unwrap();
+        let storage = Storage::new(Some(directory.path().into()), None).unwrap();
         let asset = storage
-            .publish(b"example bytes", "image/webp", "webp", 16, 16, false)
+            .publish(b"example bytes", "image/webp", "webp", 16, 16)
             .unwrap();
         let again = storage
-            .publish(b"example bytes", "image/webp", "webp", 16, 16, true)
+            .publish(b"example bytes", "image/webp", "webp", 16, 16)
             .unwrap();
         assert_eq!(asset.id, again.id);
         assert_eq!(asset.url, again.url);
-        let path = Url::parse(&asset.url)
-            .unwrap()
-            .path()
-            .trim_start_matches('/')
-            .to_owned();
+        assert_eq!(asset.url, format!("/logos/assets/{}.webp", asset.id));
         assert_eq!(
-            std::fs::read(directory.path().join(path)).unwrap(),
+            std::fs::read(directory.path().join(format!("assets/{}.webp", asset.id))).unwrap(),
             b"example bytes"
         );
         assert_eq!(asset.byte_length, 13);
-        assert!(
-            Storage::new(
-                Some(directory.path().into()),
-                None,
-                "https://user:secret@assets.example.com"
-            )
-            .is_err()
-        );
-        assert!(Storage::new(None, None, "https://assets.example.com").is_err());
+        assert!(Storage::new(None, None).is_ok());
+        assert!(Storage::new(None, Some("bucket".into())).is_ok());
+        assert!(Storage::new(Some(directory.path().into()), Some("bucket".into())).is_err());
     }
-    use reqwest::Url;
 }

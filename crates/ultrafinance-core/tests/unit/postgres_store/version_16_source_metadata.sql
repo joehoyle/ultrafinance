@@ -1,3 +1,4 @@
+UPDATE source_records SET input_id=external_id WHERE input_id IS NULL;
 -- Remove version-18 additions before constructing a historical schema.
 DROP VIEW source_identities;
 DROP TABLE foursquare_unlocated;

@@ -74,7 +74,8 @@ pub fn refresh(root: &Path, site: &str) -> Result<()> {
 
 fn capture(mut saved: Value, response: Value, endpoint: &str, time: &str) -> Result<Value> {
     verify_response(&saved, &response)?;
-    saved["response"] = response;
+    // Older live releases can still return metadata removed from public results.
+    saved["response"] = crate::result_json::value(&response)?;
     saved["endpoint"] = endpoint.into();
     saved["captured_at"] = time.into();
     Ok(saved)

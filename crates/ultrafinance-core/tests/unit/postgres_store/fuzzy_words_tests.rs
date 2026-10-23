@@ -46,7 +46,9 @@ fn adaptive_words_preserve_legacy_threshold_exact_exclusion_and_boundary_ties() 
             "cached token {token}"
         );
     }
-    let threshold: String = tx.query_one("SHOW pg_trgm.similarity_threshold", &[])?.get(0);
+    let threshold: String = tx
+        .query_one("SHOW pg_trgm.similarity_threshold", &[])?
+        .get(0);
     assert_eq!(threshold, "0.3");
     Ok(())
 }

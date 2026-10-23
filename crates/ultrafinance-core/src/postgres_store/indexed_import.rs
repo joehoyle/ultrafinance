@@ -9,8 +9,8 @@ const DETAILS: usize = 5000;
 // the entire catalog to be cheaper. OFFSET 0 prevents flattening these lateral
 // probes; each incoming key uses the existing primary key. Do not replace with
 // an unrestricted join: it repeatedly scanned source_records in the Canada run.
-const SOURCE_LOOKUP: &str = "SELECT s.*,p.attribution,p.license,p.url FROM unnest($1::text[],$2::text[]) AS i(source,external_id) CROSS JOIN LATERAL (SELECT * FROM source_records s WHERE s.source=i.source AND s.external_id=i.external_id OFFSET 0) s JOIN source_provenance p ON p.id=s.source_provenance_id ORDER BY s.source,s.external_id";
-const MERCHANT_LOOKUP: &str = "SELECT m.* FROM (SELECT DISTINCT unnest($1::text[]) AS id) i CROSS JOIN LATERAL (SELECT * FROM merchants m WHERE m.id=i.id OFFSET 0) m ORDER BY m.id";
+const SOURCE_LOOKUP: &str = "SELECT s.*,source_category_ids(s.source,s.external_id) AS input_category_ids,p.attribution,p.license,p.url FROM unnest($1::text[],$2::text[]) AS i(source,external_id) CROSS JOIN LATERAL (SELECT * FROM source_records s WHERE s.source=i.source AND s.external_id=i.external_id OFFSET 0) s JOIN source_provenance p ON p.id=s.source_provenance_id ORDER BY s.source,s.external_id";
+const MERCHANT_LOOKUP: &str = "SELECT m.*,merchant_category_ids(m.id) AS category_ids FROM (SELECT DISTINCT unnest($1::text[]) AS id) i CROSS JOIN LATERAL (SELECT * FROM merchants m WHERE m.id=i.id OFFSET 0) m ORDER BY m.id";
 
 pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
     let mut after = String::new();
@@ -25,6 +25,8 @@ pub(super) fn backfill(tx: &mut Transaction<'_>) -> Result<()> {
         let merchants: Vec<Merchant> = rows
             .into_iter()
             .map(|r| Merchant {
+                categories: None,
+                category_ids: vec![],
                 counterparty_type: r.get::<_, &str>(3).parse().expect("checked catalog type"),
                 id: r.get(0),
                 name: r.get(1),

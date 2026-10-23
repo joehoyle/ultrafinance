@@ -10,6 +10,7 @@ mod dump_progress;
 mod example;
 mod import_db;
 mod persistent;
+mod prod_db;
 mod progress;
 mod release;
 mod sessions;
@@ -33,6 +34,10 @@ enum InfraCommand {
         /// Release an already-pushed immutable ECR digest without rebuilding.
         #[arg(long)]
         image: Option<String>,
+        /// Reuse the saved homepage example when the current live API is unavailable.
+        /// Candidate and live enrichment checks still run before/after promotion.
+        #[arg(long, conflicts_with = "image")]
+        reuse_example: bool,
     },
     /// Capture a real API response for the static homepage example.
     RefreshExample {
@@ -77,6 +82,15 @@ enum InfraCommand {
     },
     /// Copy the full production database into the default local PostgreSQL database.
     ImportDb,
+    /// Run a local process connected to production through a temporary database tunnel.
+    WithProdDb {
+        /// Reject database writes for this process.
+        #[arg(long)]
+        read_only: bool,
+        /// Local executable and arguments, after -- (for example: cargo run -- enrich ...).
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<std::ffi::OsString>,
+    },
     /// Replace production with the local PostgreSQL database. Deletes the old data after cutover.
     UploadDb(upload_db::Options),
     /// Stop all production CLI tasks, including any active shell sessions.
@@ -163,7 +177,10 @@ fn output(root: &Path, name: &str) -> Result<String> {
 pub fn run(args: InfraArgs) -> Result<()> {
     let root = workspace(args.workspace)?;
     match args.command {
-        InfraCommand::Deploy { image } => release::deploy(&root, image.as_deref()),
+        InfraCommand::Deploy {
+            image,
+            reuse_example,
+        } => release::deploy(&root, image.as_deref(), reuse_example),
         InfraCommand::RefreshExample { site_url } => example::refresh(&root, &site_url),
         InfraCommand::Cli {
             image,
@@ -203,6 +220,7 @@ pub fn run(args: InfraArgs) -> Result<()> {
             wait_hours.unwrap_or(6),
         ),
         InfraCommand::ImportDb => import_db::run(&root),
+        InfraCommand::WithProdDb { read_only, command } => prod_db::run(&root, read_only, &command),
         InfraCommand::UploadDb(options) => upload_db::run(&root, options),
         InfraCommand::CliCleanup => cleanup::run(&root),
         InfraCommand::Logs { since, follow } => {

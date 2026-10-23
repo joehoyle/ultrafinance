@@ -23,6 +23,7 @@ pub(super) struct SearchKey {
 #[derive(Default)]
 pub(super) struct ReadCache {
     revision: Option<i64>,
+    pub(super) catalog_totals: HashMap<(Option<String>, Option<String>), i64>,
     searches: HashMap<SearchKey, Vec<Candidate>>,
     search_order: std::collections::VecDeque<SearchKey>,
     search_rows: usize,
@@ -86,7 +87,7 @@ impl ReadCache {
             .filter(|f| f.enabled)
         {
             let Some(row) = tx.query_opt(
-                "SELECT * FROM merchants WHERE id=$1 AND counterparty_type='payment_processor'",
+                "SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1 AND counterparty_type='payment_processor'",
                 &[&format.processor_id],
             )?
             else {
@@ -136,15 +137,21 @@ impl ReadCache {
         missing.sort_unstable();
         missing.dedup();
         if !missing.is_empty() {
-            let mut expanded: HashMap<&str, Vec<String>> = missing.iter()
-                .map(|&token| (token, vec![])).collect();
+            let mut expanded: HashMap<&str, Vec<String>> =
+                missing.iter().map(|&token| (token, vec![])).collect();
             // Four results above 0.5 are also the original top four above 0.3.
             // Only tokens with fewer results need the broader, expensive scan.
             // Keep the same exact-word exclusion and similarity/lexical order.
             for threshold in ["0.5", "0.3"] {
-                if missing.is_empty() { break; }
-                tx.batch_execute(&format!("SET LOCAL pg_trgm.similarity_threshold='{threshold}'"))?;
-                for token in &missing { expanded.get_mut(token).unwrap().clear(); }
+                if missing.is_empty() {
+                    break;
+                }
+                tx.batch_execute(&format!(
+                    "SET LOCAL pg_trgm.similarity_threshold='{threshold}'"
+                ))?;
+                for token in &missing {
+                    expanded.get_mut(token).unwrap().clear();
+                }
                 let rows = tx.query(
                     "SELECT query.word,fuzzy.word FROM unnest($1::text[]) query(word)
                     CROSS JOIN LATERAL (
@@ -155,7 +162,10 @@ impl ReadCache {
                     &[&missing],
                 )?;
                 for row in rows {
-                    expanded.get_mut(row.get::<_, &str>(0)).unwrap().push(row.get(1));
+                    expanded
+                        .get_mut(row.get::<_, &str>(0))
+                        .unwrap()
+                        .push(row.get(1));
                 }
                 missing.retain(|token| expanded[token].len() < 4);
             }
@@ -183,52 +193,69 @@ impl ReadCache {
         tx: &mut Transaction<'_>,
         id: &str,
     ) -> Result<Arc<Vec<LocationRecord>>> {
-        self.refresh(tx)?;
-        self.load_outlets(tx, id)
+        let mut records = self.outlets_many(tx, &[id.to_owned()])?;
+        Ok(records.remove(id).unwrap())
     }
     pub(super) fn outlets_many(
         &mut self,
         tx: &mut Transaction<'_>,
         ids: &[String],
     ) -> Result<HashMap<String, Arc<Vec<LocationRecord>>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
         self.refresh(tx)?;
         let mut output = HashMap::new();
+        let mut missing = Vec::new();
         for id in ids {
-            output.insert(id.clone(), self.load_outlets(tx, id)?);
+            if let Some(records) = self.outlets.get(id) {
+                output.insert(id.clone(), records.clone());
+            } else {
+                missing.push(id.clone());
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        if missing.is_empty() {
+            return Ok(output);
+        }
+        let mut grouped: HashMap<String, Vec<LocationRecord>> = HashMap::new();
+        // Keep each numeric owner visible to the planner. One bounded index
+        // lookup per owner, without one client/server round trip per owner.
+        let records = tx
+            .query(
+                "SELECT l.*,m.id AS public_merchant_id,p.attribution,p.license,p.url
+            FROM merchants m CROSS JOIN LATERAL (
+                SELECT * FROM location_records WHERE merchant_id=m.merchant_key OFFSET 0
+            ) l JOIN source_provenance p ON p.id=l.source_provenance_id
+            WHERE m.id=ANY($1) ORDER BY m.id,l.id",
+                &[&missing],
+            )
+            .context("Candidate outlet batch query failed")?;
+        let mut location_ids = Vec::new();
+        for row in records {
+            let record = rows::location(&row)?;
+            location_ids.extend(record.location.id.iter().cloned());
+            grouped
+                .entry(row.get("public_merchant_id"))
+                .or_default()
+                .push(record);
+        }
+        let redirects = tx.query("WITH RECURSIVE links AS (SELECT retired_id,location_id FROM location_redirects WHERE retired_id=ANY($1) UNION SELECT d.retired_id,d.location_id FROM location_redirects d JOIN links l ON d.retired_id=l.location_id) SELECT retired_id,location_id FROM links", &[&location_ids])?
+            .into_iter().map(|r| (r.get(0), r.get(1))).collect();
+        for id in missing {
+            let records = Arc::new(crate::location_dedupe::consolidate(
+                grouped.remove(&id).unwrap_or_default(),
+                &redirects,
+            ));
+            if self.outlets.len() >= 512 || self.outlet_rows + records.len() > 50_000 {
+                self.outlets.clear();
+                self.outlet_rows = 0;
+            }
+            self.outlet_rows += records.len();
+            self.outlets.insert(id.clone(), records.clone());
+            output.insert(id, records);
         }
         Ok(output)
-    }
-    fn load_outlets(
-        &mut self,
-        tx: &mut Transaction<'_>,
-        id: &str,
-    ) -> Result<Arc<Vec<LocationRecord>>> {
-        if let Some(records) = self.outlets.get(id) {
-            return Ok(records.clone());
-        }
-        let records: Vec<_> = location_rows(tx, Some(id))?
-            .into_iter()
-            .map(|(_, r)| r)
-            .collect();
-        let ids: Vec<_> = records
-            .iter()
-            .filter_map(|r| r.location.id.clone())
-            .collect();
-        // Follow redirects only for these outlets, rather than reading every
-        // location redirect in the catalog on every merchant lookup.
-        let redirects = tx.query("WITH RECURSIVE links AS (SELECT retired_id,location_id FROM location_redirects WHERE retired_id=ANY($1) UNION SELECT d.retired_id,d.location_id FROM location_redirects d JOIN links l ON d.retired_id=l.location_id) SELECT retired_id,location_id FROM links", &[&ids])?
-            .into_iter().map(|r| (r.get(0), r.get(1))).collect();
-        let records = Arc::new(crate::location_dedupe::consolidate(records, &redirects));
-        // Bound retained memory, while allowing one large chain to be reused.
-        // Several role/hypothesis pools can contribute more than 64 distinct
-        // identities to one request. Retain that bounded working set without
-        // increasing the existing 50,000-record memory budget.
-        if self.outlets.len() >= 512 || self.outlet_rows + records.len() > 50_000 {
-            self.outlets.clear();
-            self.outlet_rows = 0;
-        }
-        self.outlet_rows += records.len();
-        self.outlets.insert(id.into(), records.clone());
-        Ok(records)
     }
 }

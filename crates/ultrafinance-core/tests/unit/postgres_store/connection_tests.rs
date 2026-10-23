@@ -43,6 +43,7 @@ fn version_eleven_import_host_index_preserves_catalog_and_supports_host_lookup()
     let revision: i64 = lease.run(|client| {
         client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute(
             "DROP INDEX merchant_identity_rule_host; UPDATE ultrafinance_schema SET version=11; UPDATE merchant_identity_keys SET rule_name='cafe',rule_host='yp.ca' WHERE normalized_name='cafe'",
         )?;
@@ -76,6 +77,7 @@ fn version_nine_merge_audits_are_removed_without_losing_identity() -> Result<()>
         )?.get::<_, bool>(0));
         client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute("CREATE TABLE merchant_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); CREATE TABLE location_merge_runs(id TEXT PRIMARY KEY,data TEXT NOT NULL); INSERT INTO merchant_merge_runs VALUES('merchant-audit','{}'); INSERT INTO location_merge_runs VALUES('location-audit','{}'); INSERT INTO merchant_redirects VALUES('retired','survivor'); UPDATE ultrafinance_schema SET version=9")?;
         Ok(())
     })?;
@@ -155,7 +157,7 @@ fn version_eight_legacy_views_are_migrated_before_import() -> Result<()> {
         for table in ["merchants", "manual_merchants", "source_records"] {
             assert!(client.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.role_table_grants WHERE table_schema='public' AND table_name=$1 AND grantee='PUBLIC' AND privilege_type='SELECT')", &[&table])?.get::<_, bool>(0));
         }
-        let row = client.query_one("SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id", &[])?;
+        let row = client.query_one("SELECT s.*,source_category_ids(s.source,s.external_id) AS input_category_ids,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id", &[])?;
         let record = rows::source(&row)?;
         assert_eq!(record.raw["countryHints"], serde_json::json!(["CA"]));
         Ok(())
@@ -492,7 +494,7 @@ fn schema_upgrade_waits_for_readers_without_extending_runtime_timeouts() -> Resu
     let blocker_url = url.clone();
     let (ready, acquired) = std::sync::mpsc::channel();
     let blocker = std::thread::spawn(move || -> Result<()> {
-        let tls = MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?);
+        let tls = tls_connector()?;
         let mut client = Client::connect(&blocker_url, tls)?;
         let mut tx = client.transaction()?;
         tx.batch_execute("LOCK TABLE merchants_documents IN ACCESS SHARE MODE")?;
@@ -674,6 +676,7 @@ fn version_fifteen_removes_unused_indexes_without_changing_evidence() -> Result<
     let id = lease.resolve_source("merchant-studio", "alpha")?;
     let revision: i64 = lease.run(|client| {
         client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_16_source_metadata.sql")))?;
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute("CREATE INDEX merchant_search_trigrams ON merchant_search USING GIN(text gin_trgm_ops); CREATE INDEX merchant_identity_name ON merchant_identity_keys(normalized_name); UPDATE ultrafinance_schema SET version=15")?;
         Ok(client.query_one("SELECT revision FROM catalog_revision", &[])?.get(0))
     })?;
@@ -780,6 +783,7 @@ fn version_nineteen_counterparty_migration_preserves_legacy_identities() -> Resu
     )?;
     store.put(&merchant)?;
     store.run(|c| {
+        c.batch_execute(include_str!("version_28_categories.sql"))?;
         c.batch_execute("ALTER TABLE merchants DROP COLUMN counterparty_type; ALTER TABLE manual_merchants DROP COLUMN counterparty_type; ALTER TABLE source_records DROP COLUMN input_counterparty_type; UPDATE ultrafinance_schema SET version=19")?;
         Ok(())
     })?;
@@ -827,6 +831,7 @@ fn version_twenty_upgrades_types_without_changing_existing_identities() -> Resul
         for (table,column) in [("merchants","counterparty_type"),("manual_merchants","counterparty_type"),("source_records","input_counterparty_type")] {
             client.batch_execute(&format!("ALTER TABLE {table} DROP CONSTRAINT {table}_{column}_check; ALTER TABLE {table} ADD CONSTRAINT {table}_{column}_check CHECK ({column} IN ('merchant','financial_institution'))"))?;
         }
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute("UPDATE ultrafinance_schema SET version=20")?;
         Ok(())
     })?;
@@ -867,6 +872,7 @@ fn version_twenty_one_adds_covering_type_index_and_preserves_keys() -> Result<()
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     let keys: Vec<i64> = lease.run(|client| {
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute(
             "DROP INDEX merchants_counterparty_type_key;
              INSERT INTO merchants(id,name,counterparty_type)
@@ -917,6 +923,7 @@ fn version_twenty_three_removes_examples_and_preserves_processor_rules() -> Resu
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     lease.run(|client| {
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute(
             "INSERT INTO merchants(id,name,counterparty_type) VALUES('fixture-processor','Fixture Processor','payment_processor');
              INSERT INTO processor_formats(id,processor_id,pattern,sources,reviewed_on,scope,notes,enabled)
@@ -956,6 +963,7 @@ fn version_twenty_two_adds_processor_format_catalog() -> Result<()> {
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let lease = PostgresStore::temporary(&base)?;
     lease.run(|client| {
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute(
             "DROP TABLE processor_formats; UPDATE ultrafinance_schema SET version=22",
         )?;

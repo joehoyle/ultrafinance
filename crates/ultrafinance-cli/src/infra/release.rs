@@ -290,19 +290,19 @@ fn release(client: &impl Lambda, image: &str) -> Result<(String, String)> {
     Ok((version, text(&previous, "FunctionVersion")?.to_owned()))
 }
 
-pub fn deploy(root: &Path, image: Option<&str>) -> Result<()> {
+pub fn deploy(root: &Path, image: Option<&str>, reuse_example: bool) -> Result<()> {
     let aws = Aws::configured(root)?;
     let function = super::output(root, "function_name")?;
     let image = if let Some(image) = image {
         validate_image(image)?;
         image.to_owned()
     } else {
-        build(root, &aws)?
+        build(root, &aws, reuse_example)?
     };
     promote(root, &aws, &function, &image)
 }
 
-fn build(root: &Path, aws: &Aws) -> Result<String> {
+fn build(root: &Path, aws: &Aws, reuse_example: bool) -> Result<String> {
     let repository = super::output(root, "repository_url")?;
     let (registry, name) = repository
         .split_once('/')
@@ -337,7 +337,18 @@ fn build(root: &Path, aws: &Aws) -> Result<String> {
         metadata.version(env!("CARGO_PKG_VERSION"))
     );
     // Capture before compiling: the snapshot is embedded in the immutable image.
-    super::example::refresh(root, &super::output(root, "site_url")?)?;
+    if reuse_example {
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(root.join("website/example.json"))?)?;
+        serde_json::from_value::<ultrafinance_core::EnrichRequest>(saved["request"].clone())?
+            .validate()?;
+        super::example::verify_response(&saved, &saved["response"])?;
+        eprintln!(
+            "Reusing saved homepage example; candidate and live enrichment checks remain required"
+        );
+    } else {
+        super::example::refresh(root, &super::output(root, "site_url")?)?;
+    }
     let mut command = Command::new("docker");
     command.current_dir(root).args([
         "buildx",

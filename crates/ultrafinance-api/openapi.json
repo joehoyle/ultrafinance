@@ -200,7 +200,6 @@
                       "counterparties": [
                         {
                           "id": "mer_example",
-                          "logo_source": "official website",
                           "logo_url": "https://example.com/logo.png",
                           "markets": [
                             "CA"
@@ -217,7 +216,6 @@
                       "merchant": {
                         "data": {
                           "id": "mer_example",
-                          "logo_source": "official website",
                           "logo_url": "https://example.com/logo.png",
                           "markets": [
                             "CA"
@@ -607,6 +605,48 @@
           }
         ]
       },
+      "Category": {
+        "type": "object",
+        "required": [
+          "id",
+          "path"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "ID in the Foursquare Places OS taxonomy."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Missing when a provider ID has no known taxonomy name."
+          },
+          "path": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategoryNode"
+            },
+            "description": "Root through leaf, including this category. Empty for unknown IDs."
+          }
+        }
+      },
+      "CategoryNode": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "Counterparty": {
         "allOf": [
           {
@@ -739,13 +779,6 @@
           "location"
         ],
         "properties": {
-          "attributions": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Source attribution for matched merchants and outlets. Omitted when empty."
-          },
           "counterparties": {
             "type": "array",
             "items": {
@@ -996,23 +1029,23 @@
           "name"
         ],
         "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Category"
+            },
+            "description": "Foursquare business categories, with paths ordered from root to leaf. Omitted when unknown."
+          },
           "id": {
             "type": "string",
             "description": "Stable ID in this service's merchant catalog."
-          },
-          "logo_source": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Attribution for the logo URL, such as an official website or import source."
           },
           "logo_url": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Verified public image URL for the merchant brand, when available."
+            "description": "Brand image URL, when available. Resolve /logos/assets/... paths against the API origin."
           },
           "markets": {
             "type": "array",

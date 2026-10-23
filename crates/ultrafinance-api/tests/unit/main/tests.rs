@@ -33,7 +33,8 @@ async fn enrichment_responses_hide_aliases_but_still_match_them() {
         {"id":"beta","name":"Beta Shop","markets":["US"],
          "website":"https://beta.example","logo_url":"https://beta.example/logo.png",
          "logo_source":"official website","aliases":["BETA BILL"],
-         "sources":["https://source.example"]}
+         "sources":["https://source.example"],
+         "category_ids":["5109983191d435c0d71c2bb1"]}
     ]))
     .unwrap();
     let app = router(Enricher::new(None, "jev-latest".into(), 0.95, merchants).unwrap());
@@ -74,17 +75,28 @@ async fn enrichment_responses_hide_aliases_but_still_match_them() {
             result["merchant"]["data"]["logo_url"],
             "https://beta.example/logo.png"
         );
+        assert!(result["merchant"]["data"].get("logo_source").is_none());
+        assert!(result.get("attributions").is_none());
         assert_eq!(
-            result["merchant"]["data"]["logo_source"],
-            "official website"
+            result["merchant"]["data"]["categories"][0]["name"],
+            "Attraction"
         );
+        assert_eq!(
+            result["merchant"]["data"]["categories"][0]["path"][0]["name"],
+            "Arts and Entertainment"
+        );
+        assert_eq!(
+            result["counterparties"][0]["categories"],
+            result["merchant"]["data"]["categories"]
+        );
+        assert!(result["merchant"]["data"].get("category_ids").is_none());
         assert!(result["merchant"]["data"].get("aliases").is_none());
         assert!(result["merchant"]["data"].get("sources").is_none());
     }
 }
 
 #[test]
-fn public_enrichment_keeps_kind_and_attributions_without_merchant_sources() {
+fn public_enrichment_keeps_kind_without_source_metadata() {
     let internal: ultrafinance_core::EnrichResponse = serde_json::from_value(json!({
         "kind": "refund",
         "merchant": {"status":"matched", "data": {
@@ -97,10 +109,7 @@ fn public_enrichment_keeps_kind_and_attributions_without_merchant_sources() {
     let public = serde_json::to_value(response::EnrichResponse::from(internal)).unwrap();
     assert_eq!(public["kind"], "refund");
     assert!(public["merchant"]["data"].get("sources").is_none());
-    assert_eq!(
-        public["attributions"],
-        json!(["Example source (CC-BY-4.0, https://source.example)"])
-    );
+    assert!(public.get("attributions").is_none());
 }
 
 #[tokio::test]
@@ -202,7 +211,7 @@ async fn catalog_browsing_search_and_validation_work_without_provider_calls() {
                 page["merchants"][0]["logo_url"],
                 "https://alpha.example/logo.svg"
             );
-            assert_eq!(page["merchants"][0]["logo_source"], "official website");
+            assert!(page["merchants"][0].get("logo_source").is_none());
         }
         assert!(
             page["merchants"]
@@ -278,6 +287,16 @@ async fn served_openapi_matches_reviewed_contract_and_docs_are_available() {
     assert!(
         spec["components"]["schemas"]["Merchant"]["properties"]
             .get("sources")
+            .is_none()
+    );
+    assert!(
+        spec["components"]["schemas"]["Merchant"]["properties"]
+            .get("logo_source")
+            .is_none()
+    );
+    assert!(
+        spec["components"]["schemas"]["EnrichResponse"]["properties"]
+            .get("attributions")
             .is_none()
     );
     assert_eq!(
@@ -593,4 +612,23 @@ async fn counterparties_are_typed_public_records_and_merchants_stay_compatible()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn public_categories_use_database_resolved_taxonomy() -> anyhow::Result<()> {
+    let mut merchant: ultrafinance_core::Merchant = serde_json::from_value(serde_json::json!({
+        "id":"taxonomy-projection", "name":"Example", "category_ids":["5109983191d435c0d71c2bb1"]
+    }))?;
+    merchant.categories = Some(vec![ultrafinance_core::categories::Category {
+        id: "5109983191d435c0d71c2bb1".into(),
+        name: Some("Database-maintained name".into()),
+        path: vec![],
+    }]);
+    let response = serde_json::to_value(crate::response::Merchant::from(merchant))?;
+    assert_eq!(
+        response["categories"][0]["name"],
+        "Database-maintained name"
+    );
+    assert!(response.get("category_ids").is_none());
+    Ok(())
 }

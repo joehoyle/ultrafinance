@@ -1,3 +1,7 @@
+-- Historic catalogs did not have the additive pagination subsystem.
+-- Reconstruct the pre-28 provider map for historic migration fixtures.
+ALTER TABLE location_records ADD COLUMN IF NOT EXISTS place_ids JSONB NOT NULL DEFAULT '{}';
+UPDATE source_records SET input_id=external_id WHERE input_id IS NULL;
 -- Remove version-18 additions before constructing a historical schema.
 DROP VIEW source_identities;
 DROP TABLE foursquare_unlocated;

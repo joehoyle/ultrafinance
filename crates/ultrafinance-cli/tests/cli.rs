@@ -154,10 +154,16 @@ fn interpret_lists_live_formats_without_database_or_provider() {
     let output = run(&["interpret", "--list-formats", "--json"], None);
     assert!(output.status.success());
     let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let internal = serde_json::to_value(ultrafinance_core::interpretation::formats()).unwrap();
+    assert_eq!(inventory["formats"], internal["formats"]);
+    assert_eq!(inventory["processors"], internal["processors"]);
     assert_eq!(
-        inventory,
-        serde_json::to_value(ultrafinance_core::interpretation::formats()).unwrap()
+        inventory["gazetteer"]["records"],
+        internal["gazetteer"]["records"]
     );
+    for key in ["source", "source_url", "license"] {
+        assert!(inventory["gazetteer"].get(key).is_none());
+    }
     assert!(
         inventory["formats"]
             .as_array()
@@ -1094,7 +1100,7 @@ fn merchant_stats_counts_linked_sources_and_missing_markets() {
     let empty: Value = serde_json::from_slice(&invoke(true)).unwrap();
     assert_eq!(
         empty,
-        json!({"total":0,"manual":0,"without_source":0,"by_source":[],"without_markets":0,"by_market":[],"by_source_region":[]})
+        json!({"total":0,"manual":0,"without_markets":0,"by_market":[]})
     );
     let store = MerchantStore::postgres(db).unwrap();
     let catalog = r#"[{"id":"one","name":"One","markets":["CA"]},{"id":"two","name":"Two","markets":["CA"]}]"#;
@@ -1123,18 +1129,14 @@ fn merchant_stats_counts_linked_sources_and_missing_markets() {
     assert_eq!(
         stats,
         json!({
-            "total":2,"manual":2,"without_source":1,
-            "by_source":[{"source":"alpha","merchants":1,"records":2},{"source":"beta","merchants":1,"records":1}],
-            "without_markets":1,"by_market":[{"market":"CA","merchants":1}],"by_source_region":[]
+            "total":2,"manual":2,
+            "without_markets":1,"by_market":[{"market":"CA","merchants":1}]
         })
     );
     let text = String::from_utf8(invoke(false)).unwrap();
     for expected in [
         "Total merchants: 2",
         "Manual entries / corrections: 2",
-        "Without imported source: 1",
-        "alpha",
-        "beta",
         "No known markets: 1",
         "CA",
     ] {
@@ -1515,6 +1517,19 @@ if name=='pg_dump':
   assert os.environ['PGSSLMODE']=='require'
   Path(args[args.index('--file')+1]).write_bytes(b'snapshot')
 elif name=='psql': print('1')
+elif name=='local_probe':
+ from urllib.parse import urlsplit,parse_qs
+ url=urlsplit(os.environ['ULTRAFINANCE_DATABASE_URL'])
+ assert url.hostname=='database.internal' and url.username=='admin'
+ assert parse_qs(url.query)['hostaddr']==['127.0.0.1']
+ assert url.password=='PRIVATE_FIXTURE_PASSWORD' and url.path=='/finance'
+ assert parse_qs(url.query)['options']==['-c default_transaction_read_only=on']
+ assert os.environ['PGPASSWORD']=='PRIVATE_FIXTURE_PASSWORD'
+ assert os.environ['PGOPTIONS']=='-c default_transaction_read_only=on'
+ assert os.environ['PGSSLMODE']=='verify-full'
+ assert 'BEGIN CERTIFICATE' in Path(os.environ['PGSSLROOTCERT']).read_text()
+ assert args==['--example','value']
+ if os.environ.get('IMPORT_FAIL')=='probe': sys.exit(7)
 elif name=='pg_restore':
  assert '--single-transaction' in args
  assert '--no-owner' in args and '--no-privileges' in args
@@ -1550,6 +1565,7 @@ elif name=='aws':
         "pg_restore",
         "psql",
         "session-manager-plugin",
+        "local_probe",
         "aws",
         "tofu",
     ] {
@@ -1615,6 +1631,44 @@ elif name=='aws':
             !std::path::Path::new(path).exists(),
             "temporary dump should be removed"
         );
+    }
+    for fail in ["", "probe"] {
+        std::fs::write(root.join("calls"), "").unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_ultrafinance"))
+            .current_dir(root)
+            .env("PATH", root.join("bin"))
+            .env("IMPORT_FIXTURE", root)
+            .env("IMPORT_FAIL", fail)
+            .env("AWS_PROFILE", "fixture")
+            .env("AWS_REGION", "fixture")
+            .env(
+                "ULTRAFINANCE_DATABASE_URL",
+                "postgresql://old-local-setting",
+            )
+            .args([
+                "infra",
+                "with-prod-db",
+                "--read-only",
+                "--",
+                "local_probe",
+                "--example",
+                "value",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            fail.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let calls = std::fs::read_to_string(root.join("calls")).unwrap();
+        assert!(calls.contains("stop-task"));
+        assert!(calls.contains("deregister-task-definition"));
+        assert!(calls.contains("local_probe"));
+        assert!(!calls.contains("PRIVATE_FIXTURE_PASSWORD"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("PRIVATE_FIXTURE_PASSWORD"));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("PRIVATE_FIXTURE_PASSWORD"));
     }
 }
 
@@ -1791,7 +1845,9 @@ fn locations_cli_lists_consolidated_outlets_raw_sources_and_dedupe_previews() {
     };
     let consolidated = execute(&["list", "brand"]);
     assert_eq!(consolidated.as_array().unwrap().len(), 1);
-    assert_eq!(consolidated[0]["provenance"].as_array().unwrap().len(), 2);
+    assert!(consolidated[0].get("provenance").is_none());
+    assert!(consolidated[0].get("source").is_none());
+    assert_eq!(consolidated[0]["merchant"]["merchant_id"], "brand");
     let raw = execute(&["list", "brand", "--raw"]);
     assert_eq!(raw.as_array().unwrap().len(), 2);
     let before = serde_json::to_value(store.location_sources("brand").unwrap()).unwrap();
@@ -1986,7 +2042,6 @@ fn logos_list_and_get_show_saved_metadata_without_discovery() {
                 website_url: website.into(),
                 source_url: "https://official.example/logo.png".into(),
                 kind: LogoKind::Logo,
-                original: asset.clone(),
                 display: asset.clone(),
                 checked_at: None,
             })
@@ -2015,11 +2070,12 @@ fn logos_list_and_get_show_saved_metadata_without_discovery() {
     assert_eq!(page["logos"][0]["display"]["mime_type"], "image/webp");
     let detail: Value = serde_json::from_str(&invoke(&["get", "b.example", "--json"])).unwrap();
     assert_eq!(detail, page["logos"][0]);
+    assert!(detail.get("original").is_none());
+    assert!(detail.get("source_url").is_none());
     let table = invoke(&["list", "--limit", "1"]);
     for expected in [
         "Website",
         "Kind",
-        "Original",
         "Display",
         "Logo URL",
         "Checked",
@@ -2030,18 +2086,14 @@ fn logos_list_and_get_show_saved_metadata_without_discovery() {
         assert!(table.contains(expected), "{expected} missing from {table}");
     }
     let detail = invoke(&["get", "b.example"]);
-    for expected in [
-        "Source URL",
-        "Original type",
-        "Display type",
-        "100 bytes",
-        "https://cdn.example/logo.webp",
-    ] {
+    for expected in ["Display type", "100 bytes", "https://cdn.example/logo.webp"] {
         assert!(
             detail.contains(expected),
             "{expected} missing from {detail}"
         );
     }
+    assert!(!detail.contains("Source URL"));
+    assert!(!detail.contains("https://official.example/logo.png"));
     assert!(invoke(&["list", "--offset", "10"]).contains("No logos on this page. 3 total"));
     assert_eq!(invoke(&["get", "missing.example", "--json"]).trim(), "null");
     assert!(invoke(&["get", "missing.example"]).contains("No saved logo"));
@@ -2303,4 +2355,342 @@ fn payment_processors_can_be_added_listed_and_searched_by_type() {
         call(&["merchants", "list", "--type", "merchant", "--json"])["total"],
         0
     );
+}
+
+#[test]
+fn logos_market_dry_run_selects_unique_missing_merchant_websites() {
+    use ultrafinance_core::{
+        logos::{ImageAsset, LogoKind, WebsiteLogo},
+        store::MerchantStore,
+    };
+    let store = MerchantStore::temporary().unwrap();
+    for (id, markets, website, manual, kind) in [
+        (
+            "ca-a",
+            vec!["CA"],
+            Some("https://a.example"),
+            None,
+            "merchant",
+        ),
+        (
+            "ca-a-branch",
+            vec!["CA", "US"],
+            Some("https://a.example/#top"),
+            None,
+            "merchant",
+        ),
+        (
+            "ca-b",
+            vec!["CA"],
+            Some("https://b.example/shop"),
+            None,
+            "merchant",
+        ),
+        (
+            "ca-cached",
+            vec!["CA"],
+            Some("https://cached.example/"),
+            None,
+            "merchant",
+        ),
+        (
+            "ca-manual",
+            vec!["CA"],
+            Some("https://manual.example/"),
+            Some("https://manual.example/logo.png"),
+            "merchant",
+        ),
+        (
+            "us-only",
+            vec!["US"],
+            Some("https://us.example/"),
+            None,
+            "merchant",
+        ),
+        ("ca-no-site", vec!["CA"], None, None, "merchant"),
+        (
+            "ca-bank",
+            vec!["CA"],
+            Some("https://bank.example/"),
+            None,
+            "financial_institution",
+        ),
+    ] {
+        let merchant = serde_json::from_value(json!({"id":id,"name":id,"markets":markets,"website":website,"logo_url":manual,"type":kind})).unwrap();
+        store.put(&merchant).unwrap();
+    }
+    let asset = ImageAsset {
+        id: "a".repeat(64),
+        url: format!("/logos/assets/{}.webp", "a".repeat(64)),
+        mime_type: "image/webp".into(),
+        width: 16,
+        height: 16,
+        byte_length: 4,
+    };
+    store
+        .save_website_logo(&WebsiteLogo {
+            website_url: "https://cached.example/".into(),
+            source_url: "https://cached.example/logo.png".into(),
+            kind: LogoKind::Logo,
+            display: asset,
+            checked_at: None,
+        })
+        .unwrap();
+    let invoke = |extra: &[&str]| {
+        let mut args = vec![
+            "--database-url",
+            store.temporary_url(),
+            "logos",
+            "discover",
+            "--market",
+            "ca",
+            "--dry-run",
+        ];
+        args.extend_from_slice(extra);
+        let output = run(&args, None);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(
+        invoke(&[]),
+        "Remaining websites: 2\nSelected for this run: 2\n"
+    );
+    assert_eq!(
+        invoke(&["--limit", "1"]),
+        "Remaining websites: 2\nSelected for this run: 1\n"
+    );
+    assert_eq!(
+        invoke(&["--refresh"]),
+        "Websites eligible for refresh: 3\nSelected for this run: 3\n"
+    );
+    assert!(store.website_logo("https://a.example").unwrap().is_none());
+    let mut saved = store
+        .website_logo("https://cached.example")
+        .unwrap()
+        .unwrap();
+    for website in ["https://a.example/", "https://b.example/shop"] {
+        saved.website_url = website.into();
+        store.save_website_logo(&saved).unwrap();
+    }
+    assert_eq!(
+        invoke(&[]),
+        "Remaining websites: 0\nSelected for this run: 0\n"
+    );
+    let output = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "logos",
+            "discover",
+            "--dry-run",
+            "https://a.example",
+            "https://a.example/#top",
+            "https://new.example",
+        ],
+        None,
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Remaining websites: 1\nSelected for this run: 1\n"
+    );
+    for args in [
+        vec!["logos", "discover", "--market", "Canada", "--dry-run"],
+        vec!["logos", "discover", "--market", "CA", "https://example.com"],
+        vec!["logos", "discover", "--market", "CA", "--limit", "0"],
+        vec![
+            "logos",
+            "discover",
+            "--market",
+            "CA",
+            "--image-url",
+            "https://example.com/logo.png",
+        ],
+    ] {
+        assert!(!run(&args, None).status.success());
+    }
+}
+
+#[test]
+fn logos_workers_reuse_cached_logos_deduplicate_inputs_and_report_partial_failures() {
+    use ultrafinance_core::{
+        logos::{ImageAsset, LogoKind, WebsiteLogo},
+        store::MerchantStore,
+    };
+    let store = MerchantStore::temporary().unwrap();
+    let asset = ImageAsset {
+        id: "a".repeat(64),
+        url: format!("/logos/assets/{}.webp", "a".repeat(64)),
+        mime_type: "image/webp".into(),
+        width: 16,
+        height: 16,
+        byte_length: 4,
+    };
+    for website in ["https://a.example/", "https://b.example/"] {
+        store
+            .save_website_logo(&WebsiteLogo {
+                website_url: website.into(),
+                source_url: "https://official.example/logo.png".into(),
+                kind: LogoKind::Logo,
+                display: asset.clone(),
+                checked_at: None,
+            })
+            .unwrap();
+    }
+    let output = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "logos",
+            "discover",
+            "--workers",
+            "2",
+            "https://a.example",
+            "https://a.example/#top",
+            "ftp://invalid.example",
+            "https://b.example",
+        ],
+        None,
+    );
+    assert!(!output.status.success());
+    let mut websites: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["website_url"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    websites.sort();
+    assert_eq!(websites, ["https://a.example/", "https://b.example/"]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("[3/3]"), "{stderr}");
+    assert!(stderr.contains("1 website(s) failed"), "{stderr}");
+    let output = run(
+        &[
+            "--database-url",
+            store.temporary_url(),
+            "logos",
+            "discover",
+            "--threads",
+            "1",
+            "https://a.example",
+            "https://b.example",
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let websites: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["website_url"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(websites, ["https://a.example/", "https://b.example/"]);
+    for workers in ["0", "65"] {
+        assert!(
+            !run(
+                &[
+                    "logos",
+                    "discover",
+                    "--workers",
+                    workers,
+                    "https://a.example",
+                    "--dry-run"
+                ],
+                None
+            )
+            .status
+            .success()
+        );
+    }
+}
+
+#[test]
+fn logos_market_progress_suppresses_individual_results_and_errors() {
+    use ultrafinance_core::store::MerchantStore;
+    let store = MerchantStore::temporary().unwrap();
+    let run_market = || {
+        run(
+            &[
+                "--database-url",
+                store.temporary_url(),
+                "logos",
+                "discover",
+                "--market",
+                "CA",
+                "--workers",
+                "2",
+            ],
+            None,
+        )
+    };
+    let empty = run_market();
+    assert!(empty.status.success());
+    assert!(empty.stdout.is_empty());
+    assert!(
+        String::from_utf8(empty.stderr)
+            .unwrap()
+            .contains("0/0 (100.0%)")
+    );
+    // Nonstandard ports fail validation before any network request, so this
+    // exercises real market scheduling and failure reporting entirely offline.
+    for (id, website) in [
+        ("one", "https://one.example:444/"),
+        ("two", "https://two.example:444/"),
+    ] {
+        store
+            .put(
+                &serde_json::from_value(
+                    json!({"id":id,"name":id,"markets":["CA"],"website":website}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let output = run_market();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("2/2 (100.0%)"), "{stderr}");
+    assert!(stderr.contains("0 saved, 2 failed"), "{stderr}");
+    assert!(
+        !stderr.contains("one.example") && !stderr.contains("two.example"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("standard HTTP(S) ports"), "{stderr}");
+    assert!(
+        !stderr.contains('\r') && !stderr.contains('\u{1b}'),
+        "{stderr}"
+    );
+    assert!(stderr.lines().count() <= 4, "{stderr}");
+}
+
+#[test]
+fn infra_deploy_recovery_flag_keeps_existing_image_mode_separate() {
+    let help = run(&["infra", "deploy", "--help"], None);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("--reuse-example"));
+    assert!(text.contains("Candidate and live enrichment checks"));
+    let conflict = run(
+        &["infra", "deploy", "--reuse-example", "--image", "unused"],
+        None,
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"));
 }

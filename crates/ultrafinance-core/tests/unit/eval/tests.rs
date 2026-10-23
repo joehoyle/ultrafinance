@@ -3,7 +3,8 @@ use super::*;
 #[tokio::test]
 async fn enrich_eval_retrieves_only_the_processor_cleaned_pool() -> Result<()> {
     let db = MerchantStore::temporary()?;
-    let merchant = serde_json::from_value(serde_json::json!({"id":"verified-cafe","name":"Verified Cafe"}))?;
+    let merchant =
+        serde_json::from_value(serde_json::json!({"id":"verified-cafe","name":"Verified Cafe"}))?;
     db.put(&merchant)?;
     db.put(&serde_json::from_value(serde_json::json!({"id":"fixture-processor","name":"Fixture Pay","type":"payment_processor"}))?)?;
     db.save_processor_formats(vec![serde_json::from_value(serde_json::json!({
@@ -19,10 +20,17 @@ async fn enrich_eval_retrieves_only_the_processor_cleaned_pool() -> Result<()> {
     // the original processor-prefixed descriptor would access the missing table.
     let url = db.temporary_url().to_owned();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut client = postgres::Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(native_tls::TlsConnector::builder().build()?))?;
-        client.batch_execute("ALTER TABLE merchant_search RENAME TO unavailable_merchant_search")?;
+        let mut client = postgres::Client::connect(
+            &url,
+            postgres_native_tls::MakeTlsConnector::new(
+                native_tls::TlsConnector::builder().build()?,
+            ),
+        )?;
+        client
+            .batch_execute("ALTER TABLE merchant_search RENAME TO unavailable_merchant_search")?;
         Ok(())
-    }).await??;
+    })
+    .await??;
     let suite = r#"{"version":1,"name":"processor-first","cases":[{"id":"wrapped","request":{"description":"FIX*Verified Cafe"},"expected":{"status":"matched","merchant":{"merchant_id":"verified-cafe"}}}]}"#;
     let report = run(suite, db, Mode::Enrich, None, "jev-latest".into(), 0.95).await?;
     let result = &report.results[0];
@@ -32,13 +40,18 @@ async fn enrich_eval_retrieves_only_the_processor_cleaned_pool() -> Result<()> {
     assert_eq!(result.expected_rank, Some(1));
     assert_eq!(result.correct, Some(true));
     assert!(result.candidates[0].resolution_id.is_some());
-    assert_eq!(result.enrichment.as_ref().unwrap()["merchant_descriptor"]["text"], "Verified Cafe");
+    assert_eq!(
+        result.enrichment.as_ref().unwrap()["merchant_descriptor"]["text"],
+        "Verified Cafe"
+    );
     Ok(())
 }
 #[tokio::test]
 async fn offline_retrieval_and_exact_matching_are_separate_metrics() {
     let db = MerchantStore::temporary().unwrap();
     db.put(&crate::Merchant {
+        categories: None,
+        category_ids: vec![],
         counterparty_type: Default::default(),
         id: "mer_a".into(),
         name: "Julius Café".into(),
@@ -77,6 +90,8 @@ async fn offline_retrieval_and_exact_matching_are_separate_metrics() {
 async fn service_errors_cannot_be_counted_as_correct_unresolved() {
     let db = MerchantStore::temporary().unwrap();
     db.put(&crate::Merchant {
+        categories: None,
+        category_ids: vec![],
         counterparty_type: Default::default(),
         id: "mer_a".into(),
         name: "Julius Café".into(),
@@ -111,6 +126,8 @@ async fn service_errors_cannot_be_counted_as_correct_unresolved() {
 async fn unlabeled_outcomes_measure_coverage_without_claiming_accuracy() {
     let db = MerchantStore::temporary().unwrap();
     db.put(&crate::Merchant {
+        categories: None,
+        category_ids: vec![],
         counterparty_type: Default::default(),
         id: "a".into(),
         name: "Julius Cafe".into(),

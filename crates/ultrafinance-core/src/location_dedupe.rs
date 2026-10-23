@@ -29,7 +29,8 @@ fn conflict(a: &Option<String>, b: &Option<String>) -> bool {
 }
 fn equivalent(a: &LocationRecord, b: &LocationRecord) -> bool {
     let (a_loc, b_loc) = (&a.location, &b.location);
-    // Contradictions veto all rules, even a shared provider ID. Address
+    // Contradictions veto all rules. Distinct IDs from one provider remain
+    // distinct places. Address
     // normalization preserves unit/suite numbers; neighboring outlets stay apart.
     if conflict(&a_loc.country, &b_loc.country)
         || conflict(&a_loc.region, &b_loc.region)
@@ -37,9 +38,7 @@ fn equivalent(a: &LocationRecord, b: &LocationRecord) -> bool {
         || conflict(&a_loc.postal_code, &b_loc.postal_code)
         || conflict(&a_loc.address, &b_loc.address)
         || conflict(&a_loc.store_number, &b_loc.store_number)
-        || a.place_ids
-            .iter()
-            .any(|(provider, id)| b.place_ids.get(provider).is_some_and(|other| id != other))
+        || (a.source == b.source && a.external_id != b.external_id)
     {
         return false;
     }
@@ -55,11 +54,7 @@ fn equivalent(a: &LocationRecord, b: &LocationRecord) -> bool {
             return false;
         }
     }
-    let shared_id = a
-        .place_ids
-        .iter()
-        .any(|(provider, id)| !id.trim().is_empty() && b.place_ids.get(provider) == Some(id));
-    shared_id
+    (same(&a_loc.country, &b_loc.country) && same(&a_loc.store_number, &b_loc.store_number))
         || (same(&a_loc.country, &b_loc.country) && same(&a_loc.store_number, &b_loc.store_number))
         || (same(&a_loc.country, &b_loc.country)
             && same(&a_loc.city, &b_loc.city)
@@ -86,7 +81,6 @@ pub(crate) fn consolidate(
         result.provenance=if sources.len()>1 { sources.iter().map(LocationProvenance::from).collect() } else { vec![] };
         for record in &sources[1..] {
             result.aliases.extend(record.aliases.clone());
-            for (key,value) in &record.place_ids { result.place_ids.entry(key.clone()).or_insert_with(||value.clone()); }
             macro_rules! fill { ($($field:ident),*) => { $(if result.location.$field.is_none() { result.location.$field=record.location.$field.clone(); })* }; }
             fill!(name,address,city,region,postal_code,country,store_number,latitude,longitude);
         }
@@ -114,14 +108,6 @@ pub(crate) fn plan(
     for (i, id) in ids.iter().enumerate() {
         let (merchant, sources) = &identities[id];
         for r in sources {
-            for (provider, place) in &r.place_ids {
-                if !place.trim().is_empty() {
-                    blocks
-                        .entry(format!("{merchant}:place:{provider}:{place}"))
-                        .or_default()
-                        .insert(i);
-                }
-            }
             if let (Some(country), Some(number)) = (&r.location.country, &r.location.store_number) {
                 blocks
                     .entry(format!("{merchant}:store:{country}:{}", normalize(number)))

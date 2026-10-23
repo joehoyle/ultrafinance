@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn snapshot_preserves_actual_response_and_rejects_changed_matches() {
+fn snapshot_preserves_result_fields_hides_metadata_and_rejects_changed_matches() {
     let saved = json!({
         "request":{"description":"EXAMPLE"},
         "response":{"merchant":{"status":"matched","data":{"id":"expected"}}}
@@ -19,7 +19,9 @@ fn snapshot_preserves_actual_response_and_rejects_changed_matches() {
         "2026-10-17T12:00:00Z",
     )
     .unwrap();
-    assert_eq!(updated["response"], response);
+    let mut expected = response;
+    expected.as_object_mut().unwrap().remove("attributions");
+    assert_eq!(updated["response"], expected);
     assert_eq!(updated["request"], saved["request"]);
     assert_eq!(updated["captured_at"], "2026-10-17T12:00:00Z");
     for invalid in [

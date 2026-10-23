@@ -29,6 +29,17 @@ fn linked_branches_have_one_merchant_contribution_and_refreshable_outlets() -> R
         .find(|r| r.source == "foursquare")
         .unwrap();
     assert_eq!(fsq.raw["source_record_count"], 200);
+    let requested = vec![id.clone(), id.clone(), "missing".into()];
+    let batch = store.0.run(move |client| read(client, &requested))?;
+    assert_eq!(batch.len(), 1);
+    assert_eq!(
+        batch[id]
+            .iter()
+            .find(|record| record.source == "foursquare")
+            .unwrap()
+            .raw["source_record_count"],
+        200
+    );
     // Unreviewed places cannot become a reviewed-brand identity by grouping.
     assert!(fsq.external_id.starts_with("place:"));
     assert_eq!(fsq.merchant.markets, ["CA"]);

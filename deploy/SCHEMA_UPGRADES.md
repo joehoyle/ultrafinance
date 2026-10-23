@@ -112,3 +112,11 @@ database snapshot and its connection configuration, together with the old image.
 Do not print database credentials, Lambda environment configuration, secret
 values, or OpenTofu state. The administrator shell receives credentials from
 the existing ECS Secrets Manager configuration.
+
+## Releasing while the old enrichment endpoint is unavailable
+
+`./deploy/deploy.sh --reuse-example` builds the current workspace using the saved,
+validated homepage example instead of capturing it again from the old live API.
+The published candidate must still successfully enrich that request and return
+the expected merchant before promotion. Live checks and guarded rollback also
+remain required. Use the normal deploy command for routine releases.

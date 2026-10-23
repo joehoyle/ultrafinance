@@ -802,6 +802,8 @@ async fn create(report: &mut Report, store: &MerchantStore) -> Result<()> {
         source: "web-research".into(),
         external_id: website.into(),
         merchant: Merchant {
+            categories: None,
+            category_ids: vec![],
             counterparty_type: Default::default(),
             id: website.into(),
             name: name.into(),
@@ -940,6 +942,8 @@ impl Report {
         let merchant = match p.outcome {
             Outcome::Existing => self.merchant.clone().context("matched merchant missing")?,
             Outcome::New => Merchant {
+                categories: None,
+                category_ids: vec![],
                 counterparty_type: Default::default(),
                 id: String::new(),
                 name: p.name.clone().context("new merchant name missing")?,

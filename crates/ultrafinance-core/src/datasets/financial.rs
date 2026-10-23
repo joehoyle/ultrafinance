@@ -110,6 +110,8 @@ fn record(
         source: source.name().into(),
         external_id: id.clone(),
         merchant: Counterparty {
+            categories: None,
+            category_ids: vec![],
             id: format!("{}:{id}", source.name()),
             name: name.into(),
             counterparty_type: CounterpartyType::FinancialInstitution,

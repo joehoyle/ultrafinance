@@ -361,6 +361,8 @@ fn source_eval_prepares_cached_moneyvis_and_runs_unlabeled_holdout_without_impor
         .unwrap();
     store
         .put(&ultrafinance_core::Merchant {
+            categories: None,
+            category_ids: vec![],
             counterparty_type: Default::default(),
             id: "sample-shop".into(),
             name: description.into(),
@@ -691,7 +693,7 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
 "#,
     )
     .unwrap();
-    let execute = |preview: bool| {
+    let execute = |preview: bool, unchanged: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ultrafinance"));
         command
             .args(["sources", "--cache-dir"])
@@ -713,18 +715,36 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!stderr.contains("validating sorted place rows"));
         assert!(stderr.contains("100.0% · 2/2"));
-        assert!(stderr.contains("matching new merchant identities"));
-        assert!(stderr.contains("processing places for linked locations 2/2 (100%)"));
+        if unchanged {
+            assert!(
+                !stderr.contains("matching new merchant identities"),
+                "{stderr}"
+            );
+            assert!(!stderr.contains("preparing place locations"), "{stderr}");
+        } else {
+            assert!(
+                stderr.contains("matching new merchant identities"),
+                "{stderr}"
+            );
+            assert!(
+                stderr.contains("preparing place locations 2/2 (100%)"),
+                "{stderr}"
+            );
+        }
         if preview {
             assert!(stderr.contains("identity preview complete"));
             assert!(!stderr.contains("Import: committed"));
         } else {
-            assert!(stderr.contains("writing current Foursquare records 2/2 (100%)"));
+            assert_eq!(
+                stderr.contains("writing current Foursquare records 2/2 (100%)"),
+                !unchanged,
+                "{stderr}"
+            );
             assert!(stderr.contains("Import: committed"));
         }
         json(output)
     };
-    let preview = execute(true);
+    let preview = execute(true, false);
     assert_eq!(preview["dry_run"], true);
     assert_eq!(preview["dedupe"]["candidates"], 2);
     assert_eq!(
@@ -742,7 +762,7 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
             .unwrap()
             .is_none()
     );
-    let applied = execute(false);
+    let applied = execute(false, false);
     assert_eq!(applied["delta"]["added"], 2);
     assert_eq!(store.stats().unwrap().total, 1);
     for id in ["place:a", "place:b"] {
@@ -755,7 +775,7 @@ b,BRAND,CA,https://www.brand.test/outlet,"[""restaurant""]",
         store.get("brand").unwrap().unwrap().logo_url,
         manual.logo_url
     );
-    assert_eq!(execute(false)["delta"]["unchanged"], 2);
+    assert_eq!(execute(false, true)["delta"]["unchanged"], 2);
 }
 
 #[test]

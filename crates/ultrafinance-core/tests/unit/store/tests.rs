@@ -86,6 +86,8 @@ fn open_enrichment_regex_search() -> Result<()> {
 }
 fn merchant(id: &str, name: &str, country: &str) -> Merchant {
     Merchant {
+        categories: None,
+        category_ids: vec![],
         counterparty_type: Default::default(),
         id: id.into(),
         name: name.into(),

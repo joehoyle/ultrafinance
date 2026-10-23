@@ -11,6 +11,85 @@ fn records() -> Vec<LocationRecord> {
     ))
     .unwrap()
 }
+
+#[test]
+fn matched_merchant_catalog_supports_unverified_descriptor_city_without_inventing_a_branch() {
+    let merchant: crate::Merchant =
+        serde_json::from_value(json!({"id":"starbucks","name":"Starbucks"})).unwrap();
+    let mut bromont = records().remove(0);
+    bromont.location.city = Some("Bromont".into());
+    bromont.location.region = Some("QC".into());
+    bromont.location.country = Some("CA".into());
+    bromont.location.address = Some("8 Blvd de Bromont".into());
+    bromont.location.id = Some("loc_bromont".into());
+    bromont.aliases = vec!["Starbucks 8 Blvd de Bromont".into()];
+    bromont.transaction_pattern = None;
+    bromont.provenance.clear();
+    let mut toronto = bromont.clone();
+    toronto.location.city = Some("Toronto".into());
+    toronto.location.region = Some("ON".into());
+    toronto.location.address = Some("1 Main St".into());
+    toronto.location.id = Some("loc_toronto".into());
+    let outlets = vec![bromont.clone(), toronto.clone()];
+    for country in [None, Some("CA")] {
+        let mut req = request("STARBUCKS BROMONT");
+        req.country = country.map(str::to_owned);
+        assert_eq!(enrich(&req, &outlets).0, LocationResult::default());
+        assert_eq!(
+            enrich_for_merchant(&req, &outlets, Some(&merchant)).0,
+            LocationResult::Matched {
+                data: bromont.location.clone()
+            }
+        );
+    }
+    let mut another = bromont.clone();
+    another.location.id = Some("loc_bromont_2".into());
+    another.location.address = Some("20 Main St".into());
+    let mut req = request("STARBUCKS BROMONT");
+    let LocationResult::Extracted { data } =
+        enrich_for_merchant(&req, &[bromont.clone(), another], Some(&merchant)).0
+    else {
+        panic!("multiple branches must not select an outlet");
+    };
+    assert_eq!(data.city.as_deref(), Some("Bromont"));
+    assert!(
+        data.id.is_none()
+            && data.address.is_none()
+            && data.region.is_none()
+            && data.country.is_none()
+    );
+    req.country = Some("US".into());
+    assert_eq!(
+        enrich_for_merchant(&req, &outlets, Some(&merchant)).0,
+        LocationResult::default()
+    );
+    req.country = Some("CA".into());
+    req.location = Some(serde_json::from_value(json!({"city":"Toronto","country":"CA"})).unwrap());
+    assert_eq!(
+        enrich_for_merchant(&req, &outlets, Some(&merchant)).0,
+        LocationResult::Matched {
+            data: toronto.location
+        }
+    );
+    for hint in [
+        json!({"region":"BC"}),
+        json!({"address":"99 Other St"}),
+        json!({"store_number":"999999"}),
+    ] {
+        req.location = Some(serde_json::from_value(hint).unwrap());
+        let (result, _) = enrich_for_merchant(&req, &outlets, Some(&merchant));
+        assert!(!matches!(result, LocationResult::Matched { .. }));
+        if let LocationResult::Extracted { data } = result {
+            assert!(data.city.is_none());
+        }
+    }
+    for description in ["ANOTHER BROMONT", "STARBUCKS UNKNOWNLOCALITY"] {
+        assert_eq!(
+            enrich_for_merchant(&request(description), &outlets, Some(&merchant)).0,
+            LocationResult::default()
+        );
+    }
+}
 fn seed(store: &MerchantStore) {
     let records = crate::import::catalog(
         include_str!("../../../../../data/locations/merchants.example.json"),

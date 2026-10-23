@@ -8,7 +8,7 @@ fn outlet(source: &str, external: &str, merchant: &str, address: &str) -> Locati
     serde_json::from_value(json!({"source":source,"external_id":external,"merchant":{"merchant_id":merchant},"location":{"id":external,"precision":"outlet","address":address,"city":"Bromont","region":"QC","postal_code":"J2L 1A1","country":"CA","store_number":null},"aliases":["STARBUCKS BROMONT"],"attribution":source,"license":"test","url":"https://example.test"})).unwrap()
 }
 #[test]
-fn conflicting_branches_coordinates_provider_ids_and_manual_records_stay_separate() {
+fn conflicting_branches_coordinates_source_keys_and_manual_records_stay_separate() {
     let a = outlet("one", "a", "brand", "1 Main St Suite 1");
     let mut b = outlet("two", "b", "brand", "1 Main St Suite 2");
     assert!(!equivalent(&a, &b));
@@ -29,11 +29,9 @@ fn conflicting_branches_coordinates_provider_ids_and_manual_records_stay_separat
     assert!(!equivalent(&distant, &b));
     b.location.latitude = None;
     b.location.longitude = None;
-    let mut identified = a.clone();
-    identified.place_ids.insert("fsq".into(), "fsq-a".into());
-    b.place_ids.insert("fsq".into(), "fsq-b".into());
-    assert!(!equivalent(&identified, &b));
-    b.place_ids.clear();
+    let mut same_provider = a.clone();
+    same_provider.external_id = "different-provider-place".into();
+    assert!(!equivalent(&a, &same_provider));
     let mut manual = a.clone();
     manual.manual_override = true;
     b.manual_override = true;

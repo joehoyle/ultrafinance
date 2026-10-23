@@ -23,22 +23,63 @@ pub(crate) fn identity(merchant: &Merchant) -> Option<(String, String)> {
     ))
 }
 
-pub(crate) fn outlet_summary(request: &EnrichRequest, outlets: &[LocationRecord]) -> Value {
-    let interpretation = crate::interpretation::interpret(request);
-    let hints: Vec<_> = request
+pub(crate) fn outlet_summary(
+    request: &EnrichRequest,
+    merchant: &Merchant,
+    outlets: &[LocationRecord],
+) -> Value {
+    let interpretation = crate::interpretation::interpret_merchant(request);
+    let mut hints: Vec<_> = request
         .location
         .iter()
         .chain(
             interpretation
                 .hypotheses
                 .iter()
+                .filter(|h| {
+                    crate::interpretation::supporting_name(merchant, &h.merchant_text).is_some()
+                })
                 .filter_map(|h| h.location_hint.as_ref()),
         )
+        .cloned()
         .collect();
+    hints.extend(
+        interpretation
+            .hypotheses
+            .iter()
+            .filter(|h| {
+                h.location_hint.is_none()
+                    && crate::interpretation::supporting_name(merchant, &h.merchant_text).is_some()
+            })
+            .filter_map(|h| h.possible_location.clone())
+            .map(|city| crate::LocationHint {
+                city: Some(city),
+                ..Default::default()
+            }),
+    );
+    let precise = |hint: &crate::LocationHint| {
+        hint.city.is_some()
+            || hint.region.is_some()
+            || hint.address.is_some()
+            || hint.postal_code.is_some()
+            || hint.store_number.is_some()
+    };
+    let explicit = request.location.as_ref().filter(|hint| precise(hint));
+    let desired_country = if explicit.is_some() {
+        request.country.as_deref().or_else(|| {
+            request
+                .location
+                .as_ref()
+                .and_then(|hint| hint.country.as_deref())
+        })
+    } else {
+        crate::store::ranking_country(request, &interpretation)
+    };
     let descriptor = normalize(&request.description);
     let mut seen = HashSet::new();
     let mut countries = BTreeMap::<String, usize>::new();
     let mut relevant = Vec::new();
+    let mut matching = HashSet::new();
     for outlet in outlets {
         let location = &outlet.location;
         let norm = |s: &Option<String>| s.as_deref().map(normalize).unwrap_or_default();
@@ -66,6 +107,39 @@ pub(crate) fn outlet_summary(request: &EnrichRequest, outlets: &[LocationRecord]
         } else {
             None
         };
+        let matches_hint = |hint: &crate::LocationHint| {
+            precise(hint)
+                && [
+                    (&hint.country, &location.country),
+                    (&hint.region, &location.region),
+                    (&hint.city, &location.city),
+                    (&hint.address, &location.address),
+                    (&hint.postal_code, &location.postal_code),
+                    (&hint.store_number, &location.store_number),
+                ]
+                .iter()
+                .all(|(expected, actual)| {
+                    expected.as_deref().is_none_or(|expected| {
+                        actual
+                            .as_deref()
+                            .is_some_and(|actual| normalize(expected) == normalize(actual))
+                    })
+                })
+        };
+        let matches_country = desired_country.is_none_or(|expected| {
+            location
+                .country
+                .as_deref()
+                .is_some_and(|actual| expected.eq_ignore_ascii_case(actual))
+        });
+        if matches_country && explicit.map_or_else(|| hints.iter().any(matches_hint), matches_hint)
+        {
+            matching.insert(
+                identity
+                    .clone()
+                    .unwrap_or_else(|| json!(["locality", geographic_scope]).to_string()),
+            );
+        }
         if let Some(identity) = identity
             && seen.insert(identity)
         {
@@ -150,7 +224,7 @@ pub(crate) fn outlet_summary(request: &EnrichRequest, outlets: &[LocationRecord]
         .filter(|v| evidence_seen.insert(normalize(&v.to_string())))
         .take(3)
         .collect();
-    json!({"distinct_catalog_outlets":seen.len(),
+    json!({"distinct_catalog_outlets":seen.len(), "matching_catalog_outlets":matching.len(),
         "coverage_is_complete":false,
         "outlets_by_country":countries.into_iter().take(8).collect::<BTreeMap<_,_>>(),
         "relevant_outlets":relevant})
@@ -176,8 +250,10 @@ mod tests {
             }))
             .unwrap()
         };
+        let merchant = serde_json::from_value(json!({"id":"rona","name":"Rona"})).unwrap();
         let summary = outlet_summary(
             &request,
+            &merchant,
             &[
                 outlet("one", Some("1 Main St"), "CA"),
                 outlet("duplicate", Some("1 MAIN ST"), "CA"),
@@ -202,5 +278,76 @@ mod tests {
                     .unwrap()
                     .contains(&json!("country"))
         }));
+    }
+    fn location_fixture(
+        id: &str,
+        city: &str,
+        country: &str,
+        address: &str,
+        store: &str,
+    ) -> LocationRecord {
+        serde_json::from_value(json!({"source":"fixture","external_id":id,
+            "merchant":{"merchant_id":"starbucks"},"location":{
+                "city":city,"country":country,"address":address,"store_number":store},
+            "attribution":"fixture","license":"fixture","url":"https://example.test"}))
+        .unwrap()
+    }
+
+    #[test]
+    fn descriptor_location_counts_multiple_outlets_and_respects_country() {
+        let merchant =
+            serde_json::from_value(json!({"id":"starbucks","name":"Starbucks"})).unwrap();
+        let outlets = vec![
+            location_fixture("one", "Bromont", "CA", "1 Main St", "001"),
+            location_fixture("duplicate", "BROMONT", "CA", "1 MAIN ST", "001"),
+            location_fixture("two", "Bromont", "CA", "2 Main St", "002"),
+            location_fixture("other-country", "Bromont", "US", "3 Main St", "003"),
+            location_fixture("other-city", "Toronto", "CA", "4 Main St", "004"),
+        ];
+        let request =
+            serde_json::from_value(json!({"description":"STARBUCKS BROMONT","country":"CA"}))
+                .unwrap();
+        assert_eq!(
+            outlet_summary(&request, &merchant, &outlets)["matching_catalog_outlets"],
+            2
+        );
+        let request = serde_json::from_value(json!({"description":"STARBUCKS BROMONT"})).unwrap();
+        assert_eq!(
+            outlet_summary(&request, &merchant, &outlets)["matching_catalog_outlets"],
+            3
+        );
+        let request =
+            serde_json::from_value(json!({"description":"STARBUCKS","country":"CA"})).unwrap();
+        assert_eq!(
+            outlet_summary(&request, &merchant, &outlets)["matching_catalog_outlets"],
+            0
+        );
+        let unrelated = serde_json::from_value(json!({"id":"other","name":"Other Cafe"})).unwrap();
+        let request = serde_json::from_value(json!({"description":"STARBUCKS BROMONT"})).unwrap();
+        assert_eq!(
+            outlet_summary(&request, &unrelated, &outlets)["matching_catalog_outlets"],
+            0
+        );
+    }
+
+    #[test]
+    fn explicit_location_overrides_descriptor_city_and_requires_all_supplied_fields() {
+        let merchant =
+            serde_json::from_value(json!({"id":"starbucks","name":"Starbucks"})).unwrap();
+        let outlets = vec![
+            location_fixture("descriptor", "Bromont", "CA", "1 Main St", "001"),
+            location_fixture("explicit", "Toronto", "CA", "2 Main St", "002"),
+            location_fixture("wrong-address", "Toronto", "CA", "3 Main St", "002"),
+            location_fixture("wrong-country", "Toronto", "US", "2 Main St", "002"),
+            location_fixture("wrong-store", "Toronto", "CA", "2 Main St", "2"),
+        ];
+        let request =
+            serde_json::from_value(json!({"description":"STARBUCKS BROMONT","country":"CA",
+            "location":{"city":"Toronto","address":"2 Main St","store_number":"002"}}))
+            .unwrap();
+        assert_eq!(
+            outlet_summary(&request, &merchant, &outlets)["matching_catalog_outlets"],
+            1
+        );
     }
 }

@@ -115,7 +115,7 @@ pub(crate) async fn run(
         eprintln!("Enriched {}/{} descriptions", rows.len(), requests.len());
     }
     let rendered = if json_output {
-        serde_json::to_string_pretty(&json!({"results": rows}))?
+        crate::result_json::pretty(&json!({"results": rows}))?
     } else {
         render_table(&rows)
     };

@@ -309,7 +309,7 @@ resolution. It also prints the exact Jev JSON request body, encoded byte count,
 and send status, without authorization headers. Questions rejected by the local
 byte budget show the prepared body as `not_sent`. Readable details go to stderr;
 stdout keeps the readable summary (or response JSON with `--json`). Repeated source matching evidence is
-deduplicated for Jev; full provenance stays in the local audit and attributions.
+deduplicated for Jev; full matching evidence stays in the local audit.
 In a batch, each shared Jev request body is recorded once. Other transaction
 logs reference its `request_id` and `owner_log_id`; evaluation reports reference
 the same request ID without creating log records. Audit stages write their
@@ -317,7 +317,7 @@ transaction records together rather than issuing one database write per item.
 Jev compares plausible business identities using names, aliases, websites, and
 catalog outlet evidence. Records with the same name (preserving punctuation such
 as `RONA+`) and a shared business website domain form one choice. Other identities
-remain separate choices even when their names match. Source provenance does not
+remain separate choices even when their names match. Source metadata does not
 select a preferred record. Indistinguishable records without an established shared
 identity remain unresolved; Jev can also choose `none` when evidence is insufficient.
 
@@ -1180,6 +1180,25 @@ are cleaned up after success, failure, or Ctrl-C.
 
 ## Merchant database and search
 
+Run a local CLI, API, or PostgreSQL client directly against production through a
+temporary tunnel:
+
+```sh
+cargo run -- infra with-prod-db --read-only -- cargo run -- locations list MERCHANT_ID
+cargo run -- infra with-prod-db --read-only -- psql
+cargo run -- infra with-prod-db -- cargo run -p ultrafinance-api
+```
+
+`with-prod-db` supplies `ULTRAFINANCE_DATABASE_URL` and PostgreSQL connection
+variables only to the child process. It uses the existing AWS profile and a
+temporary Fargate/Session Manager tunnel, keeps TLS certificate and hostname
+verification enabled, and cleans up the tunnel and task when the process exits
+or is interrupted. It does not change `.env` or copy the production database.
+The connection uses the database administrator; `--read-only` sets PostgreSQL's
+default transaction mode to reject writes. Omit that flag for commands that need
+to save enrichment history or other changes to production. AWS CLI and the
+Session Manager plugin must be installed.
+
 ```sh
 cargo run -- merchants add --name 'Julius Café' --market CA \
   --alias 'JULIUS CAFE BROMONT'
@@ -1233,20 +1252,33 @@ ambiguous exact aliases and fuzzy results go to Jev. Transaction country breaks
 ranking ties in favor of known markets. If it is absent, request location country
 or an unambiguous country inferred from descriptor location hints supplies that
 country. Country narrowing applies only within the name selected by Jev, not to
-the global name shortlist. Conflicting inferred countries supply no country filter.
-Country evidence does not itself make an untrusted merchant match trusted.
+the global name shortlist. After name recognition, an exact catalog name with a
+matching outlet locality can also supply the country preference when all supported
+localities agree on one country. Explicit request context takes precedence.
+Conflicting inferred countries supply no country filter. This preference does not
+verify purchase geography or make an untrusted merchant match trusted.
+After recognizing the trading name, identity choices are restricted to businesses
+with compatible catalog outlets at the request's location or a supported descriptor
+locality whenever any such outlets exist. Explicit location fields take precedence
+over descriptor locality guesses. Country constraints still apply. Multiple branches
+in the same city support the merchant without identifying one exact branch. If no
+outlets match, the broader identity choices remain available. Declared market
+coverage and website availability do not override positive outlet matches.
 
-View catalog totals and breakdowns by imported source, known market, and source dataset region:
+The final location step also checks descriptor city hypotheses against the matched
+merchant's own outlets, even when the general geographic dataset cannot verify the
+city. A single compatible outlet resolves to that branch. Several matching branches
+return the supported city without selecting an address; conflicting explicit
+location fields or country constraints still exclude incompatible outlets.
+
+View catalog totals and breakdowns by known market:
 
 ```sh
 cargo run -- merchants stats
 cargo run -- merchants stats --json
 ```
 
-Source counts distinguish unique merchants from external records. A merchant
-linked to multiple sources counts once in each source, so source totals can
-exceed the catalog total. Manual entries include corrections to imported
-merchants; “without imported source” counts merchants with no source records.
+Manual entries include corrections to imported merchants.
 Market counts include each merchant once per country; merchants can appear in
 several markets. `without_markets` counts those with no known coverage.
 
@@ -1262,7 +1294,7 @@ market coverage.
 Merchant JSON accepts `markets: ["CA", "US"]`; the merchant `country` field and
 `merchants add/list --country` have been removed. PostgreSQL requires
 `ultrafinance database init` with a schema-administration login to initialize
-schema version 21 before running this application. See
+schema version 29 before running this application. See
 [database schema](docs/database-schema.md) for column storage and migration details.
 Database initialization upgrades existing schemas, including removal of obsolete
 country evidence and merge-audit tables. Older application versions cannot run
@@ -1273,6 +1305,36 @@ migrations. CI does not have administrator access and cannot upgrade production
 automatically. Follow the [schema upgrade cutover](deploy/SCHEMA_UPGRADES.md)
 before releasing an image that requires a different database schema. A
 `database_schema_mismatch` response stops deployment without readiness retries.
+
+## Business categories
+
+Merchant and counterparty API records expose `categories` using the Foursquare
+Places OS taxonomy (1,279 categories in the initial database seed). Each assignment
+contains its opaque Foursquare `id`, `name`, and a `path` of `{id, name}` nodes
+ordered from root through the assigned category. For example:
+`Arts and Entertainment > Amusement Park > Attraction`.
+Multiple categories can describe one business; assignments from linked places
+combine at merchant level. Per-place assignments are retained so replacing a
+category removes it from the merchant when no other place or source still
+assigns it. Explicit manual category assignments remain included. These
+describe the business rather than the individual
+items bought, and do not classify transfers or other financial operations.
+
+Uncategorized records omit `categories`. Unknown upstream IDs remain visible with
+an empty path and no name until their taxonomy entry is populated. The `categories`
+table stores stable integer IDs, unique Foursquare IDs, names, and parent references.
+Merchant, manual, source, and per-place assignment tables reference those integers
+with foreign keys. API names and paths resolve from the database, so taxonomy edits
+do not require an application rebuild. Portable catalog JSON keeps Foursquare
+`category_ids`. Migration 29 preserves existing assignments without a reimport.
+See [taxonomy provenance](crates/ultrafinance-core/data/README.md).
+
+Schema version 27 retains category assignments per Foursquare place. Run `ultrafinance database init`
+with the administrator CLI as part of the existing schema upgrade cutover, then
+reimport Foursquare data to populate existing merchants. Older prepared bundles
+are supported: category IDs are recovered from their place evidence. Previous
+database imports did not retain category IDs, so migration alone cannot backfill
+them. No production migration or reimport runs automatically.
 
 ## Homepage example
 
@@ -1308,7 +1370,8 @@ response to add fields or logos absent from the API result.
 
 ## Merchant logos
 
-Merchants optionally include `logo_url` and `logo_source`. Add a verified brand
+Merchants optionally include `logo_url` and `logo_source`. Discovered logos use
+`/logos/assets/...` paths; resolve them against the API origin. Add a verified brand
 logo URL manually:
 
 ```sh
@@ -1338,11 +1401,13 @@ cargo run -- merchants search 'amzn mktp' --country CA
 ```
 
 Source records retain the original JSON, namespace, external ID, dataset version,
-attribution and license. Search output includes `provenance`, and `trusted` tells
-whether the query matched a manually verified name or alias. Country hints become known markets with source evidence; they do not claim
+attribution and license internally. Ordinary API and CLI results omit source
+metadata, including provider lists, attribution, licenses, and logo source details.
+Search output retains `trusted`, which tells whether the query matched a manually
+verified name or alias. Country hints become known markets with source evidence; they do not claim
 the merchant operates only in those countries.
-Negative aliases exclude contradictory imported candidates. Matches derived from
-source-linked merchants include `attributions` in enrichment output.
+Negative aliases exclude contradictory imported candidates. Source administration
+commands retain the metadata needed to import, inspect, and refresh datasets.
 
 No automatic cross-source merge is made using names alone. To link an external
 record to a merchant you have verified:
@@ -1858,9 +1923,9 @@ rebuilding and duplicate merges are staged inside the transaction. The final
 
 Location identity is reconciled separately from merchant identity. `locations import`
 and accepted merchant merges automatically consolidate duplicate outlets for the
-same resolved merchant. Shared external place IDs, compatible merchant-scoped store
-numbers, or matching full addresses with city and country can establish a duplicate.
-Conflicting store numbers, geography, provider IDs or distant coordinates veto a
+same resolved merchant. Compatible merchant-scoped store numbers or matching full
+addresses with city and country can establish a duplicate. Distinct IDs from the
+same source, conflicting store numbers or geography, and distant coordinates veto a
 merge. City/coordinate proximity alone never establishes outlet identity; groups
 require pairwise agreement and preserve conflicting reviewed corrections.
 
@@ -1873,8 +1938,9 @@ cargo run -- locations list mer_YOUR_ID --raw
 ```
 
 Consolidated reads return one canonical outlet with combined aliases, missing
-fields filled from compatible evidence, and `provenance` for each source. Every
-original source record remains stored and inspectable with `--raw`. Source refreshes
+fields filled from compatible evidence, and stable merchant/location identifiers.
+Source metadata is omitted from consolidated results. Every original source record
+remains stored and inspectable with `--raw`. Source refreshes
 preserve their identity mappings and reviewed overrides. Merchant dedupe also runs
 outlet dedupe after reassigning location references. The full Foursquare download
 has not yet been imported as locations by these commands.

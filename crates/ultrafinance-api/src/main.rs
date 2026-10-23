@@ -12,6 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{env, sync::Arc, time::Duration};
+mod logos;
 mod response;
 mod website;
 
@@ -65,7 +66,11 @@ fn api_router() -> (Router<Arc<Enricher>>, utoipa::openapi::OpenApi) {
 
 fn router(enricher: Enricher) -> Router {
     let (api, spec) = api_router();
-    let mut site = Router::new();
+    let mut site = logos::router(
+        env::var_os("ULTRAFINANCE_LOGO_DIRECTORY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "./logos".into()),
+    );
     for (path, content_type, content) in [
         (
             "/robots.txt",
@@ -361,7 +366,7 @@ async fn counterparties(
             examples(
                 ("extracted_location" = (value = json!({"kind":"unknown","counterparties":[],"merchant":{"status":"unresolved","data":null},"location":{"status":"extracted","data":{"id":null,"precision":"city","address":null,"city":"Hialeah","region":"FL","postal_code":null,"country":"US","store_number":"10241"}}}))),
                 ("unresolved" = (value = json!({"kind":"unknown","counterparties":[],"merchant":{"status":"unresolved","data":null},"location":{"status":"unresolved","data":null}}))),
-                ("matched" = (value = json!({"kind":"unknown","counterparties":[{"id":"mer_example","type":"merchant","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png","logo_source":"official website"}],"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png","logo_source":"official website"}},"location":{"status":"unresolved","data":null}})))
+                ("matched" = (value = json!({"kind":"unknown","counterparties":[{"id":"mer_example","type":"merchant","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png"}],"merchant":{"status":"matched","data":{"id":"mer_example","name":"Example Café","markets":["CA"],"logo_url":"https://example.com/logo.png"}},"location":{"status":"unresolved","data":null}})))
             )),
         (status = 400, description = "Malformed JSON", body = ApiError),
         (status = 413, description = "Request body exceeds 64 KiB", body = ApiError),

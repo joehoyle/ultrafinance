@@ -1244,3 +1244,275 @@ async fn identity_refinement_preserves_global_names_and_prefers_country_then_web
         );
     }
 }
+
+fn bromont_support(country: Option<&str>) -> crate::interpretation::CatalogSupport {
+    crate::interpretation::CatalogSupport {
+        merchant_text: "STARBUCKS".into(),
+        possible_location: Some("BROMONT".into()),
+        location_hint: None,
+        geoname_ids: vec![],
+        matched_name: "Starbucks".into(),
+        name_exact: true,
+        outlet: Some(crate::interpretation::OutletSupport {
+            source: "fixture".into(),
+            external_id: "bromont".into(),
+            city: "Bromont".into(),
+            country: country.map(str::to_owned),
+            attribution: "fixture".into(),
+            license: "fixture".into(),
+            url: "https://example.test/bromont".into(),
+        }),
+    }
+}
+
+fn bromont_pending() -> Pending {
+    let request: EnrichRequest =
+        serde_json::from_value(json!({"description":"STARBUCKS BROMONT"})).unwrap();
+    let mut candidates: Vec<_> = (0..162).map(|index| {
+        let mut candidate = brand_fixture(&format!("starbucks-{index}"), "Starbucks",
+            &format!("https://starbucks-{index}.example.test"), "fixture", &index.to_string());
+        candidate.merchant.markets = vec!["US".into()];
+        candidate.business_evidence = json!({"distinct_catalog_outlets":1, "coverage_is_complete":false,
+            "outlets_by_country":{"US":1},"relevant_outlets":[]});
+        candidate
+    }).collect();
+    candidates[0].merchant.markets = vec!["CA".into()];
+    candidates[0].interpretation_evidence = vec![bromont_support(Some("CA"))];
+    // A global identity remains eligible even without a listed Bromont outlet.
+    candidates[1].merchant.markets = vec!["CA".into(), "US".into()];
+    let choices = business_choices(&candidates);
+    Pending {
+        country: None,
+        index: 0,
+        question: name_question(&request, &candidates, &choices),
+        identity_question: Some(identity_question(&request, &candidates)),
+        candidates,
+        choices,
+        kind_question: None,
+        local_response: None,
+    }
+}
+
+#[test]
+fn identity_country_requires_exact_agreeing_locality_and_respects_caller_country() {
+    let mut pending = bromont_pending();
+    let group: Vec<_> = (0..pending.choices.len()).collect();
+    assert_eq!(identity_country(&pending, &group).as_deref(), Some("CA"));
+    pending.candidates[2].interpretation_evidence = vec![bromont_support(Some("US"))];
+    assert_eq!(identity_country(&pending, &group), None);
+    pending.country = Some("US".into());
+    assert_eq!(identity_country(&pending, &group).as_deref(), Some("US"));
+    pending.country = None;
+    pending.candidates[2].interpretation_evidence.clear();
+    pending.candidates[0].interpretation_evidence[0].name_exact = false;
+    assert_eq!(identity_country(&pending, &group), None);
+    pending.candidates[0].interpretation_evidence[0].name_exact = true;
+    pending.candidates[0].interpretation_evidence[0].possible_location = Some("OTHER CITY".into());
+    assert_eq!(identity_country(&pending, &group), None);
+    pending.candidates[0].interpretation_evidence = vec![bromont_support(None)];
+    assert_eq!(identity_country(&pending, &group), None);
+}
+
+#[tokio::test]
+async fn starbucks_bromont_narrows_global_identity_payload_without_country_input() {
+    let pending = bromont_pending();
+    assert!(
+        serde_json::to_vec(pending.identity_question.as_ref().unwrap())
+            .unwrap()
+            .len()
+            > MAX_QUESTION_BYTES
+    );
+    let refined = followup_question(&pending, &answer("candidate_0"), 0.95)
+        .unwrap()
+        .unwrap();
+    assert!(serde_json::to_vec(&refined).unwrap().len() < MAX_QUESTION_BYTES);
+    assert_eq!(refined["instructions"]["identity_country"], "CA");
+    assert_eq!(refined["criteria"].as_object().unwrap().len(), 3);
+    assert!(refined["criteria"].get("candidate_0").is_some());
+    assert!(refined["criteria"].get("candidate_1").is_some());
+    let merchants = pending
+        .candidates
+        .iter()
+        .map(|c| c.merchant.clone())
+        .collect();
+    let mut enricher = Enricher::new(
+        Some("test-key".into()),
+        "jev-latest".into(),
+        0.95,
+        merchants,
+    )
+    .unwrap();
+    let rx = mock_responses(&mut enricher, 2, 200, |body| {
+        let answers: Map<_, _> = body["questions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|key| {
+                (
+                    key.clone(),
+                    answer(if key.starts_with("kind_") {
+                        "purchase"
+                    } else {
+                        "candidate_0"
+                    }),
+                )
+            })
+            .collect();
+        json!({"answers":answers})
+    });
+    let request = serde_json::from_value(json!({"description":"STARBUCKS BROMONT"})).unwrap();
+    let (results, details) = enricher
+        .enrich_batch_candidates_traced(vec![(request, Ok(pending.candidates))])
+        .await;
+    assert!(
+        matches!(&results[0],Ok(EnrichResponse {merchant:MerchantResult::Matched{data},..}) if data.id=="starbucks-0")
+    );
+    assert_eq!(details[0]["provider_answer"]["identity_country"], "CA");
+    assert_eq!(details[0]["provider_requests"].as_array().unwrap().len(), 2);
+    for _ in 0..2 {
+        let sent = rx.recv().unwrap();
+        assert!(serde_json::to_vec(&sent).unwrap().len() <= MAX_BODY_BYTES);
+        for question in sent["questions"].as_object().unwrap().values() {
+            assert!(serde_json::to_vec(question).unwrap().len() <= MAX_QUESTION_BYTES);
+        }
+    }
+}
+
+#[test]
+fn identity_location_filter_prefers_real_outlets_and_falls_back_when_none_match() {
+    let mut pending = bromont_pending();
+    let refine = |pending: &Pending| {
+        followup_question(pending, &answer("candidate_0"), 0.95)
+            .unwrap()
+            .unwrap()
+    };
+    let fallback = refine(&pending);
+    assert_eq!(
+        fallback["instructions"]["outlet_location_filter_applied"],
+        false
+    );
+    assert_eq!(fallback["criteria"].as_object().unwrap().len(), 3);
+    // Real outlet support wins even if declared market coverage is incomplete.
+    pending.country = Some("CA".into());
+    pending.candidates[0].merchant.markets = vec!["US".into()];
+    pending.candidates[0].business_evidence["matching_catalog_outlets"] = json!(2);
+    let narrowed = refine(&pending);
+    assert_eq!(
+        narrowed["instructions"]["outlet_location_filter_applied"],
+        true
+    );
+    assert_eq!(narrowed["criteria"].as_object().unwrap().len(), 2);
+    assert!(narrowed["criteria"].get("candidate_0").is_some());
+    // Two matching identities both remain eligible, including one without a website.
+    pending.candidates[1].business_evidence["matching_catalog_outlets"] = json!(1);
+    pending.candidates[1].merchant.website = None;
+    let ambiguous = refine(&pending);
+    assert_eq!(ambiguous["criteria"].as_object().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn bromont_outlet_filter_resolves_merchant_with_multiple_branches_without_identity_model_call()
+ {
+    let merchants: Vec<Merchant>=serde_json::from_value(json!([
+        {"id":"bromont","name":"Starbucks","website":"https://local-starbucks.test","markets":["CA"]},
+        {"id":"other","name":"Starbucks","website":"https://other-starbucks.test","markets":["CA"]}
+    ])).unwrap();
+    let mut enricher = Enricher::new(
+        Some("test-key".into()),
+        "jev-latest".into(),
+        0.95,
+        merchants,
+    )
+    .unwrap();
+    let outlets: Vec<crate::location::LocationRecord> = (0..3)
+        .map(|index| {
+            serde_json::from_value(json!({
+                "source":"fixture","external_id":format!("outlet-{index}"),
+                "merchant":{"merchant_id":if index<2 {"bromont"} else {"other"}},
+                "location":{"city":if index<2 {"Bromont"} else {"Toronto"},"country":"CA",
+                    "address":format!("{index} Main St")},
+                "attribution":"fixture","license":"fixture","url":"https://example.test"
+            }))
+            .unwrap()
+        })
+        .collect();
+    enricher.store.import_locations(&outlets).unwrap();
+    let rx = mock_responses(&mut enricher, 1, 200, |body| {
+        let answers: Map<_, _> = body["questions"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|key| {
+                (
+                    key.clone(),
+                    answer(if key.starts_with("kind_") {
+                        "purchase"
+                    } else {
+                        "candidate_0"
+                    }),
+                )
+            })
+            .collect();
+        json!({"answers":answers})
+    });
+    let request =
+        serde_json::from_value(json!({"description":"STARBUCKS BROMONT","country":"CA"})).unwrap();
+    let (result, details) = enricher.enrich_request_traced(&request).await;
+    let result = result.unwrap();
+    assert!(matches!(result.merchant,MerchantResult::Matched{data} if data.id=="bromont"));
+    assert!(
+        matches!(result.location, crate::location::LocationResult::Extracted { data }
+        if data.city.as_deref() == Some("Bromont") && data.id.is_none())
+    );
+    assert_eq!(
+        details["provider_answer"]["outlet_location_filter_applied"],
+        true
+    );
+    assert_eq!(
+        details["provider_answer"]["identity_method"],
+        "deterministic"
+    );
+    assert_eq!(details["provider_requests"].as_array().unwrap().len(), 1);
+    rx.recv().unwrap();
+}
+
+#[test]
+#[ignore = "read-only verification against a full local catalog"]
+fn profile_bromont_outlet_filter() -> Result<()> {
+    let store = store::MerchantStore::postgres(store::LOCAL_DATABASE_URL)?;
+    for country in [None, Some("CA")] {
+        let request =
+            serde_json::from_value(json!({"description":"STARBUCKS BROMONT","country":country}))?;
+        let candidates = store.search_primary_request(&request, 10)?;
+        let choices = business_choices(&candidates);
+        let pending = Pending {
+            country: country.map(str::to_owned),
+            index: 0,
+            question: name_question(&request, &candidates, &choices),
+            identity_question: Some(identity_question(&request, &candidates)),
+            candidates,
+            choices,
+            kind_question: None,
+            local_response: None,
+        };
+        let refined = followup_question(&pending, &answer("candidate_0"), 0.95)?.unwrap();
+        assert_eq!(
+            refined["instructions"]["outlet_location_filter_applied"],
+            true
+        );
+        for (key, evidence) in refined["criteria"].as_object().unwrap() {
+            if key != "none" {
+                eprintln!(
+                    "{}",
+                    json!({"country":country,"choice":key,"website":evidence["merchant"]["website"],
+                "matching_outlets":evidence["outlet_summary"]["matching_catalog_outlets"]})
+                );
+            }
+        }
+        eprintln!(
+            "{}",
+            json!({"country":country,"eligible":refined["criteria"].as_object().unwrap().len()-1,"bytes":serde_json::to_vec(&refined)?.len()})
+        );
+    }
+    Ok(())
+}

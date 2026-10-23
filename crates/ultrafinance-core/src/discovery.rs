@@ -129,6 +129,8 @@ fn candidate(place: Place) -> Result<Candidate> {
         bail!("invalid discovered place country");
     }
     let merchant = Merchant {
+        categories: None,
+        category_ids: vec![],
         counterparty_type: Default::default(),
         id: format!("discovery_{}", uuid::Uuid::new_v4().simple()),
         name: place.name.clone(),

@@ -328,7 +328,8 @@ pub async fn run_with_progress(
             let (candidates, search_trace) = if enricher.is_none() {
                 let db = store.clone();
                 let request = case.request.clone();
-                tokio::task::spawn_blocking(move || db.search_request_traced(&request, 10)).await??
+                tokio::task::spawn_blocking(move || db.search_request_traced(&request, 10))
+                    .await??
             } else {
                 (vec![], Default::default())
             };
@@ -371,12 +372,25 @@ pub async fn run_with_progress(
             for (result, retrieval) in batch_results.iter_mut().zip(evaluated.retrieval) {
                 result.candidates = retrieval.candidates;
                 result.search_trace = retrieval.trace;
-                result.candidate_ids = result.candidates.iter().map(|c| c.merchant.id.clone()).collect();
-                result.expected_rank = result.expected_local_id.as_ref()
-                    .and_then(|id| result.candidate_ids.iter().position(|candidate| candidate == id))
+                result.candidate_ids = result
+                    .candidates
+                    .iter()
+                    .map(|c| c.merchant.id.clone())
+                    .collect();
+                result.expected_rank = result
+                    .expected_local_id
+                    .as_ref()
+                    .and_then(|id| {
+                        result
+                            .candidate_ids
+                            .iter()
+                            .position(|candidate| candidate == id)
+                    })
                     .map(|rank| rank + 1);
             }
-            for (index, (result, outcome)) in batch_results.iter_mut().zip(evaluated.results).enumerate() {
+            for (index, (result, outcome)) in
+                batch_results.iter_mut().zip(evaluated.results).enumerate()
+            {
                 result.enrichment = evaluated.evidence.get(index).cloned();
                 match outcome {
                     Ok(response) => {

@@ -54,9 +54,9 @@ pub async fn run(args: Args, database_url: Option<&str>) -> Result<()> {
     println!(
         "{}",
         if args.json {
-            serde_json::to_string(&result)?
+            crate::result_json::compact(&result)?
         } else {
-            serde_json::to_string_pretty(&result)?
+            crate::result_json::pretty(&result)?
         }
     );
     Ok(())

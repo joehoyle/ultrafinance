@@ -11,6 +11,12 @@ fn json_column<T: serde::de::DeserializeOwned>(row: &Row, column: &str) -> Resul
 
 pub(super) fn merchant(row: &Row) -> Result<Merchant> {
     Ok(Merchant {
+        categories: row
+            .try_get::<_, &str>("resolved_categories")
+            .ok()
+            .map(serde_json::from_str)
+            .transpose()?,
+        category_ids: row.try_get("category_ids")?,
         counterparty_type: row.try_get::<_, &str>("counterparty_type")?.parse()?,
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -46,8 +52,12 @@ pub(crate) fn source(row: &Row) -> Result<SourceRecord> {
         source: row.try_get("source")?,
         external_id: row.try_get("external_id")?,
         merchant: Merchant {
+            categories: None,
+            category_ids: row.try_get("input_category_ids")?,
             counterparty_type: row.try_get::<_, &str>("input_counterparty_type")?.parse()?,
-            id: row.try_get("input_id")?,
+            id: row
+                .try_get::<_, Option<String>>("input_id")?
+                .unwrap_or(row.try_get("external_id")?),
             name: row.try_get("input_name")?,
             website: row.try_get("input_website")?,
             logo_url: row.try_get("input_logo_url")?,
@@ -106,7 +116,7 @@ pub(super) fn location(row: &Row) -> Result<LocationRecord> {
             longitude: row.try_get("longitude")?,
         },
         aliases: row.try_get("aliases")?,
-        place_ids: row.try_get::<_, postgres::types::Json<_>>("place_ids")?.0,
+        legacy_place_ids: Default::default(),
         transaction_pattern: row.try_get("transaction_pattern")?,
         manual_override: row.try_get("manual_override")?,
         attribution: row.try_get("attribution")?,
@@ -115,7 +125,7 @@ pub(super) fn location(row: &Row) -> Result<LocationRecord> {
     })
 }
 
-pub(super) const RESOLUTIONS: &str = "SELECT r.id AS resolution_id,r.description,r.country,r.amount,r.currency,r.location_present,r.location_address,r.location_city,r.location_region,r.location_postal_code,r.location_country,r.location_store_number,r.extra_json,r.provenance_json,r.verified,r.review_evidence,m.* FROM descriptor_resolutions r JOIN merchants m ON m.id=r.merchant_id";
+pub(super) const RESOLUTIONS: &str = "SELECT r.id AS resolution_id,r.description,r.country,r.amount,r.currency,r.location_present,r.location_address,r.location_city,r.location_region,r.location_postal_code,r.location_country,r.location_store_number,r.extra_json,r.provenance_json,r.verified,r.review_evidence,m.*,merchant_category_ids(m.id) AS category_ids,category_details(merchant_category_ids(m.id))::text AS resolved_categories FROM descriptor_resolutions r JOIN merchants m ON m.id=r.merchant_id";
 
 pub(super) fn resolution(row: &Row) -> Result<crate::resolution::Resolution> {
     let location = if row.try_get::<_, bool>("location_present")? {
@@ -153,7 +163,7 @@ pub(super) fn bounded_sources(
 ) -> Result<Vec<(String, SourceRecord)>> {
     use postgres::fallible_iterator::FallibleIterator;
     let mut rows = c.query_raw(
-        "SELECT s.*,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE merchant_id=ANY($1) ORDER BY s.source,external_id",
+        "SELECT s.*,source_category_ids(s.source,s.external_id) AS input_category_ids,p.attribution,p.license,p.url FROM source_records s JOIN source_provenance p ON p.id=s.source_provenance_id WHERE merchant_id=ANY($1) ORDER BY s.source,external_id",
         [&ids as &(dyn postgres::types::ToSql + Sync)],
     )?;
     let mut bytes = 0;

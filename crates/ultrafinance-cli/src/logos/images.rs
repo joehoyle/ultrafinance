@@ -3,9 +3,6 @@ use image::{DynamicImage, ImageFormat, ImageReader};
 use std::io::Cursor;
 
 pub struct Prepared {
-    pub original: Vec<u8>,
-    pub mime: &'static str,
-    pub extension: &'static str,
     pub width: u32,
     pub height: u32,
     pub display: Vec<u8>,
@@ -16,16 +13,18 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
     if bytes.len() > 8 * 1024 * 1024 {
         bail!("image exceeds 8 MiB");
     }
-    let (image, mime, extension, width, height) = match image::guess_format(&bytes) {
+    let (image, width, height) = match image::guess_format(&bytes) {
         Ok(format) => {
-            let (mime, ext) = match format {
-                ImageFormat::Png => ("image/png", "png"),
-                ImageFormat::Jpeg => ("image/jpeg", "jpg"),
-                ImageFormat::WebP => ("image/webp", "webp"),
-                ImageFormat::Ico => ("image/vnd.microsoft.icon", "ico"),
-                ImageFormat::Gif => ("image/gif", "gif"),
-                _ => bail!("unsupported raster image type"),
-            };
+            if !matches!(
+                format,
+                ImageFormat::Png
+                    | ImageFormat::Jpeg
+                    | ImageFormat::WebP
+                    | ImageFormat::Ico
+                    | ImageFormat::Gif
+            ) {
+                bail!("unsupported raster image type");
+            }
             let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
             let mut limits = image::Limits::default();
             limits.max_image_width = Some(8192);
@@ -34,7 +33,7 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
             reader.limits(limits);
             let image = reader.decode().context("invalid or oversized image")?;
             let (w, h) = (image.width(), image.height());
-            (image, mime, ext, w, h)
+            (image, w, h)
         }
         Err(_) => {
             let xml = std::str::from_utf8(&bytes).context("unrecognized image bytes")?;
@@ -84,7 +83,7 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
             let image = DynamicImage::ImageRgba8(
                 image::RgbaImage::from_raw(dw, dh, pixels).context("invalid SVG bitmap")?,
             );
-            (image, "image/svg+xml", "svg", w, h)
+            (image, w, h)
         }
     };
     let image = if image.width().max(image.height()) > 256 {
@@ -102,9 +101,6 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
         image::ExtendedColorType::Rgba8,
     )?;
     Ok(Prepared {
-        original: bytes,
-        mime,
-        extension,
         width,
         height,
         display,
@@ -129,7 +125,6 @@ mod tests {
     fn detects_bytes_preserves_alpha_and_aspect_never_upscales() {
         for (w, h, expected) in [(800, 400, (256, 128)), (16, 16, (16, 16))] {
             let p = prepare(png(w, h)).unwrap();
-            assert_eq!(p.mime, "image/png");
             assert_eq!((p.width, p.height), (w, h));
             assert_eq!((p.display_width, p.display_height), expected);
             let decoded = image::load_from_memory(&p.display).unwrap().to_rgba8();
@@ -141,7 +136,6 @@ mod tests {
     fn vector_rendering_uses_straight_alpha() {
         let p=prepare(br#"<svg xmlns="http://www.w3.org/2000/svg" width="512" height="256"><rect width="512" height="256" fill="red" opacity="0.5"/></svg>"#.to_vec()).unwrap();
         assert_eq!((p.display_width, p.display_height), (256, 128));
-        assert_eq!(p.mime, "image/svg+xml");
         let image = image::load_from_memory(&p.display).unwrap().to_rgba8();
         let pixel = image.get_pixel(20, 20);
         assert_eq!(pixel[0], 255);

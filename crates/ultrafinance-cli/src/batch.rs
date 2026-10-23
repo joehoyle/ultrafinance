@@ -329,7 +329,7 @@ pub async fn run_file(options: FileOptions) -> Result<()> {
         std::fs::write(&path, &json)?;
         eprintln!("Saved report to {}", path.display());
     } else {
-        println!("{json}");
+        println!("{}", crate::result_json::pretty(&report)?);
     }
     if details {
         print_details(&report)?;

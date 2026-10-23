@@ -382,6 +382,9 @@ async fn identity_requests_stream_all_pairs_within_actual_byte_limits() -> Resul
                 }
                 Err(error) => panic!("{error}"),
             };
+            // Accepted sockets can inherit the listener's nonblocking mode
+            // on macOS; read timeouts do not switch them back to blocking I/O.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();

@@ -11,6 +11,7 @@ evidence/context, and audit logs.
 | `merchants`, `manual_merchants` | ID, name, website, logo URL/source, markets, aliases and sources; name ordering and country-list indexes on `merchants` |
 | `merchant_identity_keys` | Shared Rust-normalized name and parsed host, plus deterministic name/host keys; B-tree rule lookup and host indexes, with a trigram candidate index |
 | `catalog_revision` | Transactional revision advanced by catalog-write triggers; guards provider dedupe against concurrent edits |
+| `catalog_counts` | Exact pagination totals by counterparty type and market, maintained by statement-level merchant triggers |
 | `merchant_search` | Normalized name/alias text and generated lexeme vector; full-text index retrieves bounded merchant pools |
 | `merchant_search_words` | Distinct search lexemes with B-tree identity and GIN trigram indexes; fuzzy spelling expansion without merchant-sized trigram posting lists |
 | `aliases` | Merchant ID and normalized alias; indexed exact-name lookup |
@@ -38,7 +39,7 @@ and are not stored; merchant and location redirects preserve retired identities.
 
 The application reads authoritative columns directly and maps PostgreSQL rows to
 Rust structs. Lists are decoded directly as PostgreSQL arrays; JSON is decoded only for
-external place maps and resolution provenance/context. There are no
+resolution provenance/context. There are no
 `*_documents` views or SQL conversions of complete catalog objects into JSON.
 Normal writes must still use the store so derived alias/search/market indexes
 stay consistent with source refreshes, links and manual corrections.
@@ -234,14 +235,31 @@ inputs separately so source refreshes cannot overwrite corrections or delete
 manually created merchants. Removing either input store requires changing those
 product behaviors or replacing its persistence; neither is an enrichment cache.
 
-`place_ids` (`jsonb`) contains external provider evidence such as Apple and Google
-place IDs for one outlet; these differ from the source's `external_id` and can
-connect records from different datasets. Some providers repeat their own source
-identity in this map, but deleting the map would discard independent evidence.
+Provider identity is represented once by `(source, external_id)`. Schema 28
+removes the redundant `place_ids` map. Location matching uses merchant-scoped
+store numbers and address/geography evidence; it does not join different
+providers through a map of third-party identifiers.
 
 All Rust test code live under each crate's `tests/` directory. Modules in
 `tests/unit/` are included as unit tests using `#[path]` to retain private-code
 coverage; command-level integration tests remain at the directory root.
+
+## Retrieval performance checks
+
+The ignored `profile_catalog_retrieval` test measures primary candidate retrieval
+and first-page pagination against a full catalog. Set
+`ULTRAFINANCE_PERF_DATABASE_URL` to the database to inspect and run:
+
+```sh
+cargo test --locked -p ultrafinance-core profile_catalog_retrieval -- --ignored --nocapture
+```
+
+It performs read-only catalog queries, reports first and repeated timings, and
+never calls a model provider. Candidate/outlet caches remain bounded and follow
+the catalog revision. Outlet retrieval and provenance hydration use batches;
+Foursquare provenance resolves public IDs once and uses numeric owner indexes.
+Pagination reads exact `catalog_counts` totals after `database init`; older
+catalogs retain revision-cached exact counts until initialized.
 
 ## Import and schema review (2026-10-17)
 
@@ -273,8 +291,8 @@ The remaining apparent duplication serves separate purposes:
 - `aliases`, `merchant_search`, and `merchant_identity_keys` are derived lookup
   structures for exact search, full-text search, and reconciliation respectively.
 - Locations retain addresses and provider identities; their source references
-  allow ownership to follow merchant relinks. `place_ids` is a variable provider
-  map, so JSONB is appropriate here. Merchant lists are already native arrays.
+  allow ownership to follow merchant relinks. Provider identity uses
+  `(source, external_id)`; merchant lists are native arrays.
 - `merchant_search_words` may retain obsolete vocabulary after ordinary updates.
   It is a candidate expansion dictionary, not authoritative merchant evidence;
   search still retrieves current merchant rows.
@@ -306,3 +324,107 @@ The existing identity IDs, table names, foreign keys, and search indexes remain.
 Explicit types survive both individual and bulk writes and canonical rebuilds.
 Institution identity keys are type-qualified to avoid automatic cross-type merges.
 This migration does not infer institutions from existing names or categories.
+
+### Foursquare categories (schema version 26)
+
+`merchants.category_ids` and `manual_merchants.category_ids` store Foursquare
+Places OS category assignments as `TEXT[]`; retained non-Foursquare source inputs
+use `source_records.input_category_ids`. Canonical merges combine and deduplicate
+assignments. Categories describe merchant businesses, and linked outlets may
+contribute different assignments to the same merchant.
+
+Schema 29 replaces these text arrays with integer foreign keys (see below).
+The public API resolves names and root-to-leaf paths from the database.
+Unrecognized IDs survive without fabricated labels.
+
+Migration 26 adds empty assignment lists. Reimport Foursquare prepared data to
+populate existing merchants because previous database imports discarded these
+fields. Legacy prepared bundles are supported through their raw place category
+IDs. Follow the normal administrator-led schema upgrade cutover before release.
+
+### Per-place category deltas (schema version 27)
+
+`foursquare_categories` stores `external_id`, `identity_external_id`, and `category_ids TEXT[]` for each
+Foursquare source identity. Ownership is resolved through current outlets and
+addressless identities, so manual links and merchant merges preserve assignments
+without duplicating merchant ownership. `identity_external_id` supplies a fallback
+for addressless places in legacy grouped bundles; an actual per-place identity
+takes precedence when present. These assignments are retained independently of
+merchant categories. A new merchant takes its initial categories from its first
+place; subsequent Foursquare imports preserve those categories rather than
+rebuilding a union over its places. Existing merchant categories are preserved.
+
+Migration 27 creates the assignment table without distributing existing merchant
+unions back to places. Reimport the complete relevant Foursquare export after the
+administrator schema upgrade to populate it. Until that pass finishes, touched
+merchants can have incomplete category coverage from places not yet reimported.
+
+Regular reimports compare canonical fields and outlet records. Unchanged outlets
+skip staging/upserts. Alias/search projections update only when normalized names
+change; identity keys update only when name/website/rule inputs change. Country
+coverage is recalculated only for affected ownership or country inputs. Completely
+unchanged replays do not advance the catalog revision.
+
+### Provider identifier normalization (schema version 28)
+
+Location provider identity uses `(source, external_id)`. `location_records.place_ids`
+is removed, along with identifier-map matching rules and duplicate Foursquare ID
+writes. Older location exports may still contain `place_ids`; readers discard that
+legacy field and exports omit it. Matching retains same-source identity conflicts,
+address/unit/store-number checks, merchant boundaries, and coordinate vetoes.
+
+`foursquare_categories.identity_external_id` is now nullable and stored only for a
+distinct legacy group reference. Equal self-references become NULL. The lookup index
+contains only non-null references; ordinary per-place assignments store their ID once.
+
+`source_records.input_id` is also nullable. When it would equal `external_id`, writes
+store NULL and reads reconstruct the original input ID. A distinct original object
+ID is retained verbatim. Source exports and refresh semantics stay equivalent.
+
+Migration 28 updates existing rows and drops the redundant location column while
+preserving source keys, local IDs and relationships. Apply it through administrator
+`database init` before deploying this application. It requires no source reimport
+for identifier normalization; the earlier category-assignment backfill still does.
+
+### Category taxonomy and integer assignments (schema version 29)
+
+`categories` stores `id INTEGER GENERATED ALWAYS AS IDENTITY`, unique Foursquare
+`external_id`, nullable `name`, and nullable `parent_id` referencing the same table.
+The migration seeds all 1,279 taxonomy entries. Unknown IDs receive stable internal
+IDs with no invented name or parent. IDs are allocated permanently, independently
+of CSV ordering. Taxonomy name and parent edits take effect on subsequent reads
+and invalidate catalog caches, without rebuilding the application.
+
+Assignments use `merchant_categories(merchant_id BIGINT, category_id INTEGER)`,
+`manual_merchant_categories(merchant_id TEXT, category_id INTEGER)`,
+`source_record_categories(source, external_id, category_id INTEGER)`, and
+`foursquare_place_categories(external_id, category_id INTEGER)`. Each table has a
+primary key covering its owner and category, a category foreign key, and an owner
+foreign key with cascading deletion. Merchant IDs use the existing numeric
+merchant key; provider source keys retain their normal meaning. The
+`foursquare_categories` table retains only per-place metadata, including empty
+assignments and distinct legacy group references.
+
+Migration 29 converts all existing arrays, including unknown IDs, then drops the
+old text-array columns. No reimport is needed for this migration. Normal imports
+resolve provider IDs through the shared taxonomy, retain new unknown IDs, and
+replace only changed assignment rows. Taxonomy names are never overwritten by a
+place import. Portable source/merchant JSON and public API IDs remain Foursquare
+IDs, so internal database integers do not become an export contract.
+
+### Foursquare import fingerprints (schema version 30)
+
+`foursquare_import_fingerprints` is a derived cache of SHA-256 fingerprints and
+numeric merchant ownership, keyed by provider place ID. A matching fingerprint
+skips merchant loading and reconciliation. The hash includes applied input fields,
+raw place data (and therefore merchants-only/full mode), and a reconciliation
+version. It excludes the dataset snapshot version so unchanged places can skip
+across successive exports.
+
+Successful regular imports populate the cache transactionally. Existing catalogs
+and initial-load bootstraps need one regular pass to populate it. Statement-level
+triggers invalidate affected entries on merchant/manual/source/ownership and
+place-category writes, including links, merges, deletes, and truncation. Cache
+writes do not advance the catalog revision; previews roll them back. Clearing the
+cache is safe and forces a normal reconciliation pass without changing catalog
+records.

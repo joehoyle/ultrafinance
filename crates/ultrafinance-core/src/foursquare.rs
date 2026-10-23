@@ -198,6 +198,13 @@ pub(crate) fn prepare_rows(
             source: "foursquare".into(),
             external_id: key.clone(),
             merchant: Merchant {
+                categories: None,
+                category_ids: place["fsq_category_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| id.as_str().map(str::to_owned))
+                    .collect(),
                 counterparty_type: Default::default(),
                 id: key.clone(),
                 name: name.into(),
@@ -283,7 +290,7 @@ pub(crate) fn locations(record: &SourceRecord) -> Result<Vec<crate::location::Lo
             },
             aliases: vec![alias],
             transaction_pattern: None,
-            place_ids: BTreeMap::from([("foursquare".into(), id)]),
+            legacy_place_ids: Default::default(),
             manual_override: false,
             attribution: record.attribution.clone(),
             license: record.license.clone(),
@@ -293,6 +300,28 @@ pub(crate) fn locations(record: &SourceRecord) -> Result<Vec<crate::location::Lo
         records.push(outlet);
     }
     Ok(records)
+}
+
+/// Recover assignments from older prepared bundles whose merchant lacked IDs.
+pub(crate) fn hydrate_categories(record: &mut SourceRecord) {
+    let grouped = record.raw["places"].as_array().is_some_and(|places| {
+        places.iter().any(|place| {
+            place["fsq_place_id"]
+                .as_str()
+                .is_some_and(|id| format!("place:{id}") != record.external_id)
+        })
+    });
+    if record.source == "foursquare" && (record.merchant.category_ids.is_empty() || grouped) {
+        record.merchant.category_ids = record.raw["places"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|place| place["fsq_category_ids"].as_array().into_iter().flatten())
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+    }
+    record.merchant.category_ids.sort();
+    record.merchant.category_ids.dedup();
 }
 
 #[cfg(test)]

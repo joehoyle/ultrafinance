@@ -100,7 +100,7 @@ fn preflight() -> Result<()> {
     Ok(())
 }
 
-fn target(cluster: &str, task: &str, response: &Value) -> Result<String> {
+pub(super) fn target(cluster: &str, task: &str, response: &Value) -> Result<String> {
     let runtime = response["tasks"][0]["containers"]
         .as_array()
         .and_then(|containers| containers.iter().find(|c| c["name"] == "cli"))
@@ -114,7 +114,7 @@ fn target(cluster: &str, task: &str, response: &Value) -> Result<String> {
     ))
 }
 
-fn database_environment(definition: &Value, name: &str) -> Result<String> {
+pub(super) fn database_environment(definition: &Value, name: &str) -> Result<String> {
     definition["taskDefinition"]["containerDefinitions"]
         .as_array()
         .and_then(|containers| containers.iter().find(|c| c["name"] == "cli"))

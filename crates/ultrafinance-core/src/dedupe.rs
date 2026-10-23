@@ -402,6 +402,9 @@ pub(crate) fn combine(target: &mut Merchant, other: &Merchant) {
     target.aliases.push(other.name.clone());
     target.aliases.extend(other.aliases.clone());
     target.sources.extend(other.sources.clone());
+    target.category_ids.extend(other.category_ids.clone());
+    target.category_ids.sort();
+    target.category_ids.dedup();
     target.markets.extend(other.markets.clone());
     if target.website.is_none() {
         target.website = other.website.clone();

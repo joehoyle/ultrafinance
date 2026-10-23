@@ -55,6 +55,8 @@ async fn exact_matches_bypass_jev_but_collisions_and_fuzzy_candidates_do_not() {
 fn catalogs_larger_than_jev_choice_limit_are_supported() {
     let merchants: Vec<_> = (0..300)
         .map(|index| Merchant {
+            categories: None,
+            category_ids: vec![],
             counterparty_type: Default::default(),
             id: format!("mer_{index}"),
             name: format!("Merchant {index}"),

@@ -15,6 +15,7 @@ RUN cargo chef cook --locked --release --recipe-path recipe.json -p ultrafinance
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY website ./website
+COPY deploy/rds-ca ./deploy/rds-ca
 ARG ULTRAFINANCE_BUILD_TAG=""
 ARG ULTRAFINANCE_BUILD_REVISION=""
 ARG ULTRAFINANCE_BUILD_DIRTY="false"

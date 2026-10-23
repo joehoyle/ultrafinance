@@ -11,12 +11,14 @@ CREATE TABLE IF NOT EXISTS ultrafinance_logos.assets (
 );
 CREATE TABLE IF NOT EXISTS ultrafinance_logos.website_logos (
     website_url text PRIMARY KEY,
-    original_asset_id text NOT NULL REFERENCES ultrafinance_logos.assets(id),
     display_asset_id text NOT NULL REFERENCES ultrafinance_logos.assets(id),
     source_url text NOT NULL,
     kind text NOT NULL CHECK (kind IN ('logo', 'touch_icon', 'manifest_icon', 'favicon')),
     checked_at timestamptz NOT NULL DEFAULT now()
 );
+-- Upgrade existing installations to display-only storage. Keep unreferenced
+-- asset metadata until storage cleanup has identified the corresponding files.
+ALTER TABLE ultrafinance_logos.website_logos DROP COLUMN IF EXISTS original_asset_id;
 -- Match existing explicit catalog readers without granting public access.
 DO $$
 DECLARE reader record; role_name text;

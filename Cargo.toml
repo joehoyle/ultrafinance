@@ -27,6 +27,8 @@ utoipa = "6"
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 postgres-native-tls = "0.5"
 native-tls = "0.2"
+openssl = "0.10"
+postgres-openssl = "0.5"
 
 # Fuzzy scoring is CPU-heavy; keep normal `cargo run` practical while retaining debug symbols.
 [profile.dev.package.ultrafinance-core]

@@ -103,7 +103,8 @@ where
     let sink = tx.copy_in("COPY initial_source_stage FROM STDIN BINARY")?;
     let mut writer = BinaryCopyInWriter::new(sink, &[Type::TEXT; 5]);
     produce(&mut |records| {
-        for r in records {
+        for mut r in records {
+            crate::foursquare::hydrate_categories(&mut r);
             if r.source != "foursquare" {
                 bail!("initial Foursquare load received another source");
             }

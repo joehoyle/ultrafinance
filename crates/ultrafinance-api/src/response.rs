@@ -5,6 +5,9 @@ use utoipa::ToSchema;
 
 #[derive(Serialize, ToSchema)]
 pub struct Merchant {
+    /// Foursquare business categories, with paths ordered from root to leaf. Omitted when unknown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    categories: Vec<ultrafinance_core::categories::Category>,
     /// Stable ID in this service's merchant catalog.
     id: String,
     name: String,
@@ -13,23 +16,22 @@ pub struct Merchant {
     markets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     website: Option<String>,
-    /// Verified public image URL for the merchant brand, when available.
+    /// Brand image URL, when available. Resolve /logos/assets/... paths against the API origin.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo_url: Option<String>,
-    /// Attribution for the logo URL, such as an official website or import source.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    logo_source: Option<String>,
 }
 
 impl From<ultrafinance_core::Merchant> for Merchant {
     fn from(value: ultrafinance_core::Merchant) -> Self {
         Self {
+            categories: value
+                .categories
+                .unwrap_or_else(|| ultrafinance_core::categories::resolve(&value.category_ids)),
             id: value.id,
             name: value.name,
             markets: value.markets,
             website: value.website,
             logo_url: value.logo_url,
-            logo_source: value.logo_source,
         }
     }
 }
@@ -78,9 +80,6 @@ pub struct EnrichResponse {
     counterparties: Vec<Counterparty>,
     /// Independently extracted geography or a supported catalog outlet match.
     location: LocationResult,
-    /// Source attribution for matched merchants and outlets. Omitted when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    attributions: Vec<String>,
 }
 
 impl From<ultrafinance_core::EnrichResponse> for EnrichResponse {
@@ -97,7 +96,6 @@ impl From<ultrafinance_core::EnrichResponse> for EnrichResponse {
                 }
             },
             location: value.location,
-            attributions: value.attributions,
         }
     }
 }

@@ -13,7 +13,7 @@ fn import_lookups_probe_keys_without_scanning_the_catalog() -> Result<()> {
         // Temp relations shadow the real tables. Leave them unanalyzed, like
         // rapidly growing catalogs between auto-analyze passes. Wide payloads
         // make an accidental catalog scan expensive without a huge test fixture.
-        tx.batch_execute("CREATE TEMP TABLE source_provenance(id BIGINT PRIMARY KEY,attribution TEXT,license TEXT,url TEXT); INSERT INTO source_provenance VALUES(1,'fixture','licence','url'); CREATE TEMP TABLE source_records(source TEXT,external_id TEXT,payload TEXT,source_provenance_id BIGINT,PRIMARY KEY(source,external_id)); CREATE TEMP TABLE merchants(id TEXT PRIMARY KEY,payload TEXT); INSERT INTO source_records SELECT 'fixture',i::text,repeat('x',512),1 FROM generate_series(1,20000) i; INSERT INTO merchants SELECT i::text,repeat('x',512) FROM generate_series(1,20000) i")?;
+        tx.batch_execute("CREATE TEMP TABLE source_provenance(id BIGINT PRIMARY KEY,attribution TEXT,license TEXT,url TEXT); INSERT INTO source_provenance VALUES(1,'fixture','licence','url'); CREATE TEMP TABLE source_records(source TEXT,external_id TEXT,payload TEXT,source_provenance_id BIGINT,PRIMARY KEY(source,external_id)); CREATE TEMP TABLE merchants(id TEXT PRIMARY KEY,payload TEXT,merchant_key BIGINT UNIQUE); INSERT INTO source_records SELECT 'fixture',i::text,repeat('x',512),1 FROM generate_series(1,20000) i; INSERT INTO merchants SELECT i::text,repeat('x',512),i FROM generate_series(1,20000) i")?;
         let sources = vec!["fixture".to_owned(); 5000];
         let external: Vec<_> = (1..=5000).map(|i| i.to_string()).collect();
         let rows = tx.query(SOURCE_LOOKUP, &[&sources, &external])?;
@@ -197,6 +197,7 @@ fn version_six_identity_backfill_crosses_bounded_pages() -> Result<()> {
     legacy.run(|client| {
         client.batch_execute(concat!(include_str!("../version_18_public_ids.sql"), include_str!("../version_14_json.sql")))?;
         client.batch_execute(include_str!("../version_12_locations.sql"))?;
+        client.batch_execute(include_str!("../version_28_categories.sql"))?;
         client.batch_execute("INSERT INTO merchants(id,name,website,markets_json,aliases_json,sources_json) SELECT 'legacy-'||lpad(i::text,8,'0'),'Café Brand LLC',CASE WHEN i%2=0 THEN 'https://www.brand.test/ca' ELSE NULL END,'[]','[]','[]' FROM generate_series(0,5000) i; DROP TABLE merchant_identity_keys; DROP FUNCTION advance_catalog_revision() CASCADE; DROP TABLE catalog_revision; UPDATE ultrafinance_schema SET version=6")?;
         Ok(())
     })?;

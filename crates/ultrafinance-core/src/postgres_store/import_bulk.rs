@@ -170,7 +170,7 @@ fn apply(
                     Some(r.url.clone()),
                     r.raw["transaction_text_regexp"].as_str().map(str::to_owned),
                     r.raw["parent_id"].as_str().map(str::to_owned),
-                    Some(r.merchant.id.clone()),
+                    (r.merchant.id != r.external_id).then(|| r.merchant.id.clone()),
                     Some(r.merchant.name.clone()),
                 ]);
                 updates.push(r);
@@ -185,6 +185,7 @@ fn apply(
             copy_input_fields(tx, &updates)?;
             tx.batch_execute("INSERT INTO source_provenance(source,attribution,license,url) SELECT DISTINCT source,attribution,license,url FROM import_source_stage ON CONFLICT(source,attribution,license,url) DO NOTHING")?;
             tx.execute("INSERT INTO source_records(source,external_id,merchant_id,version,source_provenance_id,transaction_pattern,parent_id,input_id,input_name,input_website,input_logo_url,input_logo_source,input_markets,input_aliases,input_sources,country_hints,dataset_region,negative_aliases,input_counterparty_type) SELECT s.source,s.external_id,s.merchant_id,s.version,p.id,s.transaction_pattern,s.parent_id,i.input_id,i.input_name,i.input_website,i.input_logo_url,i.input_logo_source,i.input_markets,i.input_aliases,i.input_sources,i.country_hints,i.dataset_region,i.negative_aliases,i.input_counterparty_type FROM import_source_stage s JOIN import_input_stage i USING(source,external_id) JOIN source_provenance p ON (p.source,p.attribution,p.license,p.url)=(s.source,s.attribution,s.license,s.url) ON CONFLICT(source,external_id) DO UPDATE SET merchant_id=excluded.merchant_id,version=excluded.version,source_provenance_id=excluded.source_provenance_id,transaction_pattern=excluded.transaction_pattern,parent_id=excluded.parent_id,input_id=excluded.input_id,input_name=excluded.input_name,input_website=excluded.input_website,input_logo_url=excluded.input_logo_url,input_logo_source=excluded.input_logo_source,input_markets=excluded.input_markets,input_aliases=excluded.input_aliases,input_sources=excluded.input_sources,country_hints=excluded.country_hints,dataset_region=excluded.dataset_region,negative_aliases=excluded.negative_aliases,input_counterparty_type=excluded.input_counterparty_type",&[])?;
+            write_source_categories(tx, &updates)?;
             tx.batch_execute(
                 "TRUNCATE import_source_stage,import_merchant_stage,import_input_stage",
             )?;
@@ -202,7 +203,8 @@ fn apply(
 }
 
 fn same_canonical_fields(a: &Merchant, b: &Merchant) -> bool {
-    a.counterparty_type == b.counterparty_type
+    a.category_ids == b.category_ids
+        && a.counterparty_type == b.counterparty_type
         && a.name == b.name
         && a.website == b.website
         && a.logo_url == b.logo_url
@@ -296,6 +298,7 @@ fn insert_new_merchants(
                 &rows,
                 "COPY merchants(id,name,website,logo_url,logo_source,markets,aliases,sources,counterparty_type) FROM STDIN BINARY",
             )?;
+            write_categories(tx, &rows)?;
             inserted += rows.len();
             rows.clear();
             progress.advance(inserted);
@@ -326,6 +329,7 @@ pub(super) fn copy_new_sources(
     let mut writer = BinaryCopyInWriter::new(sink, &types);
     for (r, id) in records.iter().zip(identities) {
         let m = &r.merchant;
+        let input_id = (m.id != r.external_id).then_some(m.id.as_str());
         let strings = |key: &str| -> Vec<String> {
             r.raw[key]
                 .as_array()
@@ -347,7 +351,7 @@ pub(super) fn copy_new_sources(
             )],
             &r.raw["transaction_text_regexp"].as_str(),
             &r.raw["parent_id"].as_str(),
-            &m.id,
+            &input_id,
             &m.name,
             &m.website,
             &m.logo_url,
@@ -362,6 +366,7 @@ pub(super) fn copy_new_sources(
         ])?;
     }
     writer.finish()?;
+    write_source_categories(tx, &records.iter().collect::<Vec<_>>())?;
     Ok(())
 }
 
@@ -422,6 +427,7 @@ fn copy_input_fields(tx: &mut Transaction<'_>, records: &[&SourceRecord]) -> Res
     let mut writer = BinaryCopyInWriter::new(sink, &types);
     for r in records {
         let m = &r.merchant;
+        let input_id = (m.id != r.external_id).then_some(m.id.as_str());
         let hints: Vec<String> = r.raw["countryHints"]
             .as_array()
             .into_iter()
@@ -438,7 +444,7 @@ fn copy_input_fields(tx: &mut Transaction<'_>, records: &[&SourceRecord]) -> Res
         writer.write(&[
             &r.source,
             &r.external_id,
-            &m.id,
+            &input_id,
             &m.name,
             &m.website,
             &m.logo_url,
@@ -479,7 +485,7 @@ fn rebuild(
             HashMap::new()
         } else {
             tx.query(
-                "SELECT * FROM manual_merchants WHERE id=ANY($1)",
+                "SELECT *,merchant_category_ids(id,true) AS category_ids FROM manual_merchants WHERE id=ANY($1)",
                 &[&existing_ids],
             )?
             .into_iter()
@@ -521,7 +527,6 @@ fn rebuild(
         let mut search = Vec::new();
         let mut existing_indexes = Vec::new();
         for id in ids {
-            let cached = prepared_merchants.contains_key(id);
             let m = if let Some(prepared) = prepared_merchants.remove(id) {
                 if let Some(before) = canonical_before.get(id.as_str())
                     && !same_canonical_fields(before, &prepared)
@@ -538,12 +543,11 @@ fn rebuild(
                 canonical_rows.push(m.clone());
                 m
             };
-            let unchanged_names = cached
-                && canonical_before
-                    .get(id.as_str())
-                    .is_some_and(|before| before.name == m.name && before.aliases == m.aliases);
+            let unchanged_names = canonical_before
+                .get(id.as_str())
+                .is_some_and(|before| before.name == m.name && before.aliases == m.aliases);
             if unchanged_names {
-                // Append-only evidence proved these canonical fields unchanged.
+                // Unchanged names preserve their existing matching projections.
                 // Their aliases/search rows already represent the same fields.
                 // Still refresh rule keys, which can change between imports.
                 canonical_keys.push(m);
@@ -555,19 +559,15 @@ fn rebuild(
                 .collect();
             names.sort();
             names.dedup();
-            let before_names = if cached {
-                canonical_before.get(id.as_str()).map(|before| {
-                    let mut old: Vec<_> = std::iter::once(&before.name)
-                        .chain(before.aliases.iter())
-                        .map(|name| normalize(name))
-                        .collect();
-                    old.sort();
-                    old.dedup();
-                    old
-                })
-            } else {
-                None
-            };
+            let before_names = canonical_before.get(id.as_str()).map(|before| {
+                let mut old: Vec<_> = std::iter::once(&before.name)
+                    .chain(before.aliases.iter())
+                    .map(|name| normalize(name))
+                    .collect();
+                old.sort();
+                old.dedup();
+                old
+            });
             canonical_keys.push(m);
             if before_names.as_ref().is_some_and(|old| old == &names) {
                 continue;
@@ -590,6 +590,7 @@ fn rebuild(
         if !canonical_rows.is_empty() {
             copy_merchants(tx, &canonical_rows)?;
             tx.execute(UPSERT_MERCHANTS, &[])?;
+            write_categories(tx, &canonical_rows)?;
         }
         indexed_import::write_keys(tx, &canonical_keys)?;
         canonical.finish();
@@ -693,34 +694,72 @@ pub(super) fn write_initial_merchants(
     writer.finish()?;
     let keys = entries.iter().map(|(m, k)| (m.id.clone(), *k)).collect();
     let merchants: Vec<_> = entries.iter().map(|(m, _)| m.clone()).collect();
+    write_categories(tx, &merchants)?;
     write_initial_derived(tx, &merchants, &keys)
 }
 
+/// Update canonical fields and only the derived projections whose inputs changed.
+/// The caller holds the catalog writer lock and supplies the state read earlier
+/// in this transaction, including any merchants it has just inserted.
 pub(super) fn write_current_merchants(
     tx: &mut Transaction<'_>,
     merchants: &[Merchant],
+    before: &HashMap<String, Merchant>,
 ) -> Result<()> {
-    if merchants.is_empty() {
+    let changed: Vec<_> = merchants
+        .iter()
+        .filter(|m| before.get(&m.id) != Some(m))
+        .cloned()
+        .collect();
+    if changed.is_empty() {
         return Ok(());
     }
+    let mut aliases = Vec::new();
+    let mut search = Vec::new();
+    let mut existing_names = Vec::new();
+    let mut identity = Vec::new();
+    for m in &changed {
+        let names = normalized_names(m);
+        let previous = before.get(&m.id);
+        if previous.is_none_or(|old| normalized_names(old) != names) {
+            if previous.is_some() {
+                existing_names.push(m.id.clone());
+            }
+            for name in &names {
+                aliases.push(vec![Some(m.id.clone()), Some(name.clone())]);
+            }
+            search.push(vec![Some(m.id.clone()), Some(names.join(" \n "))]);
+        }
+        if previous.is_none_or(|old| {
+            normalize(&old.name) != normalize(&m.name)
+                || crate::dedupe::host(&old.website) != crate::dedupe::host(&m.website)
+                || crate::dedupe::deterministic_key(old) != crate::dedupe::deterministic_key(m)
+        }) {
+            identity.push(m.clone());
+        }
+    }
     tx.batch_execute("CREATE TEMP TABLE IF NOT EXISTS import_merchant_stage(id TEXT,name TEXT,website TEXT,logo_url TEXT,logo_source TEXT,markets TEXT[],aliases TEXT[],sources TEXT[],counterparty_type TEXT) ON COMMIT DROP; TRUNCATE import_merchant_stage")?;
-    copy_merchants(tx, merchants)?;
+    copy_merchants(tx, &changed)?;
     tx.batch_execute(UPSERT_MERCHANTS)?;
-    let ids: Vec<_> = merchants.iter().map(|m| m.id.clone()).collect();
-    tx.execute(
-        "DELETE FROM aliases WHERE merchant_id=ANY(merchant_keys($1))",
-        &[&ids],
-    )?;
-    tx.execute(
-        "DELETE FROM merchant_search WHERE merchant_id=ANY(merchant_keys($1))",
-        &[&ids],
-    )?;
-    tx.execute(
-        "DELETE FROM merchant_identity_keys WHERE merchant_id=ANY(merchant_keys($1))",
-        &[&ids],
-    )?;
-    let keys = numeric_ids::keys(tx, &ids)?;
-    write_initial_derived(tx, merchants, &keys)
+    write_categories(tx, &changed)?;
+    if !aliases.is_empty() || !existing_names.is_empty() {
+        write_aliases(tx, &existing_names, &aliases)?;
+    }
+    write_search(tx, &search)?;
+    if !identity.is_empty() {
+        indexed_import::write_keys(tx, &identity)?;
+    }
+    Ok(())
+}
+
+fn normalized_names(merchant: &Merchant) -> Vec<String> {
+    let mut names: Vec<_> = std::iter::once(&merchant.name)
+        .chain(&merchant.aliases)
+        .map(|n| normalize(n))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn write_initial_derived(
@@ -798,3 +837,30 @@ fn copy_derived_rows(
 #[cfg(test)]
 #[path = "../../tests/unit/postgres_store/import_bulk/tests.rs"]
 mod tests;
+
+fn write_categories(tx: &mut Transaction<'_>, merchants: &[Merchant]) -> Result<()> {
+    category_assignments::write(
+        tx,
+        category_assignments::Owner::Merchant,
+        &merchants
+            .iter()
+            .map(|m| (m.id.as_str(), "", m.category_ids.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+}
+fn write_source_categories(tx: &mut Transaction<'_>, records: &[&SourceRecord]) -> Result<()> {
+    category_assignments::write(
+        tx,
+        category_assignments::Owner::Source,
+        &records
+            .iter()
+            .map(|r| {
+                (
+                    r.external_id.as_str(),
+                    r.source.as_str(),
+                    r.merchant.category_ids.as_slice(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}

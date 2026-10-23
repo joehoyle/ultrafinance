@@ -341,6 +341,42 @@ fn parse_pending_answer(
     parse_choice_answer(answer, &candidates, threshold)
 }
 
+// After recognizing the trading name, exact catalog name + locality support
+// can supply a country preference. Conflicting countries remain ambiguous;
+// this never verifies transaction geography or removes a global name choice.
+fn identity_country(pending: &Pending, group: &[usize]) -> Option<String> {
+    if let Some(country) = &pending.country {
+        return Some(country.clone());
+    }
+    let mut country: Option<String> = None;
+    for support in group
+        .iter()
+        .flat_map(|&index| &pending.choices[index].members)
+        .flat_map(|&member| &pending.candidates[member].interpretation_evidence)
+    {
+        let Some(outlet) = &support.outlet else {
+            continue;
+        };
+        if !support.name_exact
+            || !support
+                .possible_location
+                .as_deref()
+                .is_some_and(|city| store::normalize(city) == store::normalize(&outlet.city))
+        {
+            continue;
+        }
+        let supported = outlet.country.as_deref()?;
+        if country
+            .as_deref()
+            .is_some_and(|previous| !previous.eq_ignore_ascii_case(supported))
+        {
+            return None;
+        }
+        country = Some(supported.to_ascii_uppercase());
+    }
+    country
+}
+
 fn followup_question(pending: &Pending, answer: &Value, threshold: f64) -> Result<Option<Value>> {
     let Some(mut question) = pending.identity_question.clone() else {
         return Ok(None);
@@ -356,8 +392,21 @@ fn followup_question(pending: &Pending, answer: &Value, threshold: f64) -> Resul
         .into_iter()
         .find(|group| selected == format!("candidate_{}", group[0]))
         .context("Jev chose an unknown trading-name group")?;
+    let matches_location = |index: &usize| {
+        pending.choices[*index].members.iter().any(|&member| {
+            pending.candidates[member].business_evidence["matching_catalog_outlets"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        })
+    };
+    let narrowed_to_outlets = group.iter().any(matches_location);
+    if narrowed_to_outlets {
+        group.retain(matches_location);
+    }
+    question["instructions"]["outlet_location_filter_applied"] = json!(narrowed_to_outlets);
+    let country = identity_country(pending, &group);
     let matches_country = |index: &usize| {
-        pending.country.as_deref().is_some_and(|country| {
+        country.as_deref().is_some_and(|country| {
             pending.choices[*index].members.iter().any(|&member| {
                 pending.candidates[member]
                     .merchant
@@ -367,7 +416,7 @@ fn followup_question(pending: &Pending, answer: &Value, threshold: f64) -> Resul
             })
         })
     };
-    if group.iter().any(matches_country) {
+    if !narrowed_to_outlets && group.iter().any(matches_country) {
         group.retain(matches_country);
     }
     let has_website = |index: &usize| {
@@ -379,10 +428,10 @@ fn followup_question(pending: &Pending, answer: &Value, threshold: f64) -> Resul
                 .is_some_and(|site| !site.trim().is_empty())
         })
     };
-    if group.iter().any(has_website) {
+    if !narrowed_to_outlets && group.iter().any(has_website) {
         group.retain(has_website);
     }
-    question["instructions"]["identity_country"] = json!(pending.country);
+    question["instructions"]["identity_country"] = json!(country);
     let name = &pending.candidates[pending.choices[group[0]].members[0]]
         .merchant
         .name;
@@ -471,11 +520,15 @@ impl Enricher {
             let candidates = request.validate().map(|_| vec![]);
             prepared.push((request.clone(), candidates));
         }
-        self.audit_candidates(prepared, audit, None, true, None).await
+        self.audit_candidates(prepared, audit, None, true, None)
+            .await
     }
 
     /// Resolve processors before the eval's single lookup, retaining its pool.
-    pub(crate) async fn enrich_evaluation_batch(&self, requests: &[EnrichRequest]) -> EvaluatedBatch {
+    pub(crate) async fn enrich_evaluation_batch(
+        &self,
+        requests: &[EnrichRequest],
+    ) -> EvaluatedBatch {
         let inputs = requests
             .iter()
             .map(|r| (r.clone(), r.validate().map(|_| vec![])))
@@ -484,9 +537,10 @@ impl Enricher {
             Ok(audit) => audit,
             Err(error) => {
                 return EvaluatedBatch {
-                    results: requests.iter().map(|_| {
-                        Err(anyhow::anyhow!("Could not start enrichment log: {error:#}"))
-                    }).collect(),
+                    results: requests
+                        .iter()
+                        .map(|_| Err(anyhow::anyhow!("Could not start enrichment log: {error:#}")))
+                        .collect(),
                     evidence: vec![],
                     retrieval: vec![],
                 };
@@ -495,9 +549,19 @@ impl Enricher {
         let mut evidence = Vec::new();
         let mut retrieval = Vec::new();
         let results = self
-            .audit_candidates(inputs, audit, Some(&mut evidence), true, Some(&mut retrieval))
+            .audit_candidates(
+                inputs,
+                audit,
+                Some(&mut evidence),
+                true,
+                Some(&mut retrieval),
+            )
             .await;
-        EvaluatedBatch { results, evidence, retrieval }
+        EvaluatedBatch {
+            results,
+            evidence,
+            retrieval,
+        }
     }
 
     /// Reuse evaluation shortlists unless processor removal changes the query.
@@ -584,9 +648,14 @@ impl Enricher {
         retrieve_candidates: bool,
         evaluation_retrieval: Option<&mut Vec<EvaluationRetrieval>>,
     ) -> Vec<Result<EnrichResponse>> {
-        let mut retrieval: Vec<EvaluationRetrieval> = std::iter::repeat_with(EvaluationRetrieval::default)
-            .take(if evaluation_retrieval.is_some() { inputs.len() } else { 0 })
-            .collect();
+        let mut retrieval: Vec<EvaluationRetrieval> =
+            std::iter::repeat_with(EvaluationRetrieval::default)
+                .take(if evaluation_retrieval.is_some() {
+                    inputs.len()
+                } else {
+                    0
+                })
+                .collect();
         let requests: Vec<_> = inputs.iter().map(|(request, _)| request.clone()).collect();
         let mut processors: Vec<_> = requests.iter().map(|_| Ok(unresolved())).collect();
         self.resolve_processors(&requests, &mut processors, &mut audit)
@@ -613,7 +682,9 @@ impl Enricher {
                         } else {
                             store.search_request_traced(&request, 10)
                         }
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(Ok((candidates, trace))) => {
                             retrieval[index].trace = trace;
                             Ok(candidates)
@@ -970,7 +1041,12 @@ impl Enricher {
                         } else {
                             &[]
                         };
-                        let (location, credits) = crate::location::enrich(&request, outlets);
+                        let merchant = match &response.merchant {
+                            MerchantResult::Matched { data } => Some(data.as_ref()),
+                            _ => None,
+                        };
+                        let (location, credits) =
+                            crate::location::enrich_for_merchant(&request, outlets, merchant);
                         response.location = location;
                         for credit in credits {
                             if !response.attributions.contains(&credit) {
@@ -1251,6 +1327,7 @@ impl Enricher {
         request_body: Value,
         phase: &str,
     ) -> (Result<Value>, Arc<Value>) {
+        let started = std::time::Instant::now();
         let mut received_response = false;
         let response: Result<Value> = async {
             let response = self
@@ -1268,6 +1345,11 @@ impl Enricher {
             response.json().await.context("Jev returned invalid JSON")
         }
         .await;
+        eprintln!(
+            "Enrichment timing: stage=model phase={phase} elapsed_ms={} success={}",
+            started.elapsed().as_millis(),
+            response.is_ok()
+        );
         let request = Arc::new(
             json!({"request_id":uuid::Uuid::new_v4().to_string(),"phase":phase,"status":if received_response { "sent" } else { "attempted" },"body":request_body}),
         );
@@ -1447,8 +1529,13 @@ impl Enricher {
                     if !answer.is_object() {
                         answer = json!({});
                     }
-                    answer["identity_country"] = json!(pending.country);
+                    answer["identity_country"] = identity_questions
+                        .get(&pending.index)
+                        .map(|question| question["instructions"]["identity_country"].clone())
+                        .unwrap_or_else(|| json!(pending.country));
                     if let Some(question) = identity_questions.get(&pending.index) {
+                        answer["outlet_location_filter_applied"] =
+                            question["instructions"]["outlet_location_filter_applied"].clone();
                         answer["identity_choices"] = json!(
                             question["criteria"]
                                 .as_object()

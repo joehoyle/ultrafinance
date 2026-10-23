@@ -125,8 +125,6 @@
     .lookup-pretty h3 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
     .lookup-pretty p { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
     .lookup-map { width: 100%; height: 230px; border: 1px solid var(--line); border-radius: 8px; margin-top: 12px; }
-    .lookup-attributions { margin-top: 20px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
-    .lookup-attributions summary { cursor: pointer; }
     .lookup-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; }
     .lookup-result[data-state="error"] { background: #fff4ef; border-color: #e7cbbd; }
     .lookup-result[data-state="matched"] { background: #edf5df; }
@@ -287,8 +285,11 @@
       const fallback = document.createElement('span');
       fallback.textContent = merchant.name.trim().charAt(0).toUpperCase() || '?';
       logo.append(fallback);
-      const url = safeWebsite(merchant.logo_url);
-      if (url?.protocol === 'https:' && !url.username && !url.password) {
+      let url = null;
+      try {
+        if (merchant.logo_url) url = new URL(merchant.logo_url, window.location.origin);
+      } catch {}
+      if (url && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) {
         const image = document.createElement('img');
         image.alt = '';
         image.style.visibility = 'hidden';
@@ -509,21 +510,7 @@
       } else {
         paragraph('No confident location match.', 'note');
       }
-      const sources = [...(result.attributions || [])];
-      if (merchant?.logo_source) sources.push(`Logo: ${merchant.logo_source}`);
-      if (sources.length) {
-        const details = document.createElement('details');
-        details.className = 'lookup-attributions';
-        const summary = document.createElement('summary');
-        summary.textContent = 'Sources & attribution';
-        details.append(summary);
-        for (const source of sources) {
-          const item = document.createElement('p');
-          item.textContent = source;
-          details.append(item);
-        }
-        lookupPretty.append(details);
-      }
+
     }
     document.getElementById('description').addEventListener('input', event => event.target.setCustomValidity(''));
     lookupForm.addEventListener('submit', async event => {

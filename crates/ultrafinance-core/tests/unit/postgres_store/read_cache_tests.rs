@@ -1,11 +1,44 @@
 use super::*;
+use crate::store::MerchantStore;
+
+#[test]
+fn batch_outlets_preserve_each_owner_order_missing_entries_and_cache() -> Result<()> {
+    let store = crate::store::MerchantStore::temporary()?;
+    for n in 0..4 {
+        let csv = format!(
+            "fsq_place_id,name,country,address,locality,fsq_category_ids,date_closed\n{n},Cafe {n},CA,{n} Main St,Toronto,\"[\"\"restaurant\"\"]\",\n"
+        );
+        store.import(&crate::foursquare::prepare(&csv, "ca")?.0)?;
+    }
+    let ids: Vec<String> = (0..4)
+        .map(|n| store.resolve_source("foursquare", &format!("place:{n}")))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(ids.len(), 4);
+    let mut requested = ids.clone();
+    requested.extend([ids[0].clone(), "absent".to_owned()]);
+    let batch = store.0.cached_locations_many(requested)?;
+    assert_eq!(batch.len(), 5);
+    assert!(batch["absent"].is_empty());
+    for id in &ids {
+        let actual = &batch[id];
+        assert_eq!(actual.len(), 1);
+        assert!(matches!(&actual[0].merchant,
+            crate::location::MerchantReference::Local { merchant_id } if merchant_id == id));
+        let again = store.0.cached_locations(id)?;
+        assert!(Arc::ptr_eq(actual, &again));
+    }
+    Ok(())
+}
 
 #[test]
 fn cached_reads_are_reused_and_follow_external_catalog_writes() -> Result<()> {
     let base = std::env::var("ULTRAFINANCE_TEST_DATABASE_URL")
         .unwrap_or_else(|_| super::super::LOCAL_DATABASE_URL.into());
     let store = PostgresStore::temporary(&base)?;
-    let csv = "fsq_place_id,name,country,address,fsq_category_ids,date_closed\n1,Cafe,CA,1 Main St,\"[\"\"restaurant\"\"]\",\n";
+    let csv = "fsq_place_id,name,country,address,locality,fsq_category_ids,date_closed\n1,Cafe,CA,1 Main St,Toronto,\"[\"\"restaurant\"\"]\",\n";
     let mut place = crate::foursquare::prepare(csv, "ca")?.0.remove(0);
     store.import(std::slice::from_ref(&place))?;
     let id = store.resolve_source("foursquare", "place:1")?.unwrap();
@@ -124,6 +157,7 @@ fn search_vocabulary_backfills_and_follows_bulk_refreshes() -> Result<()> {
     store.run(|client| {
         client.batch_execute(concat!(include_str!("version_18_public_ids.sql"), include_str!("version_14_json.sql")))?;
         client.batch_execute(include_str!("version_12_locations.sql"))?;
+        client.batch_execute(include_str!("version_28_categories.sql"))?;
         client.batch_execute("DROP TRIGGER merchant_search_words_insert ON merchant_search; DROP TRIGGER merchant_search_words_update ON merchant_search; DROP FUNCTION remember_merchant_search_words(); DROP TABLE merchant_search_words; UPDATE ultrafinance_schema SET version=10")?;
         Ok(())
     })?;
@@ -158,5 +192,19 @@ fn search_vocabulary_backfills_and_follows_bulk_refreshes() -> Result<()> {
             .iter()
             .any(|candidate| candidate.merchant.name == "Freshquorium")
     );
+    Ok(())
+}
+
+#[test]
+fn catalog_total_cache_is_invalidated_by_external_writes() -> Result<()> {
+    let store = MerchantStore::temporary()?;
+    assert_eq!(store.list_typed(None, 12, 0, None)?.total, 0);
+    let other = MerchantStore::postgres(store.temporary_url())?;
+    other.put(&serde_json::from_value(
+        serde_json::json!({"id":"new","name":"New","markets":["CA"]}),
+    )?)?;
+    assert_eq!(store.list_typed(None, 12, 0, None)?.total, 1);
+    assert_eq!(store.list_typed(Some("CA"), 12, 0, None)?.total, 1);
+    assert_eq!(store.list_typed(Some("US"), 12, 0, None)?.total, 0);
     Ok(())
 }

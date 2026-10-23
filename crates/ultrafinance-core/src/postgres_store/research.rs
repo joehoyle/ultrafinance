@@ -31,9 +31,9 @@ impl PostgresStore {
                 importer.chunk(vec![record])?;
                 importer.finish()?;
                 let id: String = tx.query_one("SELECT merchant_id FROM source_records WHERE source='web-research' AND external_id=$1", &[&website])?.get(0);
-                merchant = rows::merchant(&tx.query_one("SELECT * FROM merchants WHERE id=$1", &[&id])?)?;
+                merchant = rows::merchant(&tx.query_one("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[&id])?)?;
             } else {
-                merchant = rows::merchant(&tx.query_opt("SELECT * FROM merchants WHERE id=$1", &[&merchant.id])?.context("researched merchant no longer exists")?)?;
+                merchant = rows::merchant(&tx.query_opt("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[&merchant.id])?.context("researched merchant no longer exists")?)?;
             }
             let mut resolution = Resolution::supported(&request, merchant.clone(), vec![]);
             let previous = tx.query_opt(&format!("{} WHERE r.id=$1", rows::RESOLUTIONS), &[&resolution.id])?.map(|r| rows::resolution(&r)).transpose()?;
@@ -66,7 +66,7 @@ impl PostgresStore {
             };
             validate(&alias.merchant)?;
             import_records(&mut tx, std::slice::from_ref(&alias), Some(&[merchant.id.clone()]), None)?;
-            merchant = rows::merchant(&tx.query_one("SELECT * FROM merchants WHERE id=$1", &[&merchant.id])?)?;
+            merchant = rows::merchant(&tx.query_one("SELECT *,merchant_category_ids(id) AS category_ids,category_details(merchant_category_ids(id))::text AS resolved_categories FROM merchants WHERE id=$1", &[&merchant.id])?)?;
             resolution.merchant = merchant.clone();
             resolution.provenance = vec![alias];
             resolution.evidence = Some(serde_json::to_string(&evidence)?);

@@ -180,9 +180,10 @@ pub struct LocationRecord {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub transaction_pattern: Option<String>,
-    /// External place identifiers retained as evidence, not service catalog IDs.
-    #[serde(default)]
-    pub place_ids: std::collections::BTreeMap<String, String>,
+    /// Accept and discard the removed field when reading older exports.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing, rename = "place_ids")]
+    pub legacy_place_ids: serde::de::IgnoredAny,
     /// Protect a reviewed correction from later source refreshes.
     #[serde(default)]
     pub manual_override: bool,
@@ -227,11 +228,6 @@ impl LocationRecord {
             bail!(
                 "outlet aliases must contain at least three normalized characters and at most 4096 bytes"
             );
-        }
-        if self.place_ids.iter().any(|(key, value)| {
-            key.trim().is_empty() || value.trim().is_empty() || key.len() > 64 || value.len() > 512
-        }) {
-            bail!("place IDs must have nonblank provider names and identifiers");
         }
         if let Some(pattern) = &self.transaction_pattern
             && !regex_rules::valid_pattern(pattern)
@@ -284,9 +280,18 @@ pub(crate) fn compatible(a: &LocationHint, b: &LocationHint) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn enrich(
     request: &EnrichRequest,
     outlets: &[LocationRecord],
+) -> (LocationResult, Vec<String>) {
+    enrich_for_merchant(request, outlets, None)
+}
+
+pub(crate) fn enrich_for_merchant(
+    request: &EnrichRequest,
+    outlets: &[LocationRecord],
+    merchant: Option<&crate::Merchant>,
 ) -> (LocationResult, Vec<String>) {
     let extracted = descriptor_geography(&request.description);
     let mut geography = request.location.clone().unwrap_or_default();
@@ -295,6 +300,38 @@ pub(crate) fn enrich(
     if compatible(&geography, &extracted) {
         macro_rules! fill { ($($field:ident),*) => { $(if geography.$field.is_none() { geography.$field = extracted.$field; })* }; }
         fill!(address, city, region, postal_code, country, store_number);
+    }
+    // A descriptor locality need not appear in the general geographic dataset
+    // when the recognized merchant's own outlets independently support it.
+    if geography.city.is_none()
+        && !crate::descriptor_location::billing_description(&request.description)
+        && let Some(merchant) = merchant
+    {
+        let interpretation = crate::interpretation::interpret_merchant(request);
+        let mut cities = std::collections::BTreeMap::new();
+        for city in interpretation.hypotheses.iter().filter_map(|hypothesis| {
+            crate::interpretation::supporting_name(merchant, &hypothesis.merchant_text)?;
+            hypothesis.possible_location.as_deref()
+        }) {
+            for outlet in outlets {
+                let place = outlet.location.geography();
+                if let Some(catalog_city) = &place.city
+                    && normalize(city) == normalize(catalog_city)
+                    && compatible(&geography, &place)
+                    && !request.country.as_ref().is_some_and(|country| {
+                        place
+                            .country
+                            .as_ref()
+                            .is_none_or(|stored| country != stored)
+                    })
+                {
+                    cities.insert(normalize(catalog_city), catalog_city.clone());
+                }
+            }
+        }
+        if cities.len() == 1 {
+            geography.city = cities.into_values().next();
+        }
     }
     let query = normalize(&request.description);
     // A trailing country code can filter catalog outlets even without a city.
@@ -475,11 +512,16 @@ pub fn evaluate(
             }) => store.resolve_source(&source, &external_id)?,
             None => None,
         };
+        let merchant = merchant_id
+            .as_deref()
+            .map(|id| store.get(id))
+            .transpose()?
+            .flatten();
         let outlets = merchant_id
             .map(|id| store.locations(&id))
             .transpose()?
             .unwrap_or_default();
-        let (predicted, _) = enrich(&case.request, &outlets);
+        let (predicted, _) = enrich_for_merchant(&case.request, &outlets, merchant.as_ref());
         let actual = match &predicted {
             LocationResult::Matched { data } | LocationResult::Extracted { data } => {
                 data.geography()

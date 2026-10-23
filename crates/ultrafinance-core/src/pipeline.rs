@@ -42,17 +42,22 @@ pub async fn enrich_locally(
         .process_candidates(vec![(request.clone(), Ok(local_candidates))])
         .await;
     let mut response = results.remove(0)?;
-    let id = match &response.merchant {
-        crate::MerchantResult::Matched { data } => Some(data.id.clone()),
+    let merchant = match &response.merchant {
+        crate::MerchantResult::Matched { data } => Some((**data).clone()),
         _ => None,
     };
     let input = request.clone();
     let (location, credits) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let outlets = id
-            .map(|id| store.locations(&id))
+        let outlets = merchant
+            .as_ref()
+            .map(|merchant| store.locations(&merchant.id))
             .transpose()?
             .unwrap_or_default();
-        Ok(crate::location::enrich(&input, &outlets))
+        Ok(crate::location::enrich_for_merchant(
+            &input,
+            &outlets,
+            merchant.as_ref(),
+        ))
     })
     .await??;
     response.location = location;
@@ -72,6 +77,14 @@ impl Enricher {
     pub(crate) async fn retrieve(&self, request: &EnrichRequest) -> Result<Vec<Candidate>> {
         let store = self.store.clone();
         let input = request.clone();
-        tokio::task::spawn_blocking(move || store.search_primary_request(&input, 10)).await?
+        let started = std::time::Instant::now();
+        let result =
+            tokio::task::spawn_blocking(move || store.search_primary_request(&input, 10)).await?;
+        eprintln!(
+            "Enrichment timing: stage=catalog elapsed_ms={} success={}",
+            started.elapsed().as_millis(),
+            result.is_ok()
+        );
+        result
     }
 }

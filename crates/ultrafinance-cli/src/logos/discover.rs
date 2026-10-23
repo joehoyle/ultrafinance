@@ -210,15 +210,48 @@ pub async fn discover(website: &str, explicit: Option<&str>) -> Result<Discovere
         .context("logo discovery exceeded two minutes")?
 }
 async fn discover_inner(website: &str, explicit: Option<&str>) -> Result<Discovered> {
+    discover_with_fetch(website, explicit, fetch).await
+}
+
+fn conventional_icons(base: &Url) -> Vec<Candidate> {
+    [
+        ("/apple-touch-icon.png", LogoKind::TouchIcon),
+        ("/apple-touch-icon-precomposed.png", LogoKind::TouchIcon),
+        ("/favicon.ico", LogoKind::Favicon),
+        ("/favicon.png", LogoKind::Favicon),
+    ]
+    .into_iter()
+    .filter_map(|(path, kind)| candidate(base, path, kind))
+    .collect()
+}
+
+async fn discover_with_fetch<F, Fut>(
+    website: &str,
+    explicit: Option<&str>,
+    mut download: F,
+) -> Result<Discovered>
+where
+    F: FnMut(Url, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Download>>,
+{
     let website = Url::parse(&normalize_website(website)?)?;
-    let mut candidates = if let Some(url) = explicit {
-        vec![candidate(&website, url, LogoKind::Logo).context("invalid explicit image URL")?]
-    } else {
-        let page = fetch(website.clone(), 2 * 1024 * 1024).await?;
+    let mut seen = HashSet::new();
+    if let Some(url) = explicit {
+        let c = candidate(&website, url, LogoKind::Logo).context("invalid explicit image URL")?;
+        return evaluate_candidates(vec![c], &mut download, &mut seen).await;
+    }
+    let mut fallback_base = website.clone();
+    // Reserve part of the overall two-minute deadline for conventional paths,
+    // even when page redirects, manifests, or declared images stall.
+    let primary = async {
+        let page =
+            tokio::time::timeout(Duration::from_secs(20), download(website, 2 * 1024 * 1024))
+                .await??;
+        fallback_base = page.url.clone();
         let html = std::str::from_utf8(&page.bytes).context("website HTML is not UTF-8")?;
         let (mut candidates, manifests) = html_candidates(html, &page.url);
         for manifest in manifests {
-            if let Ok(data) = fetch(manifest, 256 * 1024).await
+            if let Ok(data) = download(manifest, 256 * 1024).await
                 && let Ok(value) = serde_json::from_slice::<Value>(&data.bytes)
                 && let Some(icons) = value["icons"].as_array()
             {
@@ -238,14 +271,27 @@ async fn discover_inner(website: &str, explicit: Option<&str>) -> Result<Discove
                 }
             }
         }
-        if let Some(c) = candidate(&page.url, "/favicon.ico", LogoKind::Favicon) {
-            candidates.push(c);
-        }
-        candidates
+        // Leave four image slots for fallback paths within the 24-image budget.
+        candidates.sort_by_key(|c| c.priority);
+        candidates.truncate(20);
+        evaluate_candidates(candidates, &mut download, &mut seen).await
     };
+    if let Ok(Ok(found)) = tokio::time::timeout(Duration::from_secs(75), primary).await {
+        return Ok(found);
+    }
+    evaluate_candidates(conventional_icons(&fallback_base), &mut download, &mut seen).await
+}
+
+async fn evaluate_candidates<F, Fut>(
+    mut candidates: Vec<Candidate>,
+    download: &mut F,
+    seen: &mut HashSet<String>,
+) -> Result<Discovered>
+where
+    F: FnMut(Url, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Download>>,
+{
     candidates.sort_by_key(|c| c.priority);
-    let mut seen = HashSet::new();
-    candidates.retain(|c| seen.insert(c.url.to_string()));
     // Evaluate actual bytes, not the HTML's claimed type or size. Prefer a
     // higher resolution image within each source category (up to our target).
     let mut best: Option<(u8, u32, Discovered)> = None;
@@ -253,7 +299,10 @@ async fn discover_inner(website: &str, explicit: Option<&str>) -> Result<Discove
         if best.as_ref().is_some_and(|(p, _, _)| c.priority > *p) {
             break;
         }
-        let Ok(data) = fetch(c.url, 8 * 1024 * 1024).await else {
+        if !seen.insert(c.url.to_string()) {
+            continue;
+        }
+        let Ok(data) = download(c.url, 8 * 1024 * 1024).await else {
             continue;
         };
         let Ok(image) = tokio::task::spawn_blocking(move || images::prepare(data.bytes)).await?
@@ -279,6 +328,103 @@ async fn discover_inner(website: &str, explicit: Option<&str>) -> Result<Discove
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn png() -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(16, 16)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    #[tokio::test]
+    async fn conventional_icons_work_when_page_fails_or_is_not_utf8() {
+        for invalid_utf8 in [false, true] {
+            let mut calls = Vec::new();
+            let logo = discover_with_fetch("https://example.com/shop", None, |url, _| {
+                calls.push(url.path().to_owned());
+                let bytes = match url.path() {
+                    "/shop" if invalid_utf8 => Some(vec![0xff]),
+                    "/favicon.ico" => Some(png()),
+                    _ => None,
+                };
+                std::future::ready(
+                    bytes
+                        .map(|bytes| Download { bytes, url })
+                        .context("mock HTTP failure"),
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(logo.source_url, "https://example.com/favicon.ico");
+            assert_eq!(logo.kind, LogoKind::Favicon);
+            assert_eq!(
+                calls,
+                [
+                    "/shop",
+                    "/apple-touch-icon.png",
+                    "/apple-touch-icon-precomposed.png",
+                    "/favicon.ico",
+                    "/favicon.png"
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_logos_win_and_broken_declared_images_fall_back_on_redirect_origin() {
+        for broken in [false, true] {
+            let mut calls = Vec::new();
+            let logo = discover_with_fetch("https://example.com/shop", None, |url, _| {
+                calls.push(url.to_string());
+                let result = if url.path() == "/shop" {
+                    Ok(Download {
+                        bytes: br#"<link rel="icon" href="/declared.png">"#.to_vec(),
+                        url: Url::parse("https://final.example/store").unwrap(),
+                    })
+                } else if url.path() == "/declared.png" {
+                    Ok(Download {
+                        bytes: if broken {
+                            b"not an image".to_vec()
+                        } else {
+                            png()
+                        },
+                        url,
+                    })
+                } else if url.path() == "/apple-touch-icon.png" {
+                    Ok(Download { bytes: png(), url })
+                } else {
+                    Err(anyhow::anyhow!("mock missing file"))
+                };
+                std::future::ready(result)
+            })
+            .await
+            .unwrap();
+            if broken {
+                assert_eq!(
+                    logo.source_url,
+                    "https://final.example/apple-touch-icon.png"
+                );
+                assert_eq!(logo.kind, LogoKind::TouchIcon);
+            } else {
+                assert_eq!(logo.source_url, "https://final.example/declared.png");
+                assert_eq!(calls.len(), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_image_does_not_fetch_page_or_guessed_icons() {
+        let mut calls = Vec::new();
+        let result =
+            discover_with_fetch("https://example.com/shop", Some("/brand.png"), |url, _| {
+                calls.push(url.path().to_owned());
+                std::future::ready(Err(anyhow::anyhow!("mock image failure")))
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls, ["/brand.png"]);
+    }
+
     #[test]
     fn orders_official_sources_and_resolves_relative_links() {
         let html = r#"<script type="application/ld+json">{"@graph":[{"@type":"Organization","logo":{"url":"/brand.svg"}}]}</script><link rel="apple-touch-icon" href="touch.png"><link rel="shortcut icon" href="/favicon.ico"><link rel="manifest" href="site.webmanifest">"#;
